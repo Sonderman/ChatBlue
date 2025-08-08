@@ -1,0 +1,16 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+-This is a flutter project.
+
+-Always examine [project_overview.md](mdc:project_overview.md) file before starting a task. Also update this file if needed.
+
+-UI language in this project is English by default.
+
+-You should always generate well-maintainable code in this project.
+
+-You do not need to suggest "flutter run" command in response.
+
+-When requested a new feature or fixes, you should always check that the existing features are not effected or broken after your modifications in this project.
