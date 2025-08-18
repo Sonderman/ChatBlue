@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
-import 'package:chatblue/services/bt_classic_service.dart';
+import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/screens/chat_screen.dart';
 
 /// High-level GetX controller that orchestrates Bluetooth Classic operations
@@ -63,6 +63,7 @@ class BtController extends GetxController {
       if (kDebugMode) {
         print('Socket connected to ${remote.address}');
       }
+
       if (!_chatOpen) {
         _chatOpen = true;
         Get.to(() => const ChatScreen());
@@ -176,10 +177,12 @@ class BtController extends GetxController {
     // Temporarily extend callbacks to resolve this connect attempt
     final prevConnected = _service.onSocketConnected;
     final prevDisconnected = _service.onSocketDisconnected;
+    final prevError = _service.onSocketError;
 
     void restore() {
       _service.onSocketConnected = prevConnected;
       _service.onSocketDisconnected = prevDisconnected;
+      _service.onSocketError = prevError;
     }
 
     _service.onSocketConnected = (remote) {
@@ -192,6 +195,18 @@ class BtController extends GetxController {
 
     _service.onSocketDisconnected = (reason) {
       prevDisconnected?.call(reason);
+      if (!completer.isCompleted) {
+        completer.complete(false);
+      }
+    };
+
+    // If any socket error occurs during the connection attempt,
+    // immediately fail this attempt without waiting.
+    _service.onSocketError = (message) {
+      if (kDebugMode) {
+        print('Socket error during connect: $message');
+      }
+      prevError?.call(message);
       if (!completer.isCompleted) {
         completer.complete(false);
       }
@@ -213,7 +228,7 @@ class BtController extends GetxController {
 
     try {
       final bool result = await completer.future.timeout(
-        const Duration(seconds: 15),
+        const Duration(seconds: 10),
         onTimeout: () async => await _service.isConnected(),
       );
       restore();

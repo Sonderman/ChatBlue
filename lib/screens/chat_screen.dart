@@ -1,13 +1,13 @@
 // ChatScreen for displaying and sending chat messages over Bluetooth.
 // Uses GetX for state management.
 
+import 'dart:io';
 import 'package:auto_size_text/auto_size_text.dart';
 import 'package:chatblue/controllers/chatscreen_controller.dart';
+import 'package:chatblue/core/models/message_model.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import 'package:chatblue/models/message_model.dart';
 import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
-import 'dart:typed_data';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sizer/sizer.dart';
 
@@ -24,13 +24,14 @@ class ChatScreen extends StatelessWidget {
           children: [
             AutoSizeText(
               controller.btController.connectedDevice?.name ??
-                  controller.btController.connectedDevice!.address,
+                  controller.btController.connectedDevice?.address ??
+                  controller.chatSession.name,
               maxLines: 1,
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             ),
             Obx(
               () => Text(
-                controller.isConnected.value ? 'Connected' : 'Disconnected',
+                controller.isConnected.value ? 'Connected' : 'Not Connected !',
                 style: TextStyle(
                   fontSize: 11,
                   color: controller.isConnected.value ? Colors.green : Colors.redAccent,
@@ -51,6 +52,7 @@ class ChatScreen extends StatelessWidget {
                 textConfirm: 'Clear',
                 onConfirm: () {
                   controller.messages.clear();
+                  controller.saveChatSession();
                   Get.back();
                 },
               );
@@ -58,70 +60,101 @@ class ChatScreen extends StatelessWidget {
           ),
         ],
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: Obx(
-              () => ListView.builder(
-                reverse: true,
-                itemCount: controller.messages.length,
-                itemBuilder: (context, index) {
-                  final MessageModel msg = controller.messages[index];
-                  final bubbleColor = msg.isSentByMe ? Colors.blue : Colors.grey;
-                  final align = msg.isSentByMe ? Alignment.centerRight : Alignment.centerLeft;
-                  final radius = BorderRadius.only(
-                    topLeft: const Radius.circular(16),
-                    topRight: const Radius.circular(16),
-                    bottomLeft: msg.isSentByMe
-                        ? const Radius.circular(16)
-                        : const Radius.circular(4),
-                    bottomRight: msg.isSentByMe
-                        ? const Radius.circular(4)
-                        : const Radius.circular(16),
-                  );
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(
+              child: Obx(
+                () => ListView.builder(
+                  reverse: true,
+                  itemCount: controller.messages.length,
+                  itemBuilder: (context, index) {
+                    final MessageModel msg = controller.messages[index];
+                    final bubbleColor = msg.isSentByMe ? Colors.blue : Colors.grey;
+                    final align = msg.isSentByMe ? Alignment.centerRight : Alignment.centerLeft;
+                    final radius = BorderRadius.only(
+                      topLeft: const Radius.circular(16),
+                      topRight: const Radius.circular(16),
+                      bottomLeft: msg.isSentByMe
+                          ? const Radius.circular(16)
+                          : const Radius.circular(4),
+                      bottomRight: msg.isSentByMe
+                          ? const Radius.circular(4)
+                          : const Radius.circular(16),
+                    );
 
-                  Widget bubbleContent;
-                  if (msg.imageBytes != null) {
-                    final showProgress = msg.isTransferring && (msg.transferKind == 'bytes');
-                    bubbleContent = GestureDetector(
-                      onTap: showProgress
-                          ? null
-                          : () {
-                              Get.to(() => _ImagePreviewScreen(bytes: msg.imageBytes!));
-                            },
-                      child: IntrinsicWidth(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            // Compact image thumbnail: limit width and height to keep bubbles small
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(12),
-                              child: ConstrainedBox(
-                                constraints: BoxConstraints(maxWidth: 45.w, maxHeight: 30.h),
-                                child: Image.memory(msg.imageBytes!, fit: BoxFit.cover),
-                              ),
-                            ),
-                            if (showProgress)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 6),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                                  children: [
-                                    LinearProgressIndicator(
-                                      value: ((msg.transferCurrent ?? 0) / (msg.transferTotal ?? 1))
-                                          .clamp(0, 1)
-                                          .toDouble(),
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      '${msg.isSentByMe ? 'Sending' : 'Receiving'} ${(msg.transferCurrent ?? 0)}/${(msg.transferTotal ?? 0)} bytes',
-                                      textAlign: TextAlign.right,
-                                      style: const TextStyle(fontSize: 10, color: Colors.black54),
-                                    ),
-                                  ],
+                    Widget bubbleContent;
+                    if (msg.imagePath != null) {
+                      final showProgress = msg.isTransferring && (msg.transferKind == 'bytes');
+                      bubbleContent = GestureDetector(
+                        onTap: showProgress
+                            ? null
+                            : () {
+                                Get.to(() => _ImagePreviewScreen(path: msg.imagePath!));
+                              },
+                        child: IntrinsicWidth(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.end,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // Compact image thumbnail: limit width and height to keep bubbles small
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(12),
+                                child: ConstrainedBox(
+                                  constraints: BoxConstraints(maxWidth: 45.w, maxHeight: 30.h),
+                                  child: Image.file(File(msg.imagePath!), fit: BoxFit.cover),
                                 ),
                               ),
+                              if (showProgress)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 6),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                                    children: [
+                                      LinearProgressIndicator(
+                                        value:
+                                            ((msg.transferCurrent ?? 0) / (msg.transferTotal ?? 1))
+                                                .clamp(0, 1)
+                                                .toDouble(),
+                                      ),
+                                      const SizedBox(height: 2),
+                                      Text(
+                                        '${msg.isSentByMe ? 'Sending' : 'Receiving'} ${(msg.transferCurrent ?? 0)}/${(msg.transferTotal ?? 0)} bytes',
+                                        textAlign: TextAlign.right,
+                                        style: const TextStyle(fontSize: 10, color: Colors.black54),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: Text(
+                                  _formatTimestamp(msg.timestamp),
+                                  style: const TextStyle(fontSize: 10, color: Colors.black45),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    } else {
+                      final bool showProgress = msg.isTransferring && (msg.transferKind == 'bytes');
+                      if (showProgress) {
+                        bubbleContent = Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            LinearProgressIndicator(
+                              value: ((msg.transferCurrent ?? 0) / (msg.transferTotal ?? 1))
+                                  .clamp(0, 1)
+                                  .toDouble(),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${msg.isSentByMe ? 'Sending' : 'Receiving'} ${(msg.transferCurrent ?? 0)}/${(msg.transferTotal ?? 0)} bytes (${((msg.transferTotal ?? 0) == 0 ? 0 : ((msg.transferCurrent ?? 0) / (msg.transferTotal ?? 1) * 100)).toStringAsFixed(0)}%)',
+                              textAlign: TextAlign.right,
+                              style: const TextStyle(fontSize: 10, color: Colors.black54),
+                            ),
                             Align(
                               alignment: Alignment.centerRight,
                               child: Text(
@@ -130,99 +163,76 @@ class ChatScreen extends StatelessWidget {
                               ),
                             ),
                           ],
+                        );
+                      } else {
+                        bubbleContent = Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SelectableText(msg.text, style: const TextStyle(height: 1.2)),
+                            const SizedBox(height: 4),
+                            Text(
+                              _formatTimestamp(msg.timestamp),
+                              style: const TextStyle(
+                                fontSize: 10,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        );
+                      }
+                    }
+
+                    return Align(
+                      alignment: align,
+                      child: Container(
+                        margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: bubbleColor.withOpacity(msg.imagePath != null ? 0.15 : 1.0),
+                          borderRadius: radius,
                         ),
+                        child: bubbleContent,
                       ),
                     );
-                  } else {
-                    final bool showProgress = msg.isTransferring && (msg.transferKind == 'bytes');
-                    if (showProgress) {
-                      bubbleContent = Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          LinearProgressIndicator(
-                            value: ((msg.transferCurrent ?? 0) / (msg.transferTotal ?? 1))
-                                .clamp(0, 1)
-                                .toDouble(),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '${msg.isSentByMe ? 'Sending' : 'Receiving'} ${(msg.transferCurrent ?? 0)}/${(msg.transferTotal ?? 0)} bytes (${((msg.transferTotal ?? 0) == 0 ? 0 : ((msg.transferCurrent ?? 0) / (msg.transferTotal ?? 1) * 100)).toStringAsFixed(0)}%)',
-                            textAlign: TextAlign.right,
-                            style: const TextStyle(fontSize: 10, color: Colors.black54),
-                          ),
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: Text(
-                              _formatTimestamp(msg.timestamp),
-                              style: const TextStyle(fontSize: 10, color: Colors.black45),
-                            ),
-                          ),
-                        ],
-                      );
-                    } else {
-                      bubbleContent = Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          SelectableText(msg.text, style: const TextStyle(height: 1.2)),
-                          const SizedBox(height: 4),
-                          Text(
-                            _formatTimestamp(msg.timestamp),
-                            style: const TextStyle(fontSize: 10, color: Colors.black45),
-                          ),
-                        ],
-                      );
-                    }
-                  }
-
-                  return Align(
-                    alignment: align,
-                    child: Container(
-                      margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 8),
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: bubbleColor.withOpacity(msg.imageBytes != null ? 0.15 : 1.0),
-                        borderRadius: radius,
-                      ),
-                      child: bubbleContent,
-                    ),
-                  );
-                },
+                  },
+                ),
               ),
             ),
-          ),
-
-          Padding(
-            padding: EdgeInsets.all(8),
-            child: Row(
-              children: [
-                IconButton(
-                  icon: Icon(Icons.image),
-                  onPressed: () async {
-                    final c = Get.find<ChatScreenController>();
-                    await c.showImageSourceSheet();
-                  },
+            if (controller.isConnected.value)
+              Padding(
+                padding: EdgeInsets.all(8),
+                child: Row(
+                  children: [
+                    IconButton(
+                      icon: Icon(Icons.image),
+                      onPressed: () async {
+                        final c = Get.find<ChatScreenController>();
+                        await c.showImageSourceSheet();
+                      },
+                    ),
+                    Expanded(
+                      child: TextField(
+                        controller: controller.textController,
+                        decoration: InputDecoration(hintText: 'Type a message'),
+                      ),
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.send),
+                      tooltip: 'Send',
+                      onPressed: () {
+                        if (controller.isConnected.value &&
+                            controller.textController.text.isNotEmpty) {
+                          controller.sendTextMessage();
+                        }
+                      },
+                    ),
+                  ],
                 ),
-                Expanded(
-                  child: TextField(
-                    controller: controller.textController,
-                    decoration: InputDecoration(hintText: 'Type a message'),
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(Icons.send),
-                  tooltip: 'Send',
-                  onPressed: () {
-                    if (controller.isConnected.value && controller.textController.text.isNotEmpty) {
-                      controller.sendTextMessage();
-                    }
-                  },
-                ),
-              ],
-            ),
-          ),
-        ],
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -237,8 +247,8 @@ class ChatScreen extends StatelessWidget {
 }
 
 class _ImagePreviewScreen extends StatelessWidget {
-  const _ImagePreviewScreen({required this.bytes});
-  final Uint8List bytes;
+  const _ImagePreviewScreen({required this.path});
+  final String path;
 
   @override
   Widget build(BuildContext context) {
@@ -279,8 +289,9 @@ class _ImagePreviewScreen extends StatelessWidget {
                   }
                 }
               }
+              final file = File(path);
               final res = await ImageGallerySaverPlus.saveImage(
-                bytes,
+                file.readAsBytesSync(),
                 quality: 95,
                 name: 'chatblue_${DateTime.now().millisecondsSinceEpoch}',
               );
@@ -295,7 +306,7 @@ class _ImagePreviewScreen extends StatelessWidget {
         ],
       ),
       body: Center(
-        child: InteractiveViewer(child: Image.memory(bytes, fit: BoxFit.contain)),
+        child: InteractiveViewer(child: Image.file(File(path), fit: BoxFit.contain)),
       ),
     );
   }

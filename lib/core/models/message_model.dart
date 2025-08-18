@@ -1,13 +1,13 @@
 // Message data class for Bluetooth chat application.
 // This class represents a single chat message with its content, sender status, and timestamp.
 
-import 'dart:typed_data';
+import 'package:hive_ce/hive.dart';
 
-class MessageModel {
+class MessageModel extends HiveObject {
   final String text;
   final bool isSentByMe;
   final DateTime timestamp;
-  final Uint8List? imageBytes;
+  final String? imagePath;
   final bool isTransferring;
   final int? transferCurrent;
   final int? transferTotal;
@@ -17,7 +17,7 @@ class MessageModel {
     required this.text,
     required this.isSentByMe,
     required this.timestamp,
-    this.imageBytes,
+    this.imagePath,
     this.isTransferring = false,
     this.transferCurrent,
     this.transferTotal,
@@ -28,7 +28,7 @@ class MessageModel {
     String? text,
     bool? isSentByMe,
     DateTime? timestamp,
-    Uint8List? imageBytes,
+    String? imagePath,
     bool? isTransferring,
     int? transferCurrent,
     int? transferTotal,
@@ -38,7 +38,7 @@ class MessageModel {
       text: text ?? this.text,
       isSentByMe: isSentByMe ?? this.isSentByMe,
       timestamp: timestamp ?? this.timestamp,
-      imageBytes: imageBytes ?? this.imageBytes,
+      imagePath: imagePath ?? this.imagePath,
       isTransferring: isTransferring ?? this.isTransferring,
       transferCurrent: transferCurrent ?? this.transferCurrent,
       transferTotal: transferTotal ?? this.transferTotal,
@@ -46,20 +46,23 @@ class MessageModel {
     );
   }
 
+  // Convert MessageModel instance to JSON map for serialization
   Map<String, dynamic> toJson() {
     return {
       'text': text,
       'isSentByMe': isSentByMe,
       'timestamp': timestamp.toIso8601String(),
-      // Not serializing imageBytes in this simple model
+      'imagePath': imagePath,
     };
   }
 
+  // Create MessageModel instance from JSON map for deserialization
   factory MessageModel.fromJson(Map<String, dynamic> json) {
     return MessageModel(
-      text: json['text'],
-      isSentByMe: json['isSentByMe'],
-      timestamp: DateTime.parse(json['timestamp']),
+      text: json['text'] ?? '',
+      isSentByMe: json['isSentByMe'] ?? false,
+      timestamp: json['timestamp'] != null ? DateTime.parse(json['timestamp']) : DateTime.now(),
+      imagePath: json['imagePath'],
     );
   }
 }

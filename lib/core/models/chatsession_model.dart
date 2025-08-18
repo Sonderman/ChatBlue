@@ -1,11 +1,12 @@
-import 'package:chatblue/models/message_model.dart';
+import 'package:chatblue/core/models/message_model.dart';
+import 'package:hive_ce/hive.dart';
 
-class ChatSessionModel {
+class ChatSessionModel extends HiveObject {
   final String id;
   final String name;
   final DateTime createdAt;
-  final DateTime updatedAt;
-  final List<MessageModel> messages;
+  DateTime updatedAt;
+  List<MessageModel> messages;
   final Map<String, dynamic> device;
 
   ChatSessionModel({

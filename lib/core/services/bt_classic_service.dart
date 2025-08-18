@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:chatblue/platform/bt_platform_channel.dart';
+import 'package:chatblue/core/platform/bt_platform_channel.dart';
 import 'package:flutter/services.dart';
 
 /// High-level service wrapper over BtPlatformChannel for Bluetooth Classic.

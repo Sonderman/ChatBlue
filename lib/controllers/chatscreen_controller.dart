@@ -1,17 +1,25 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:chatblue/config.dart';
 import 'package:chatblue/controllers/bt_controller.dart';
-import 'package:chatblue/models/message_model.dart';
-import 'package:chatblue/services/bt_classic_service.dart';
+import 'package:chatblue/core/models/chatsession_model.dart';
+import 'package:chatblue/core/models/message_model.dart';
+import 'package:chatblue/core/services/bt_classic_service.dart';
+import 'package:chatblue/core/services/hive_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
+import 'package:chatblue/controllers/home_controller.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:uuid/uuid.dart';
 
 class ChatScreenController extends GetxController {
+  late ChatSessionModel chatSession;
   final RxList<MessageModel> messages = <MessageModel>[].obs;
   final BtController btController = Get.find();
+  final HomeController chatsController = Get.find();
   final TextEditingController textController = TextEditingController();
   RxBool get isConnected => btController.isConnected;
   StreamSubscription<bool>? connectionSubscription;
@@ -23,8 +31,38 @@ class ChatScreenController extends GetxController {
   // Holds bytes for the currently sending image to convert progress bubble into final image
   Uint8List? _pendingOutgoingBytes;
 
+  String? sendingImagePath;
+
   @override
-  void onInit() {
+  void onInit() async {
+    if (Get.arguments is ChatSessionModel) {
+      chatSession = Get.arguments as ChatSessionModel;
+      messages.value = chatSession.messages;
+    } else {
+      final foundSession = await HiveService.to.loadChatSession(
+        btController.connectedDevice?.address ?? Uuid().v4(),
+      );
+      chatSession =
+          foundSession ??
+          ChatSessionModel(
+            id: btController.connectedDevice?.address ?? Uuid().v4(),
+            name:
+                btController.connectedDevice?.name ??
+                btController.connectedDevice?.address ??
+                'Unknown',
+            createdAt: DateTime.now(),
+            updatedAt: DateTime.now(),
+            messages: messages,
+            device: {
+              'name': btController.connectedDevice?.name,
+              'address': btController.connectedDevice?.address,
+              'type': btController.connectedDevice?.type,
+              'rssi': btController.connectedDevice?.rssi,
+            },
+          );
+      messages.value = chatSession.messages;
+    }
+
     // Ensure any pending modal/progress dialog from previous screen is closed
     if (Get.isDialogOpen == true) {
       Get.back();
@@ -36,7 +74,7 @@ class ChatScreenController extends GetxController {
     setupCallbacks();
     _disconnectSubscription = btController.lastDisconnectReason.listen((reason) {
       if (reason != null && reason.isNotEmpty) {
-        Get.snackbar('Disconnected', 'Peer closed the connection ($reason)');
+        Get.snackbar('Disconnected', 'Other device closed the connection');
       }
     });
     super.onInit();
@@ -55,7 +93,7 @@ class ChatScreenController extends GetxController {
   }
 
   void setupCallbacks() {
-    btController.onSocketData((bytes, text, {required String kind}) {
+    btController.onSocketData((bytes, text, {required String kind}) async {
       if (kDebugMode) {
         print('Socket data: $text\n Kind: $kind');
       }
@@ -65,12 +103,19 @@ class ChatScreenController extends GetxController {
             _incomingProgressIndex! >= 0 &&
             _incomingProgressIndex! < messages.length) {
           final int idx = _incomingProgressIndex!;
+          // Persist incoming image to app documents and finalize the bubble
+          final Directory path = await getApplicationDocumentsDirectory();
+          final File file = File('${path.path}/${DateTime.now().millisecondsSinceEpoch}.jpg');
+          await file.writeAsBytes(bytes);
+
           messages[idx] = messages[idx].copyWith(
+            text: "[Image] (${bytes.lengthInBytes} bytes)",
             isSentByMe: false,
             timestamp: DateTime.now(),
-            imageBytes: bytes,
+            imagePath: file.path,
             isTransferring: false,
           );
+          saveChatSession();
           // Completed: clear pointer to avoid further updates
           _incomingProgressIndex = null;
         } else {
@@ -79,26 +124,40 @@ class ChatScreenController extends GetxController {
             (m) => m.isTransferring == true && m.transferKind == 'bytes' && m.isSentByMe == false,
           );
           if (foundIdx != -1) {
+            // Persist incoming image and convert the found progress bubble
+            final Directory path = await getApplicationDocumentsDirectory();
+            final File file = File('${path.path}/${DateTime.now().millisecondsSinceEpoch}.jpg');
+            await file.writeAsBytes(bytes);
             messages[foundIdx] = messages[foundIdx].copyWith(
+              text: "[Image] (${bytes.lengthInBytes} bytes)",
               isSentByMe: false,
               timestamp: DateTime.now(),
-              imageBytes: bytes,
+              imagePath: file.path,
               isTransferring: false,
             );
+            saveChatSession();
             _incomingProgressIndex = null;
           } else if (messages.isNotEmpty &&
               messages[0].isTransferring == true &&
               messages[0].transferKind == 'bytes' &&
               messages[0].isSentByMe == false) {
             // Fallback to top bubble if it looks like an incoming transfer
+            final Directory path = await getApplicationDocumentsDirectory();
+            final File file = File('${path.path}/${DateTime.now().millisecondsSinceEpoch}.jpg');
+            await file.writeAsBytes(bytes);
             messages[0] = messages[0].copyWith(
+              text: "[Image] (${bytes.lengthInBytes} bytes)",
               isSentByMe: false,
               timestamp: DateTime.now(),
-              imageBytes: bytes,
+              imagePath: file.path,
               isTransferring: false,
             );
+            saveChatSession();
             _incomingProgressIndex = null;
           } else {
+            final Directory path = await getApplicationDocumentsDirectory();
+            final File file = File('${path.path}/${DateTime.now().millisecondsSinceEpoch}.jpg');
+            await file.writeAsBytes(bytes);
             // If no progress bubble exists (edge case), insert a complete image message
             messages.insert(
               0,
@@ -106,9 +165,11 @@ class ChatScreenController extends GetxController {
                 text: "[Image] (${bytes.lengthInBytes} bytes)",
                 isSentByMe: false,
                 timestamp: DateTime.now(),
-                imageBytes: bytes,
+                imagePath: file.path,
               ),
             );
+            saveChatSession();
+
             // Reindex pointers due to head insertion
             if (_incomingProgressIndex != null) {
               _incomingProgressIndex = _incomingProgressIndex! + 1;
@@ -119,7 +180,10 @@ class ChatScreenController extends GetxController {
           }
         }
       } else {
-        messages.insert(0, MessageModel(text: text, isSentByMe: false, timestamp: DateTime.now()));
+        final msg = MessageModel(text: text, isSentByMe: false, timestamp: DateTime.now());
+        messages.insert(0, msg);
+        saveChatSession();
+
         // Reindex any existing progress pointers when a new incoming text message is added
         if (_incomingProgressIndex != null) {
           _incomingProgressIndex = _incomingProgressIndex! + 1;
@@ -160,6 +224,7 @@ class ChatScreenController extends GetxController {
                 transferKind: 'bytes',
               ),
             );
+
             // Reindex incoming pointer due to head insertion
             if (_incomingProgressIndex != null) {
               _incomingProgressIndex = _incomingProgressIndex! + 1;
@@ -184,12 +249,14 @@ class ChatScreenController extends GetxController {
               text: bytesToAttach != null
                   ? "[Image] (${bytesToAttach.lengthInBytes} bytes)"
                   : messages[idx].text,
-              imageBytes: bytesToAttach ?? messages[idx].imageBytes,
+              imagePath: sendingImagePath ?? messages[idx].imagePath,
               isTransferring: false,
               transferCurrent: state.total,
               transferTotal: state.total,
               transferKind: 'bytes',
             );
+            saveChatSession();
+            sendingImagePath = null;
             _pendingOutgoingBytes = null;
             _outgoingProgressIndex = null;
           }
@@ -251,10 +318,14 @@ class ChatScreenController extends GetxController {
   void sendTextMessage() {
     if (isConnected.value) {
       btController.sendMessage(textController.text);
-      messages.insert(
-        0,
-        MessageModel(text: textController.text, isSentByMe: true, timestamp: DateTime.now()),
+      final msg = MessageModel(
+        text: textController.text,
+        isSentByMe: true,
+        timestamp: DateTime.now(),
       );
+      messages.insert(0, msg);
+      saveChatSession();
+
       // Reindex existing progress pointers due to head insertion
       if (_incomingProgressIndex != null) {
         _incomingProgressIndex = _incomingProgressIndex! + 1;
@@ -264,6 +335,12 @@ class ChatScreenController extends GetxController {
       }
       textController.clear();
     }
+  }
+
+  Future<void> saveChatSession() async {
+    chatSession.messages = messages.toList();
+    chatSession.updatedAt = DateTime.now();
+    await HiveService.to.saveChatSession(chatSession);
   }
 
   /// Remove a message at the given index from the shared message list
@@ -352,6 +429,7 @@ class ChatScreenController extends GetxController {
     if (file == null) return;
 
     Uint8List bytes = await file.readAsBytes();
+    sendingImagePath = file.path;
     try {
       final compressed = await FlutterImageCompress.compressWithList(bytes, quality: 70);
       if (compressed.isNotEmpty) {
