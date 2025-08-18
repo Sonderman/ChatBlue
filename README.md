@@ -2,7 +2,14 @@
 
 ![ChatBlue Logo](assets/chatblue_logo.png)
 
-Bluetooth Classic tabanlı, tamamen çevrimdışı çalışan bir uçtan uca sohbet uygulaması. İnternet ve yerel ağların kullanılamadığı, özellikle deprem gibi afet senaryolarında kısa mesafede cihazdan cihaza iletişim kurmayı hedefler.
+<table>
+  <tr>
+    <td><img src="media/screenshots/1.png" alt="Screenshot 1" height="300"/></td>
+    <td><img src="media/screenshots/2.png" alt="Screenshot 2" height="300"/></td>
+  </tr>
+</table>
+
+A Bluetooth Classic-based, fully offline peer-to-peer chat application. It aims to facilitate short-range, device-to-device communication, particularly in disaster scenarios like earthquakes, where the internet and local networks are unavailable.
 
 > Note: This repository targets Android (Bluetooth Classic via RFCOMM). iOS support is not configured in this branch.
 
