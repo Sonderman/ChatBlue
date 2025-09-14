@@ -1,17 +1,18 @@
 // DeviceScanScreen for discovering nearby Bluetooth devices and connecting to them.
 // Uses GetX for state management.
 import 'package:chatblue/controllers/bt_controller.dart';
-import 'package:chatblue/screens/chat_screen.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
+import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
-class DeviceScanScreen extends StatelessWidget {
-  const DeviceScanScreen({super.key});
+class BluetoothScanScreen extends StatelessWidget {
+  const BluetoothScanScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
     return GetBuilder<BtController>(
+      init: BtController(),
       builder: (controller) {
         return Scaffold(
           appBar: AppBar(title: Text('Discover & Connect'), centerTitle: true),
@@ -94,7 +95,7 @@ class DeviceScanScreen extends StatelessWidget {
                                       }
 
                                       if (isConnected && controller.isConnected.value) {
-                                        Get.to(() => ChatScreen());
+                                        Get.to(() => BChatScreen());
                                       }
                                     },
                                   );
@@ -126,7 +127,7 @@ class DeviceScanScreen extends StatelessWidget {
                                         }
 
                                         if (connected && controller.isConnected.value) {
-                                          Get.to(() => ChatScreen());
+                                          Get.to(() => BChatScreen());
                                         } else {
                                           Get.snackbar(
                                             'Could not connect!',

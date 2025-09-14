@@ -8,16 +8,24 @@ ChatBlue is a Flutter-based Bluetooth Classic chat application. The app enables 
 - **State Management**: GetX
 - **Local Storage**: Hive (CE)
 - **Bluetooth (Classic)**: Custom Android native implementation via Platform Channels
+- **Wi‑Fi Direct (P2P)**: Custom Android native implementation via Platform Channels
 - **Platform Channels**:
-  - MethodChannel: `com.sondermium.chatblue/bt`
-  - EventChannels:
-    - Scan events: `com.sondermium.chatblue/scan` (started/device/finished)
-    - Socket events: `com.sondermium.chatblue/socket` (connected/disconnected/data)
+  - Bluetooth
+    - MethodChannel: `com.sondermium.chatblue/bt`
+    - EventChannels:
+      - Scan: `com.sondermium.chatblue/scan`
+      - Socket: `com.sondermium.chatblue/socket`
+  - Wi‑Fi Direct
+    - MethodChannel: `com.sondermium.chatblue/wd`
+    - EventChannels:
+      - Scan: `com.sondermium.chatblue/wd_scan` (started/peer/finished)
+      - Socket: `com.sondermium.chatblue/wd_socket` (connected/disconnected/data/progress)
 - **Data Models**:
   - `ChatSessionModel` and `MessageModel` (HiveObject) in `lib/core/models`
 - **Services**:
   - `HiveService` for Hive initialization and CRUD on chat sessions (`lib/core/services/hive_service.dart`)
   - `BtClassicService` for Bluetooth operations (`lib/core/services/bt_classic_service.dart`) backed by `lib/core/platform/bt_platform_channel.dart`
+  - `WifiDirectService` for Wi‑Fi Direct operations (`lib/core/services/wd_service.dart`) backed by `lib/core/platform/wd_platform_channel.dart`
 - **Controllers**:
   - `BtController` orchestrates scan/connect/socket lifecycle and exposes reactive states
   - `HomeController` manages persisted chat sessions list (load/refresh/delete)
@@ -52,6 +60,7 @@ ChatBlue is a Flutter-based Bluetooth Classic chat application. The app enables 
 
 ## Notable Implementation Details
 - Android Bluetooth Classic is implemented natively in Kotlin (`BluetoothClassicManager`) and exposed via platform channels. Discovery, discoverable mode, paired devices, RFCOMM server/client, and string/byte transfer are supported.
+- Android Wi‑Fi Direct is implemented natively in Kotlin (`WifiDirectManager`) and exposed via platform channels. Discovery, group creation, peer connection, and framed TCP socket I/O (text/bytes) with transfer progress are supported.
 - `HiveService` initializes Hive and persists chat sessions in a `chat_sessions` box. Sessions are keyed by device address (or a generated id) and sorted by `updatedAt`.
 - Image messages are transferred as bytes with progress bubbles. Incoming bytes are saved to application documents directory and the bubble is finalized with an `imagePath`. Outgoing progress bubbles are converted to final image bubbles once transfer completes.
 - `ChatScreen` shows connection status, prevents sending when disconnected, supports clearing the conversation, and allows full-screen image preview with optional save-to-gallery (runtime permissions handled per platform).
@@ -75,6 +84,7 @@ ChatBlue is a Flutter-based Bluetooth Classic chat application. The app enables 
 - Improved `DeviceScanScreen` UI/UX (button states, paired devices tab, loading dialog, connection failure snackbar).
 - `BtController` now handles connection attempt errors immediately and uses a 10-second timeout for connections.
 - Android Gradle updates: compile/target SDKs, minSdk, and Java/Kotlin 17.
+- Android Manifest: added `NEARBY_WIFI_DEVICES` (API 33+), `ACCESS_FINE_LOCATION` (<33), and `INTERNET` for Wi‑Fi Direct TCP socket.
 - iOS: Runner workspace/storyboards/Info.plist and asset catalog files were removed; iOS target is currently not configured in this branch and would need re-setup if required.
 
 This overview will be kept up-to-date as the project evolves. 

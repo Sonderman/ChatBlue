@@ -18,9 +18,13 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
 
     private lateinit var bluetoothManager: BluetoothClassicManager
+    private lateinit var wifiDirectManager: WifiDirectManager
     private lateinit var methodChannel: MethodChannel
     private lateinit var scanEventChannel: EventChannel
     private lateinit var socketEventChannel: EventChannel
+    private lateinit var wdMethodChannel: MethodChannel
+    private lateinit var wdScanEventChannel: EventChannel
+    private lateinit var wdSocketEventChannel: EventChannel
 
     private var scanEventSink: EventChannel.EventSink? = null
     private var socketEventSink: EventChannel.EventSink? = null
@@ -37,6 +41,9 @@ class MainActivity : FlutterActivity() {
         super.onCreate(savedInstanceState)
         if (!::bluetoothManager.isInitialized) {
             bluetoothManager = BluetoothClassicManager(this)
+        }
+        if (!::wifiDirectManager.isInitialized) {
+            wifiDirectManager = WifiDirectManager(this)
         }
     }
 
@@ -67,19 +74,32 @@ class MainActivity : FlutterActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_PERMISSIONS) {
-            val resultMap = mutableMapOf<String, Boolean>()
-            for (i in permissions.indices) {
-                val perm = permissions[i]
-                val granted = grantResults.getOrNull(i) == PackageManager.PERMISSION_GRANTED
-                resultMap[perm] = granted
+        when (requestCode) {
+            REQUEST_PERMISSIONS -> {
+                val resultMap = mutableMapOf<String, Boolean>()
+                for (i in permissions.indices) {
+                    val perm = permissions[i]
+                    val granted = grantResults.getOrNull(i) == PackageManager.PERMISSION_GRANTED
+                    resultMap[perm] = granted
+                }
+                val allGranted = resultMap.values.all { it }
+                pendingPermissionResult?.success(mapOf(
+                    "granted" to allGranted,
+                    "details" to resultMap
+                ))
+                pendingPermissionResult = null
             }
-            val allGranted = resultMap.values.all { it }
-            pendingPermissionResult?.success(mapOf(
-                "granted" to allGranted,
-                "details" to resultMap
-            ))
-            pendingPermissionResult = null
+            REQUEST_WD_PERMISSIONS -> {
+                val resultMap = mutableMapOf<String, Boolean>()
+                for (i in permissions.indices) {
+                    val perm = permissions[i]
+                    val granted = grantResults.getOrNull(i) == PackageManager.PERMISSION_GRANTED
+                    resultMap[perm] = granted
+                }
+                val allGranted = resultMap.values.all { it }
+                pendingWdPermissionResult?.success(mapOf("granted" to allGranted, "details" to resultMap))
+                pendingWdPermissionResult = null
+            }
         }
     }
 
@@ -87,11 +107,17 @@ class MainActivity : FlutterActivity() {
         if (!::bluetoothManager.isInitialized) {
             bluetoothManager = BluetoothClassicManager(this)
         }
+        if (!::wifiDirectManager.isInitialized) {
+            wifiDirectManager = WifiDirectManager(this)
+        }
         super.configureFlutterEngine(flutterEngine)
 
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/bt")
         scanEventChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/scan")
         socketEventChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/socket")
+        wdMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/wd")
+        wdScanEventChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/wd_scan")
+        wdSocketEventChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/wd_socket")
 
         bluetoothManager.setScanCallbacks(
             onStarted = {
@@ -159,6 +185,10 @@ class MainActivity : FlutterActivity() {
 
         setupMethodChannelHandlers()
         setupEventChannels()
+
+        setupWdCallbacks()
+        setupWdMethodChannelHandlers()
+        setupWdEventChannels()
     }
 
     private fun setupMethodChannelHandlers() {
@@ -285,6 +315,126 @@ class MainActivity : FlutterActivity() {
         })
     }
 
+    private fun setupWdCallbacks() {
+        wifiDirectManager.setScanCallbacks(
+            onStarted = {
+                runOnUiThread { wdScanEventSink?.success(mapOf("event" to "started")) }
+            },
+            onPeerFound = { peer ->
+                runOnUiThread { wdScanEventSink?.success(mapOf("event" to "peer", "data" to peer)) }
+            },
+            onFinished = {
+                runOnUiThread { wdScanEventSink?.success(mapOf("event" to "finished")) }
+            },
+            onError = { message ->
+                runOnUiThread { wdScanEventSink?.error("WD_SCAN_ERROR", message, null) }
+            }
+        )
+
+        wifiDirectManager.setSocketCallbacks(
+            onConnected = { remote ->
+                runOnUiThread { wdSocketEventSink?.success(mapOf("event" to "connected", "remote" to remote)) }
+            },
+            onDisconnected = { reason ->
+                runOnUiThread { wdSocketEventSink?.success(mapOf("event" to "disconnected", "reason" to reason)) }
+            },
+            onBytesReceived = { bytes ->
+                runOnUiThread { wdSocketEventSink?.success(mapOf("event" to "data", "kind" to "bytes", "bytes" to bytes, "string" to "")) }
+            },
+            onError = { message ->
+                runOnUiThread { wdSocketEventSink?.error("WD_SOCKET_ERROR", message, null) }
+            },
+            onTextReceived = { text ->
+                runOnUiThread { wdSocketEventSink?.success(mapOf("event" to "data", "kind" to "text", "bytes" to text.toByteArray(Charsets.UTF_8), "string" to text)) }
+            },
+            onProgress = { direction, current, total, kind ->
+                runOnUiThread {
+                    wdSocketEventSink?.success(
+                        mapOf(
+                            "event" to "progress",
+                            "direction" to direction,
+                            "current" to current,
+                            "total" to total,
+                            "kind" to kind
+                        )
+                    )
+                }
+            }
+        )
+    }
+
+    private var wdScanEventSink: EventChannel.EventSink? = null
+    private var wdSocketEventSink: EventChannel.EventSink? = null
+
+    private fun setupWdEventChannels() {
+        wdScanEventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                wdScanEventSink = events
+            }
+            override fun onCancel(arguments: Any?) { wdScanEventSink = null }
+        })
+        wdSocketEventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                wdSocketEventSink = events
+            }
+            override fun onCancel(arguments: Any?) { wdSocketEventSink = null }
+        })
+    }
+
+    private fun setupWdMethodChannelHandlers() {
+        wdMethodChannel.setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
+            when (call.method) {
+                "isWifiP2pSupported" -> {
+                    result.success(wifiDirectManager.isP2pSupported())
+                }
+                "requestWifiDirectPermissions" -> {
+                    val needed = requiredWdRuntimePermissions()
+                        .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+                        .toTypedArray()
+                    if (needed.isEmpty()) {
+                        result.success(mapOf("granted" to true, "details" to emptyMap<String, Boolean>()))
+                    } else {
+                        pendingWdPermissionResult = result
+                        androidx.core.app.ActivityCompat.requestPermissions(this, needed, REQUEST_WD_PERMISSIONS)
+                    }
+                }
+                "startDiscovery" -> { wifiDirectManager.startDiscovery(); result.success(true) }
+                "stopDiscovery" -> { wifiDirectManager.stopDiscovery(); result.success(true) }
+                "getDiscoveredPeers" -> { result.success(wifiDirectManager.getDiscoveredPeers()) }
+                "clearDiscoveredPeers" -> { wifiDirectManager.clearDiscoveredPeers(); result.success(true) }
+                "createGroup" -> { wifiDirectManager.createGroup(); result.success(true) }
+                "removeGroup" -> { wifiDirectManager.removeGroup(); result.success(true) }
+                "connect" -> {
+                    val addr: String? = call.argument("deviceAddress")
+                    if (addr.isNullOrBlank()) result.error("ARG_ERROR", "'deviceAddress' is required", null)
+                    else { wifiDirectManager.connect(addr); result.success(true) }
+                }
+                "disconnect" -> { wifiDirectManager.disconnect(); result.success(true) }
+                "isConnected" -> { result.success(wifiDirectManager.isConnected()) }
+                "sendString" -> {
+                    val text: String? = call.argument("text")
+                    if (text == null) result.error("ARG_ERROR", "'text' is required", null) else { wifiDirectManager.sendText(text); result.success(true) }
+                }
+                "sendBytes" -> {
+                    val data: ByteArray? = call.argument("bytes")
+                    if (data == null) result.error("ARG_ERROR", "'bytes' is required", null) else { wifiDirectManager.sendRawBytes(data); result.success(true) }
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private var pendingWdPermissionResult: MethodChannel.Result? = null
+    private val REQUEST_WD_PERMISSIONS = 2001
+
+    private fun requiredWdRuntimePermissions(): List<String> {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            listOf(android.Manifest.permission.NEARBY_WIFI_DEVICES)
+        } else {
+            listOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+
     private fun requiredRuntimePermissions(): List<String> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             listOf(
@@ -302,5 +452,6 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         super.onDestroy()
         bluetoothManager.dispose()
+        wifiDirectManager.dispose()
     }
 }

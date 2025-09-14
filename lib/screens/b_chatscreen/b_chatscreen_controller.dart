@@ -6,16 +6,16 @@ import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/core/services/hive_service.dart';
+import 'package:chatblue/screens/homescreen/home_controller.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
-import 'package:chatblue/controllers/home_controller.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
-class ChatScreenController extends GetxController {
+class BChatScreenController extends GetxController {
   late ChatSessionModel chatSession;
   final RxList<MessageModel> messages = <MessageModel>[].obs;
   final BtController btController = Get.find();
@@ -52,7 +52,7 @@ class ChatScreenController extends GetxController {
                 'Unknown',
             createdAt: DateTime.now(),
             updatedAt: DateTime.now(),
-            messages: messages,
+            messages: messages.toList(),
             device: {
               'name': btController.connectedDevice?.name,
               'address': btController.connectedDevice?.address,
@@ -192,6 +192,7 @@ class ChatScreenController extends GetxController {
           _outgoingProgressIndex = _outgoingProgressIndex! + 1;
         }
       }
+      update();
     });
     btController.onTransferProgress(({
       required direction,
@@ -334,6 +335,7 @@ class ChatScreenController extends GetxController {
         _outgoingProgressIndex = _outgoingProgressIndex! + 1;
       }
       textController.clear();
+      update();
     }
   }
 

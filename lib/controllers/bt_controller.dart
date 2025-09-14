@@ -1,8 +1,8 @@
 import 'dart:async';
+import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
-import 'package:chatblue/screens/chat_screen.dart';
 
 /// High-level GetX controller that orchestrates Bluetooth Classic operations
 /// through BtClassicService and exposes reactive UI state.
@@ -66,7 +66,7 @@ class BtController extends GetxController {
 
       if (!_chatOpen) {
         _chatOpen = true;
-        Get.to(() => const ChatScreen());
+        Get.to(() => const BChatScreen());
       }
     };
 
@@ -87,6 +87,14 @@ class BtController extends GetxController {
     };
 
     super.onInit();
+  }
+
+  @override
+  void onClose() {
+    _service.stopServer();
+    _service.stopScan();
+    _service.dispose();
+    super.onClose();
   }
 
   void onTransferProgress(
@@ -115,14 +123,6 @@ class BtController extends GetxController {
         print('Failed to load paired devices: $e');
       }
     }
-  }
-
-  @override
-  void onClose() {
-    _service.stopServer();
-    _service.stopScan();
-    _service.dispose();
-    super.onClose();
   }
 
   /// Server: request discoverable then start SPP server

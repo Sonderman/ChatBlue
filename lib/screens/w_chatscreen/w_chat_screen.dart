@@ -3,28 +3,28 @@
 
 import 'dart:io';
 import 'package:auto_size_text/auto_size_text.dart';
-import 'package:chatblue/controllers/chatscreen_controller.dart';
 import 'package:chatblue/core/models/message_model.dart';
+import 'package:chatblue/screens/w_chatscreen/w_chatscreen_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sizer/sizer.dart';
 
-class ChatScreen extends StatelessWidget {
-  const ChatScreen({super.key});
+class WChatScreen extends StatelessWidget {
+  const WChatScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final controller = Get.put(ChatScreenController());
+    final controller = Get.put(WChatScreenController());
     return Scaffold(
       appBar: AppBar(
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             AutoSizeText(
-              controller.btController.connectedDevice?.name ??
-                  controller.btController.connectedDevice?.address ??
+              controller.wifiController.connectedDevice?.deviceName ??
+                  controller.wifiController.connectedDevice?.deviceAddress ??
                   controller.chatSession.name,
               maxLines: 1,
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
@@ -208,7 +208,7 @@ class ChatScreen extends StatelessWidget {
                     IconButton(
                       icon: Icon(Icons.image),
                       onPressed: () async {
-                        final c = Get.find<ChatScreenController>();
+                        final c = Get.find<WChatScreenController>();
                         await c.showImageSourceSheet();
                       },
                     ),

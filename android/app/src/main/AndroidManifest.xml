@@ -15,11 +15,17 @@
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- Media/storage permissions for saving images to gallery (Android 13+ uses READ_MEDIA_IMAGES) -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <!-- For Android <= 12 -->
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+<!-- Media/storage permissions for saving images to gallery (Android 13+ uses READ_MEDIA_IMAGES) -->
+<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+<!-- For Android <= 12 -->
+<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+<uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-feature android:name="android.hardware.wifi.direct" android:required="true" />
 
 <!-- Bluetooth hardware feature -->
 <uses-feature

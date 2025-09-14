@@ -1,4 +1,3 @@
-import 'package:chatblue/controllers/bt_controller.dart';
 import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/services/hive_service.dart';
 import 'package:get/get.dart';
@@ -13,7 +12,6 @@ class HomeController extends GetxController {
   @override
   void onInit() async {
     sessions.value = await HiveService.to.getAllChatSessions();
-    Get.put(BtController());
     super.onInit();
   }
 

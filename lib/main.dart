@@ -2,7 +2,7 @@ import 'package:chatblue/config.dart';
 import 'package:chatblue/core/services/hive_service.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import 'package:chatblue/screens/home_screen.dart';
+import 'package:chatblue/screens/homescreen/home_screen.dart';
 import 'package:sizer/sizer.dart';
 
 void main() async {

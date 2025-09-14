@@ -1,7 +1,8 @@
 import 'package:chatblue/config.dart';
-import 'package:chatblue/controllers/home_controller.dart';
-import 'package:chatblue/screens/chat_screen.dart';
-import 'package:chatblue/screens/device_scan_screen.dart';
+import 'package:chatblue/screens/bluetooth_scan_screen.dart';
+import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
+import 'package:chatblue/screens/homescreen/home_controller.dart';
+import 'package:chatblue/screens/wifid_scan_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
@@ -20,10 +21,17 @@ class HomeScreen extends StatelessWidget {
             title: const Text(appName),
             actions: [
               IconButton(
-                tooltip: 'Scan & Connect',
+                tooltip: 'Scan & Connect with Bluetooth',
                 icon: const Icon(Icons.bluetooth_searching),
                 onPressed: () {
-                  Get.to(() => DeviceScanScreen())?.then((_) => controller.refreshSessions());
+                  Get.to(() => BluetoothScanScreen())?.then((_) => controller.refreshSessions());
+                },
+              ),
+              IconButton(
+                tooltip: 'Scan & Connect with Wifi Direct',
+                icon: const Icon(Icons.wifi_tethering),
+                onPressed: () {
+                  Get.to(() => WifiDirectScanScreen())?.then((_) => controller.refreshSessions());
                 },
               ),
             ],
@@ -64,7 +72,7 @@ class HomeScreen extends StatelessWidget {
                   subtitle: Text(subtitle.toString()),
                   onTap: () {
                     Get.to(
-                      () => ChatScreen(),
+                      () => BChatScreen(),
                       arguments: s,
                     )?.then((_) => controller.refreshSessions());
                   },
