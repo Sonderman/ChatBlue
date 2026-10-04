@@ -17,6 +17,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import androidx.core.content.ContextCompat
 import android.content.pm.PackageManager
 import java.io.IOException
@@ -36,11 +37,38 @@ import java.util.concurrent.atomic.AtomicBoolean
 class WifiDirectManager(private val context: Context) {
 
     private val manager: WifiP2pManager? = context.getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
-    private val channel: WifiP2pManager.Channel? = manager?.initialize(context, context.mainLooper, null)
+    private var channel: WifiP2pManager.Channel? = manager?.initialize(context, context.mainLooper, null)
+
+    /// Set when the P2P service went down (WIFI_P2P_STATE_DISABLED): a
+    /// channel obtained before the restart is STALE and every operation on
+    /// it fails instantly (ERROR/BUSY, request never leaves the device) —
+    /// the classic "connects once, then never again". The channel is
+    /// re-initialized on the next ENABLED broadcast (and defensively in
+    /// [connect]).
+    private var channelDirty: Boolean = false
 
     private val peersByAddress: MutableMap<String, Map<String, Any?>> = ConcurrentHashMap()
     private val discoveryRegistered = AtomicBoolean(false)
     private var p2pEnabled: Boolean = false
+
+    /// This device's current P2P MAC (from THIS_DEVICE_CHANGED). The peer
+    /// can't learn it from the socket, and it keys the peer's chat session —
+    /// sent to the peer inside the identity frame.
+    private var thisDeviceAddress: String? = null
+
+    /// Ensures `onSocketDisconnected` fires at most ONCE per connection
+    /// episode. A teardown triggers up to three events (TCP EOF, the
+    /// CONNECTION_CHANGED broadcast branch and `disconnect()`'s own cancel)
+    /// and each used to surface a separate "connection lost" snackbar on the
+    /// peer. Reset in [manageConnectedSocket] for the next episode.
+    private val disconnectNotified = AtomicBoolean(false)
+
+    /// True while THIS device is the explicit Group Owner (Start Server via
+    /// createGroup). Used by [disconnect] to preserve the group+server for
+    /// peer reconnects, while still tearing the group down after ordinary
+    /// client-mode chat sessions (a lingering group blocks the next connect
+    /// with BUSY on OEM builds).
+    private val groupOwnerMode = AtomicBoolean(false)
 
     private var onScanStarted: (() -> Unit)? = null
     private var onPeerFound: ((Map<String, Any?>) -> Unit)? = null
@@ -66,6 +94,11 @@ class WifiDirectManager(private val context: Context) {
         const val FRAME_TYPE_TEXT: Byte = 1
         const val FRAME_TYPE_BYTES: Byte = 2
         const val PORT: Int = 8988 // Align with Android Wi‑Fi Direct sample conventions
+
+        /// Backoff before the connect retry: after a group teardown the P2P
+        /// service restarts and a connect issued during the restart fails
+        /// with BUSY/ERROR; 1.5 s was too short on OEM builds.
+        const val RETRY_DELAY_MS: Long = 5000
     }
 
     fun setScanCallbacks(
@@ -98,6 +131,8 @@ class WifiDirectManager(private val context: Context) {
 
     fun isP2pSupported(): Boolean = manager != null && channel != null
 
+    fun getThisDeviceAddress(): String? = thisDeviceAddress
+
     fun getDiscoveredPeers(): List<Map<String, Any?>> = peersByAddress.values.toList()
 
     fun clearDiscoveredPeers() { peersByAddress.clear() }
@@ -112,9 +147,20 @@ class WifiDirectManager(private val context: Context) {
         ioExecutor.shutdownNow()
     }
 
+    /// Returns a channel that is fresh: when the P2P service restarted since
+    /// our last use (teardown or a DISABLED broadcast), re-initializes —
+    /// a stale channel fails every operation instantly (ERROR/BUSY).
+    private fun effectiveChannel(): WifiP2pManager.Channel? {
+        if (channelDirty) {
+            channelDirty = false
+            channel = manager?.initialize(context, context.mainLooper, null)
+        }
+        return channel
+    }
+
     fun startDiscovery() {
         val m = manager ?: return onScanError?.invoke("Wi‑Fi P2P not supported") ?: Unit
-        val c = channel ?: return onScanError?.invoke("Wi‑Fi P2P channel unavailable") ?: Unit
+        val c = effectiveChannel() ?: return onScanError?.invoke("Wi‑Fi P2P channel unavailable") ?: Unit
         if (!hasDiscoveryPermission()) {
             onScanError?.invoke("Missing Wi‑Fi Direct discovery permission")
             return
@@ -138,8 +184,9 @@ class WifiDirectManager(private val context: Context) {
     }
 
     fun createGroup() {
+        groupOwnerMode.set(true)
         val m = manager ?: return onSocketError?.invoke("Wi‑Fi P2P not supported") ?: Unit
-        val c = channel ?: return onSocketError?.invoke("Wi‑Fi P2P channel unavailable") ?: Unit
+        val c = effectiveChannel() ?: return onSocketError?.invoke("Wi‑Fi P2P channel unavailable") ?: Unit
         m.createGroup(c, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 // Start server immediately; ServerSocket can bind without waiting IP
@@ -147,26 +194,39 @@ class WifiDirectManager(private val context: Context) {
                 // Also proactively query connection info; some devices don't fire connected immediately
                 Handler(Looper.getMainLooper()).postDelayed({ requestConnectionInfo() }, 600)
             }
-            override fun onFailure(reason: Int) { onSocketError?.invoke("createGroup failed: $reason") }
+            override fun onFailure(reason: Int) {
+                groupOwnerMode.set(false)
+                onSocketError?.invoke("createGroup failed: $reason")
+            }
         })
     }
 
-    fun removeGroup() {
+    fun removeGroup(listener: WifiP2pManager.ActionListener? = null) {
+        groupOwnerMode.set(false)
         val m = manager ?: return
         val c = channel ?: return
-        m.removeGroup(c, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() { }
-            override fun onFailure(reason: Int) { }
-        })
+        if (listener != null) {
+            m.removeGroup(c, listener)
+        } else {
+            m.removeGroup(c, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() { }
+                override fun onFailure(reason: Int) { }
+            })
+        }
     }
 
     fun connect(deviceAddress: String) {
         val m = manager ?: return onSocketError?.invoke("Wi‑Fi P2P not supported") ?: Unit
-        val c = channel ?: return onSocketError?.invoke("Wi‑Fi P2P channel unavailable") ?: Unit
-        if (!p2pEnabled) {
-            onSocketError?.invoke("Wi‑Fi Direct is disabled")
-            return
-        }
+        // Defensive channel refresh: if the P2P service restarted since our
+        // last use, the old channel would fail every call instantly.
+        val c = effectiveChannel() ?: return onSocketError?.invoke("Wi‑Fi P2P channel unavailable") ?: Unit
+        // NOTE: deliberately NO hard `p2pEnabled` guard here. The flag is
+        // only updated by explicit state broadcasts and turns stale when the
+        // framework silently re-enables P2P (e.g. through discoverPeers
+        // without a broadcast) — a stale false flag rejected every connect
+        // after the first session ("connects once, then never again").
+        // The framework itself reports real failures (P2P_UNSUPPORTED /
+        // ERROR) through the attempt callbacks below.
         if (!isWifiEnabled()) {
             onSocketError?.invoke("Wi‑Fi is disabled")
             return
@@ -183,8 +243,13 @@ class WifiDirectManager(private val context: Context) {
 
         if (lastConnectAddress != deviceAddress) {
             lastConnectAddress = deviceAddress
-            retriedOnce = false
         }
+        // ALWAYS reset the retry budget: it used to reset only on address
+        // change, so a second connect to the SAME peer had retriedOnce=true
+        // from the previous session and skipped its retry entirely —
+        // "connect failed: ERROR (0)" appeared immediately instead of
+        // retrying through the P2P service restart.
+        retriedOnce = false
 
         // Ignore obviously invalid addresses
         if (deviceAddress.isBlank() || deviceAddress == "02:00:00:00:00:00") {
@@ -195,10 +260,17 @@ class WifiDirectManager(private val context: Context) {
         // Best-effort: cancel discovery/connect before a new connect
         runCatching { m.cancelConnect(c, null) }
         runCatching { m.stopPeerDiscovery(c, null) }
-        // Ensure we are not part of a previous group before attempting client connect
-        removeGroup()
-
-        attemptConnect(deviceAddress, goIntent = 0)
+        // Ensure we are not part of a previous group before attempting
+        // connect — and WAIT for the removal: on Samsung/OEM builds a
+        // lingering group (left from the previous session's connection)
+        // makes an immediate connect fail with BUSY.
+        removeGroup(object : WifiP2pManager.ActionListener {
+            override fun onSuccess() { attemptConnect(deviceAddress, goIntent = 0) }
+            override fun onFailure(reason: Int) {
+                // Even a rejected removal is a state change; try anyway.
+                attemptConnect(deviceAddress, goIntent = 0)
+            }
+        })
     }
 
     private fun attemptConnect(deviceAddress: String, goIntent: Int) {
@@ -227,7 +299,7 @@ class WifiDirectManager(private val context: Context) {
                         }
                         Handler(Looper.getMainLooper()).postDelayed({
                             attemptConnect(deviceAddress, nextIntent)
-                        }, 1500)
+                        }, RETRY_DELAY_MS)
                     } else {
                         onSocketError?.invoke(message)
                     }
@@ -243,9 +315,28 @@ class WifiDirectManager(private val context: Context) {
         else -> "UNKNOWN"
     }
 
-    private fun isWifiEnabled(): Boolean {
+    fun isWifiEnabled(): Boolean {
         val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
         return wm?.isWifiEnabled == true
+    }
+
+    /// Opens the system Wi‑Fi settings panel (popup panel on Android 10+,
+    /// settings screen below) so the user can turn Wi‑Fi on. Apps cannot
+    /// enable Wi‑Fi silently since Android 10; the panel is the standard
+    /// flow. Returns whether the launch was attempted.
+    fun requestEnableWifi(): Boolean {
+        return try {
+            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                Intent(Settings.Panel.ACTION_WIFI)
+            } else {
+                Intent(Settings.ACTION_WIFI_SETTINGS)
+            }
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
     }
 
     private fun isLocationOn(): Boolean {
@@ -266,6 +357,18 @@ class WifiDirectManager(private val context: Context) {
         clientThread = null
         serverThread?.cancel()
         serverThread = null
+        // Tear down the P2P group when this was an ordinary (client-mode)
+        // chat session: leaving the group behind keeps the P2P stack busy
+        // and the NEXT connect fails with BUSY on OEM builds. Server mode
+        // (explicit createGroup) keeps its group and accept loop so peers
+        // can reconnect to the already-started server.
+        if (!groupOwnerMode.get()) {
+            removeGroup()
+        }
+        // A session ended: the P2P service may restart during teardown, so
+        // the next operation must re-initialize the channel (broadcasts may
+        // not always fire).
+        channelDirty = true
     }
 
     fun sendText(text: String) {
@@ -310,6 +413,17 @@ class WifiDirectManager(private val context: Context) {
                 WifiP2pManager.WIFI_P2P_STATE_CHANGED_ACTION -> {
                     val state = intent.getIntExtra(WifiP2pManager.EXTRA_WIFI_STATE, -1)
                     p2pEnabled = state == WifiP2pManager.WIFI_P2P_STATE_ENABLED
+                    // The P2P service restarts after a group teardown on
+                    // most devices; a channel obtained before the restart is
+                    // stale and every op on it fails instantly — the
+                    // "connects once, then never again" class of bug. Grab a
+                    // fresh channel when the service comes back up.
+                    if (state == WifiP2pManager.WIFI_P2P_STATE_DISABLED) {
+                        channelDirty = true
+                    } else if (state == WifiP2pManager.WIFI_P2P_STATE_ENABLED && channelDirty) {
+                        channelDirty = false
+                        channel = manager?.initialize(context, context.mainLooper, null)
+                    }
                 }
                 WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
                     val m = manager ?: return
@@ -325,15 +439,45 @@ class WifiDirectManager(private val context: Context) {
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
                     val networkInfo: NetworkInfo? = intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO)
                     if (networkInfo?.isConnected == true) {
+                        // A group is up — peer discovery is no longer useful
+                        // and most stacks drop it anyway; stop it so the
+                        // UI's scanning state stays truthful and the stack
+                        // stays free. No listener: this would otherwise emit
+                        // a spurious "scan finished" event.
+                        val m = manager ?: return
+                        val c = channel ?: return
+                        runCatching { m.stopPeerDiscovery(c, null) }
                         requestConnectionInfo()
                     } else {
                         // disconnected
-                        onSocketDisconnected?.invoke("disconnected")
+                        if (disconnectNotified.compareAndSet(false, true)) {
+                            onSocketDisconnected?.invoke("disconnected")
+                        }
                         disconnect()
                     }
                 }
                 WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION -> {
-                    // no-op
+                    // Remember our own P2P MAC: the peer can't read it from
+                    // the socket and needs it to key its chat session.
+                    val device: WifiP2pDevice? =
+                        if (Build.VERSION.SDK_INT >= 33) {
+                            intent.getParcelableExtra(
+                                WifiP2pManager.EXTRA_WIFI_P2P_DEVICE,
+                                WifiP2pDevice::class.java,
+                            )
+                        } else {
+                            @Suppress("DEPRECATION")
+                            intent.getParcelableExtra(WifiP2pManager.EXTRA_WIFI_P2P_DEVICE)
+                        }
+                    val addr = device?.deviceAddress
+                    // The framework often broadcasts the this-device record
+                    // with the unresolved dummy MAC (02:00:00:00:00:00) until
+                    // the real randomized P2P MAC is assigned — never cache
+                    // the dummy; it would travel to the peer in the identity
+                    // frame and become its session key.
+                    if (!addr.isNullOrEmpty() && addr != "02:00:00:00:00:00") {
+                        thisDeviceAddress = addr
+                    }
                 }
             }
         }
@@ -396,7 +540,7 @@ class WifiDirectManager(private val context: Context) {
             while (!cancelled.get()) {
                 try {
                     val s = server?.accept()
-                    if (s != null) manageConnectedSocket(s, isGroupOwner = true)
+                    if (s != null) handleAcceptedSocket(s)
                     // Keep accepting: previously connected peers can reconnect.
                     // A new peer replaces the current connection
                     // (manageConnectedSocket cancels it with "replaced").
@@ -541,16 +685,69 @@ class WifiDirectManager(private val context: Context) {
             try { input?.close() } catch (_: IOException) {}
             try { output?.close() } catch (_: IOException) {}
             try { socket.close() } catch (_: IOException) {}
-            onSocketDisconnected?.invoke(reason)
+            // At most one disconnect notification per connection episode:
+            // EOF, the broadcast branch and a later manual cancel all flow
+            // through here.
+            if (disconnectNotified.compareAndSet(false, true)) {
+                onSocketDisconnected?.invoke(reason)
+            }
         }
     }
 
-    private fun manageConnectedSocket(socket: Socket, isGroupOwner: Boolean) {
+    /// A connection was accepted on the GO side. Tries to learn the client's
+    /// P2P device name (the socket alone carries only an IP) via
+    /// `requestGroupInfo`, so the receiving side's connection banner shows a
+    /// real name instead of "unknown". Falls back to a nameless connection
+    /// after a short window — the handshake must never stall on this.
+    private fun handleAcceptedSocket(s: Socket) {
+        val m = manager
+        val c = channel
+        if (m == null || c == null) {
+            manageConnectedSocket(s, isGroupOwner = true)
+            return
+        }
+        var settled = false
+        val fallback = Runnable {
+            if (!settled) {
+                settled = true
+                manageConnectedSocket(s, isGroupOwner = true)
+            }
+        }
+        Handler(Looper.getMainLooper()).postDelayed(fallback, 1000)
+        runCatching {
+            m.requestGroupInfo(c) { group ->
+                if (!settled) {
+                    settled = true
+                    // The client's DEVICE ADDRESS (MAC) is core to the group
+                    // membership and reliably populated (unlike the name) —
+                    // without it the receiving side would key its chat
+                    // session on a random UUID and show "unknown" in the
+                    // session list. The name rides along when available.
+                    val client = group?.clientList?.firstOrNull()
+                    manageConnectedSocket(
+                        s,
+                        isGroupOwner = true,
+                        peerName = client?.deviceName,
+                        peerAddress = client?.deviceAddress,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun manageConnectedSocket(
+        socket: Socket,
+        isGroupOwner: Boolean,
+        peerName: String? = null,
+        peerAddress: String? = null,
+    ) {
         connectedThread?.cancel("replaced")
+        // New connection episode: allow exactly one disconnect notification.
+        disconnectNotified.set(false)
         connectedThread = ConnectedThread(socket, isGroupOwner).also { it.start() }
         val remoteMap = mapOf(
-            "deviceName" to null,
-            "deviceAddress" to null,
+            "deviceName" to peerName,
+            "deviceAddress" to peerAddress,
             "ip" to socket.inetAddress?.hostAddress,
             "port" to socket.port,
             "isGroupOwner" to isGroupOwner

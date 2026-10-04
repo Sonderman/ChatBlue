@@ -138,8 +138,6 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) {
     final p = ChatPalette.of(context);
-    final name =
-        controller.transport.connectedDeviceName ?? controller.chatSession.name;
     return AppBar(
       // Status bar icons follow the chat palette, not the app theme: the
       // chat bar stays dark navy on the light theme too.
@@ -153,9 +151,17 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
       iconTheme: IconThemeData(color: p.barForeground),
       toolbarHeight: 64,
       titleSpacing: 4,
-      title: Row(
-        children: [
-          _DeviceAvatar(name: name, palette: p),
+      title: Obx(() {
+        // The observable must be read UNCONDITIONALLY: GetX throws at
+        // runtime when a build registers no Rx dependency — the old
+        // short-circuit below skipped peerName whenever the transport
+        // name was already set (BT always, WFD after READY).
+        final peerName = controller.peerName.value;
+        final name = controller.transport.connectedDeviceName ??
+            (peerName.isNotEmpty ? peerName : controller.chatSession.name);
+        return Row(
+          children: [
+            _DeviceAvatar(name: name, palette: p),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -195,7 +201,8 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
             ),
           ),
         ],
-      ),
+        );
+      }),
       actions: [
         IconButton(
           icon: Icon(Icons.delete_sweep_outlined, color: p.muted),

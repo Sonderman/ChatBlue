@@ -63,6 +63,8 @@ class AppTranslations extends Translations {
     'stopServer': 'Stop Server',
     'startDiscovery': 'Start Discovery',
     'stopDiscovery': 'Stop Discovery',
+    'wifiOffTitle': 'Wi‑Fi is off. Turn it on to discover nearby devices.',
+    'enableWifi': 'Turn on Wi‑Fi',
 
     // Chat UI
     'connectedStatus': 'Connected',
@@ -168,6 +170,8 @@ class AppTranslations extends Translations {
     'stopServer': 'Sunucuyu Durdur',
     'startDiscovery': 'Keşfi Başlat',
     'stopDiscovery': 'Keşfi Durdur',
+    'wifiOffTitle': 'Wi‑Fi kapalı. Yakındaki cihazları bulmak için Wi‑Fi\'yi açın.',
+    'enableWifi': 'Wi‑Fi\'yi Aç',
 
     // Chat UI
     'connectedStatus': 'Bağlı',

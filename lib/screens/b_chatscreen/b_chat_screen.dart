@@ -17,6 +17,15 @@ class _BChatScreenState extends State<BChatScreen> {
   bool _allowPop = false;
 
   @override
+  void dispose() {
+    // Same leak guard as the WFD chat screen: Get.put controllers are not
+    // auto-deleted on route pop, so onClose (socket disconnect + [_chatOpen]
+    // reset) would never run and reconnects would fail.
+    Get.delete<BChatScreenController>();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final controller = Get.put(BChatScreenController());
     return PopScope(

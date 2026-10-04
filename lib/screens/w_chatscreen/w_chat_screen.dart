@@ -17,6 +17,17 @@ class _WChatScreenState extends State<WChatScreen> {
   bool _allowPop = false;
 
   @override
+  void dispose() {
+    // The chat controller is registered via Get.put but never auto-deleted
+    // when the route pops: without this, onClose (socket disconnect + P2P
+    // group teardown + _chatOpen reset) never runs, the first connection
+    // stays alive and the next attempt fails — "connects once, then never
+    // again".
+    Get.delete<WChatScreenController>();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final controller = Get.put(WChatScreenController());
     return PopScope(

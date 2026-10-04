@@ -19,14 +19,19 @@ class ConnectionRequestBanner {
 
   /// Shows the request card. [onAccept] fires on Accept (or auto-accept
   /// never — only manual), [onDecline] on Decline or timeout expiry.
+  /// [liveName], when provided, is an observable that updates the banner
+  /// title in place (used when the peer's device name arrives over the
+  /// socket right after the request — WFD peers carry no name pre-accept).
   static void show({
     required String deviceName,
+    Rxn<String>? liveName,
     required VoidCallback onAccept,
     required VoidCallback onDecline,
     Duration timeout = const Duration(seconds: 15),
   }) {
     _insert(
       deviceName: deviceName,
+      liveName: liveName,
       onAccept: onAccept,
       onDecline: onDecline,
     );
@@ -39,6 +44,7 @@ class ConnectionRequestBanner {
 
   static void _insert({
     required String deviceName,
+    Rxn<String>? liveName,
     required VoidCallback onAccept,
     required VoidCallback onDecline,
   }) {
@@ -74,6 +80,7 @@ class ConnectionRequestBanner {
         child: _ConnectionRequestCard(
           palette: p,
           deviceName: deviceName,
+          liveName: liveName,
           onAccept: () {
             dismiss();
             onAccept();
@@ -111,19 +118,22 @@ class _ConnectionRequestCard extends StatelessWidget {
   const _ConnectionRequestCard({
     required this.palette,
     required this.deviceName,
+    this.liveName,
     required this.onAccept,
     required this.onDecline,
   });
 
   final ChatPalette palette;
   final String deviceName;
+
+  /// Optional observable that live-updates the title (peer name arrives
+  /// over the socket while the banner is up).
+  final Rxn<String>? liveName;
   final VoidCallback onAccept;
   final VoidCallback onDecline;
 
   @override
   Widget build(BuildContext context) {
-    final initial =
-        deviceName.trim().isEmpty ? '?' : deviceName.trim()[0].toUpperCase();
     return Material(
       color: Colors.transparent,
       child: Container(
@@ -155,14 +165,28 @@ class _ConnectionRequestCard extends StatelessWidget {
                 ),
               ),
               child: Center(
-                child: Text(
-                  initial,
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
-                  ),
-                ),
+                child: liveName == null
+                    ? Text(
+                        deviceName.trim().isEmpty
+                            ? '?'
+                            : deviceName.trim()[0].toUpperCase(),
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      )
+                    : Obx(() {
+                        final n = (liveName!.value ?? '').trim();
+                        return Text(
+                          n.isEmpty ? '?' : n[0].toUpperCase(),
+                          style: const TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white,
+                          ),
+                        );
+                      }),
               ),
             ),
             const SizedBox(width: 12),
@@ -176,16 +200,32 @@ class _ConnectionRequestCard extends StatelessWidget {
                     style: TextStyle(fontSize: 11, color: palette.muted),
                   ),
                   const SizedBox(height: 2),
-                  Text(
-                    deviceName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      color: palette.messageText,
-                    ),
-                  ),
+                  liveName == null
+                      ? Text(
+                          deviceName.trim().isEmpty
+                              ? 'unknownDevice'.tr
+                              : deviceName.trim(),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: palette.messageText,
+                          ),
+                        )
+                      : Obx(() {
+                          final n = (liveName!.value ?? '').trim();
+                          return Text(
+                            n.isEmpty ? 'unknownDevice'.tr : n,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: palette.messageText,
+                            ),
+                          );
+                        }),
                 ],
               ),
             ),

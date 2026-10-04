@@ -26,6 +26,21 @@ class WdPlatformChannel {
     final bool ok = await _method.invokeMethod('isWifiP2pSupported');
     return ok;
   }
+
+  Future<bool> isWifiEnabled() async {
+    final bool ok = await _method.invokeMethod('isWifiEnabled');
+    return ok;
+  }
+
+  Future<bool> requestEnableWifi() async {
+    final bool ok = await _method.invokeMethod('requestEnableWifi');
+    return ok;
+  }
+
+  Future<String?> getThisDeviceAddress() async {
+    final String? addr = await _method.invokeMethod('getThisDeviceAddress');
+    return addr;
+  }
   // endregion
 
   // region Discovery

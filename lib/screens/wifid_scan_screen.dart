@@ -17,6 +17,36 @@ class WifiDirectScanScreen extends StatelessWidget {
           body: Obx(
             () => Column(
               children: [
+                // Wi‑Fi off: nothing can be discovered/connected — show a
+                // "turn on Wi‑Fi" panel button instead of the scan controls.
+                if (!controller.isWifiOn.value)
+                  Expanded(
+                    child: Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'wifiOffTitle'.tr,
+                              textAlign: TextAlign.center,
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                            const SizedBox(height: 16),
+                            ElevatedButton.icon(
+                              onPressed:
+                                  controller.isWifiEnableInFlight.value
+                                      ? null
+                                      : controller.enableWifi,
+                              icon: const Icon(Icons.wifi),
+                              label: Text('enableWifi'.tr),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                else ...[
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   child: Row(
@@ -126,7 +156,8 @@ class WifiDirectScanScreen extends StatelessWidget {
                                       !controller.isAwaitingAcceptance) {
                                     Get.snackbar(
                                       'couldNotConnectTitle'.tr,
-                                      'couldNotConnectMessage'.tr,
+                                      controller.lastConnectError.value ??
+                                          'couldNotConnectMessage'.tr,
                                     );
                                   } else if (!controller.isConnected.value) {
                                     Get.snackbar(
@@ -143,6 +174,7 @@ class WifiDirectScanScreen extends StatelessWidget {
                     ),
                   ),
                 ),
+                ],
               ],
             ),
           ),

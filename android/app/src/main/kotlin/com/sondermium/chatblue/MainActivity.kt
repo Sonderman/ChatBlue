@@ -414,6 +414,9 @@ class MainActivity : FlutterActivity() {
                         androidx.core.app.ActivityCompat.requestPermissions(this, needed, REQUEST_WD_PERMISSIONS)
                     }
                 }
+                "isWifiEnabled" -> { result.success(wifiDirectManager.isWifiEnabled()) }
+                "requestEnableWifi" -> { result.success(wifiDirectManager.requestEnableWifi()) }
+                "getThisDeviceAddress" -> { result.success(wifiDirectManager.getThisDeviceAddress()) }
                 "startDiscovery" -> { wifiDirectManager.startDiscovery(); result.success(true) }
                 "stopDiscovery" -> { wifiDirectManager.stopDiscovery(); result.success(true) }
                 "getDiscoveredPeers" -> { result.success(wifiDirectManager.getDiscoveredPeers()) }

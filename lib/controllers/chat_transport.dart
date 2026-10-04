@@ -28,6 +28,13 @@ abstract interface class ChatTransport {
   /// Stable identifier of the connected peer (BT MAC / WFD address).
   String? get connectedDeviceKey;
 
+  /// Stable per-install identifier of the connected peer — used to KEY the
+  /// chat session so the same peer always merges into one session. WFD
+  /// shares the peer's device uuid over the identity frame (P2P MACs are
+  /// randomized and rotate); Bluetooth has no equivalent and returns null,
+  /// falling back to [connectedDeviceKey].
+  String? get connectedDeviceId => null;
+
   /// Human-readable name of the connected peer.
   String? get connectedDeviceName;
 

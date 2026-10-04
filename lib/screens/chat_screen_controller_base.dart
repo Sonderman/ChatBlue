@@ -8,6 +8,7 @@ import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/core/services/hive_service.dart';
+import 'package:chatblue/screens/homescreen/home_controller.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -69,6 +70,10 @@ abstract class ChatScreenControllerBase extends GetxController {
   final TextEditingController textController = TextEditingController();
 
   RxBool get isConnected => transport.isConnected;
+
+  /// Peer-reported device name (WFD peers don't carry a name on the socket);
+  /// drives the app bar title reactively when the transport has no name.
+  final RxString peerName = RxString('');
 
   /// True while a manual reconnect (Connect button) attempt is in flight.
   final RxBool isConnecting = false.obs;
@@ -183,16 +188,89 @@ abstract class ChatScreenControllerBase extends GetxController {
   final List<_OutgoingJob> _sendQueue = <_OutgoingJob>[];
   bool _sendJobActive = false;
 
+  /// Applies a peer-reported device name (WFD sockets carry no name on the
+  /// wire) to the app bar and the persisted session.
+  void updateSessionName(String name) {
+    if (name.isEmpty || peerName.value == name) return;
+    peerName.value = name;
+    if (chatSession.name == name) return;
+    chatSession = ChatSessionModel(
+      id: chatSession.id,
+      name: name,
+      createdAt: chatSession.createdAt,
+      updatedAt: chatSession.updatedAt,
+      messages: chatSession.messages,
+      device: chatSession.device,
+    );
+    _scheduleSave();
+  }
+
+  /// Finds an existing session for the current peer when the computed key
+  /// misses: first by the peer's device address (MAC), then by the peer's
+  /// reported name (model — so the same device always shows up as one chat;
+  /// the identical-model edge case of two same phones is accepted for a P2P
+  /// app).
+  Future<ChatSessionModel?> _findExistingSessionForPeer() async {
+    try {
+      final all = await HiveService.to.getAllChatSessions();
+      final peerMac = transport.connectedDeviceKey;
+      if (peerMac != null &&
+          peerMac.isNotEmpty &&
+          peerMac != 'unknown' &&
+          peerMac != '02:00:00:00:00:00') {
+        for (final s in all) {
+          if (s.device['address'] == peerMac) return s;
+        }
+      }
+      final peerName = transport.connectedDeviceName;
+      if (peerName != null && peerName.isNotEmpty && peerName != 'unknown') {
+        for (final s in all) {
+          if (s.name == peerName) return s;
+        }
+      }
+    } catch (_) {
+      // Fail-open: no merge found.
+    }
+    return null;
+  }
+
   @override
   void onInit() async {
     if (Get.arguments is ChatSessionModel) {
       chatSession = Get.arguments as ChatSessionModel;
       messages.value = chatSession.messages;
     } else {
-      final key = transport.connectedDeviceKey ?? Uuid().v4();
-      final foundSession = await HiveService.to.loadChatSession(key);
+      // Session keying: prefer the peer's STABLE per-install id (WFD
+      // identity frame) so the same device always merges into one session
+      // despite randomized P2P MAC rotation; fall back to the device
+      // address (BT / WFD before the frame), but never to the placeholder
+      // 'unknown' or the dummy P2P MAC (02:00:00:00:00:00) — uuid in that
+      // case. The MAC stays in device['address'] for display/reconnects.
+      final peerId = transport.connectedDeviceId;
+      final mac = transport.connectedDeviceKey;
+      final bool macUsable = mac != null &&
+          mac.isNotEmpty &&
+          mac != 'unknown' &&
+          mac != '02:00:00:00:00:00';
+      final keySource = peerId ?? mac;
+      final bool keyUsable = keySource != null &&
+          keySource.isNotEmpty &&
+          keySource != 'unknown' &&
+          keySource != '02:00:00:00:00:00';
+      final String key = keyUsable ? keySource : Uuid().v4();
+      if (kDebugMode) {
+        debugPrint(
+          'Chat open: key=$key (peerId=$peerId, mac=$mac) — merge will '
+          'match by key, then MAC, then name',
+        );
+      }
+      // Assign the session BEFORE the first await: the first frame builds
+      // while onInit is still suspended on the Hive lookup, and widgets
+      // (ChatAppBar reads `chatSession.name`) would hit the uninitialized
+      // `late` field with a LateInitializationError — seen when a chat
+      // opens through the scan/connect flow (no Get.arguments). The lookup
+      // below hydrates the existing session (and its messages) in place.
       chatSession =
-          foundSession ??
           ChatSessionModel(
             id: key,
             name: transport.connectedDeviceName ?? key,
@@ -201,10 +279,55 @@ abstract class ChatScreenControllerBase extends GetxController {
             messages: messages.toList(),
             device: {
               'name': transport.connectedDeviceName,
-              'address': transport.connectedDeviceKey,
+              'address': macUsable ? mac : null,
             },
           );
       messages.value = chatSession.messages;
+      var session = await HiveService.to.loadChatSession(key);
+      session ??= await _findExistingSessionForPeer();
+      if (kDebugMode) {
+        debugPrint(
+          'Session load: key=$key -> ${session?.id ?? 'MISS'}'
+          '${session == null ? '' : (session.id == key ? ' (direct hit)' : ' (merged)')}',
+        );
+      }
+      if (session != null && session.id == key) {
+        // DIRECT key hit: load the existing session's messages. (The
+        // sync-created shell above is replaced; this branch was missing —
+        // every connect to an existing session opened an empty shell.)
+        chatSession = session;
+        messages.value = session.messages;
+      } else if (session != null && session.id != key) {
+        // Re-key + adopt: move the matched session under the computed key so
+        // future opens hit it directly (no repeated merge search), and use
+        // the re-keyed instance — `chatSession.id` is final, so the session
+        // is re-created with the new id; the nested message objects are
+        // reused as-is.
+        chatSession = ChatSessionModel(
+          id: key,
+          name: session.name,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+          messages: session.messages,
+          device: session.device,
+        );
+        messages.value = chatSession.messages;
+        try {
+          await HiveService.to.saveChatSession(chatSession);
+          await HiveService.to.deleteChatSession(session.id);
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('Session re-key failed: $e');
+          }
+        }
+        _scheduleSave();
+      } else if (session == null) {
+        // BRAND-NEW session: persist it right away. Saves are otherwise
+        // triggered only by dirty events (message, rename, sync) — a chat
+        // opened and closed without any of those would never touch Hive and
+        // silently vanish on restart.
+        _scheduleSave();
+      }
     }
 
     setupCallbacks();
@@ -260,6 +383,14 @@ abstract class ChatScreenControllerBase extends GetxController {
     _disconnectSubscription?.cancel();
     _connectionSubscription?.cancel();
     transport.onChatClosed();
+    // The session list may have new/renamed sessions after a chat: refresh
+    // it AFTER the pending save has actually landed (the flush is debounced
+    // 250 ms and may still be in flight when the screen closes).
+    unawaited(_flushPendingSave().whenComplete(() {
+      if (Get.isRegistered<HomeController>()) {
+        Get.find<HomeController>().refreshSessions();
+      }
+    }));
     super.onClose();
   }
 
@@ -801,9 +932,17 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// write so no change is lost.
   void _scheduleSave() {
     _saveDebounce?.cancel();
-    _saveDebounce = Timer(const Duration(milliseconds: 250), () {
+    _saveDebounce = Timer(const Duration(milliseconds: 250), () async {
       _saveDebounce = null;
-      saveChatSession();
+      try {
+        await saveChatSession();
+      } catch (e) {
+        // Never let a persistence failure vanish silently — it previously
+        // made sessions disappear after restart with no trace.
+        if (kDebugMode) {
+          debugPrint('Chat session save failed: $e');
+        }
+      }
     });
   }
 
@@ -811,7 +950,13 @@ abstract class ChatScreenControllerBase extends GetxController {
     if (_saveDebounce == null) return;
     _saveDebounce!.cancel();
     _saveDebounce = null;
-    await saveChatSession();
+    try {
+      await saveChatSession();
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('Chat session flush failed: $e');
+      }
+    }
   }
 
   /// Remove a message at the given index from the shared message list

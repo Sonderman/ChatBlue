@@ -160,6 +160,11 @@ class BtController extends GetxController implements ChatTransport {
   @override
   String? get connectedDeviceKey => connectedDevice?.address;
 
+  /// BT has no stable per-install peer id; session keying falls back to the
+  /// device address (unchanged behavior).
+  @override
+  String? get connectedDeviceId => null;
+
   @override
   String? get connectedDeviceName => connectedDevice?.name;
 

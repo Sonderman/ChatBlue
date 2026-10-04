@@ -49,6 +49,34 @@ class WifiDirectService {
     _ensureEventSubscriptions();
   }
 
+  /// Whether the device's Wi‑Fi radio is on (required for P2P discovery/connect).
+  Future<bool> isWifiEnabled() async {
+    try {
+      return await _platform.isWifiEnabled();
+    } catch (_) {
+      return true; // fail-open: never block the normal flow on channel errors
+    }
+  }
+
+  /// Opens the system Wi‑Fi settings panel so the user can turn Wi‑Fi on.
+  Future<bool> requestEnableWifi() async {
+    try {
+      return await _platform.requestEnableWifi();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// This device's current P2P MAC (rides in the identity frame so the peer
+  /// can key its chat session — the socket carries no address).
+  Future<String?> getThisDeviceAddress() async {
+    try {
+      return await _platform.getThisDeviceAddress();
+    } catch (_) {
+      return null;
+    }
+  }
+
   // region Discovery
   Future<void> startDiscovery({Duration? autoStopAfter}) async {
     _ensureEventSubscriptions();
@@ -205,13 +233,24 @@ class WifiDirectService {
 }
 
 class WdPeerInfo {
-  WdPeerInfo({required this.deviceAddress, this.deviceName, this.ip, this.port, this.isGroupOwner});
+  WdPeerInfo({
+    required this.deviceAddress,
+    this.deviceName,
+    this.ip,
+    this.port,
+    this.isGroupOwner,
+    this.peerId,
+  });
 
   final String deviceAddress;
   final String? deviceName;
   final String? ip;
   final int? port;
   final bool? isGroupOwner;
+
+  /// Stable per-install id of the peer (received via the WFD identity
+  /// frame); the chat session is keyed on this, not on the rotating MAC.
+  final String? peerId;
 
   static WdPeerInfo fromMap(Map<dynamic, dynamic> map) {
     return WdPeerInfo(
@@ -222,6 +261,7 @@ class WdPeerInfo {
           ? map['port'] as int
           : (map['port'] is String ? int.tryParse(map['port'] as String) : null),
       isGroupOwner: map['isGroupOwner'] as bool?,
+      peerId: map['peerId'] as String?,
     );
   }
 }
