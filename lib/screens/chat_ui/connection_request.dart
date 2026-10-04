@@ -1,0 +1,241 @@
+// In-app incoming connection request notification.
+//
+// Shown on the receiving device when a peer connects: as an overlay card
+// positioned at the TOP when the chat screen is visible, otherwise at the
+// BOTTOM. Auto-declines after a timeout.
+
+import 'dart:async';
+
+import 'package:chatblue/screens/chat_ui/chat_ui.dart';
+import 'package:flutter/material.dart';
+import 'package:get/get.dart';
+
+/// Overlay-based connection request banner.
+class ConnectionRequestBanner {
+  ConnectionRequestBanner._();
+
+  static OverlayEntry? _entry;
+  static Timer? _timer;
+
+  /// Shows the request card. [onAccept] fires on Accept (or auto-accept
+  /// never — only manual), [onDecline] on Decline or timeout expiry.
+  static void show({
+    required String deviceName,
+    required VoidCallback onAccept,
+    required VoidCallback onDecline,
+    Duration timeout = const Duration(seconds: 15),
+  }) {
+    _insert(
+      deviceName: deviceName,
+      onAccept: onAccept,
+      onDecline: onDecline,
+    );
+    // Auto-decline if the user does not answer in time.
+    _timer = Timer(timeout, () {
+      dismiss();
+      onDecline();
+    });
+  }
+
+  static void _insert({
+    required String deviceName,
+    required VoidCallback onAccept,
+    required VoidCallback onDecline,
+  }) {
+    dismiss();
+    // Overlay must be taken from the ROOT NAVIGATOR state itself:
+    // neither Get.overlayContext (MaterialApp root) nor Get.context (the
+    // NavigatorState context) sits UNDER an Overlay — both throw
+    // "No Overlay widget found" when used with Overlay.of().
+    final ctx = Get.context;
+    if (ctx == null) {
+      onDecline();
+      return;
+    }
+    final p = ChatPalette.of(ctx);
+    final overlay = Get.key.currentState?.overlay;
+    if (overlay == null) {
+      onDecline();
+      return;
+    }
+    // Chat screens end with "ChatScreen" as their route name
+    // (BChatScreen / WChatScreen).
+    final bool isChatScreen = Get.currentRoute.contains('ChatScreen');
+    final topInset = MediaQuery.paddingOf(ctx).top;
+    final bottomInset = MediaQuery.paddingOf(ctx).bottom;
+
+    _entry = OverlayEntry(
+      builder: (_) => Positioned(
+        // Chat screen: under the app bar; anywhere else: above the bottom.
+        top: isChatScreen ? topInset + 74 : null,
+        bottom: isChatScreen ? null : bottomInset + 14,
+        left: 12,
+        right: 12,
+        child: _ConnectionRequestCard(
+          palette: p,
+          deviceName: deviceName,
+          onAccept: () {
+            dismiss();
+            onAccept();
+          },
+          onDecline: () {
+            dismiss();
+            onDecline();
+          },
+        ),
+      ),
+    );
+    overlay.insert(_entry!);
+  }
+
+  /// Dismisses the banner and cancels the auto-decline timer. Safe to call
+  /// multiple times: the entry reference is cleared before removal, and a
+  /// second removal attempt (e.g. raced with the timeout) is swallowed.
+  static void dismiss() {
+    _timer?.cancel();
+    _timer = null;
+    final entry = _entry;
+    _entry = null;
+    if (entry != null) {
+      try {
+        entry.remove();
+      } catch (_) {
+        // Already removed — either by an earlier dismiss or by the overlay
+        // being torn down; nothing left to do.
+      }
+    }
+  }
+}
+
+class _ConnectionRequestCard extends StatelessWidget {
+  const _ConnectionRequestCard({
+    required this.palette,
+    required this.deviceName,
+    required this.onAccept,
+    required this.onDecline,
+  });
+
+  final ChatPalette palette;
+  final String deviceName;
+  final VoidCallback onAccept;
+  final VoidCallback onDecline;
+
+  @override
+  Widget build(BuildContext context) {
+    final initial =
+        deviceName.trim().isEmpty ? '?' : deviceName.trim()[0].toUpperCase();
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+        decoration: BoxDecoration(
+          color: palette.surface.withValues(alpha: 0.97),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: palette.border),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.25),
+              blurRadius: 16,
+              offset: const Offset(0, 6),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            // Device avatar.
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(colors: palette.sentGradient),
+                border: Border.all(
+                  color: palette.accent.withValues(alpha: 0.55),
+                  width: 1.5,
+                ),
+              ),
+              child: Center(
+                child: Text(
+                  initial,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Connection request',
+                    style: TextStyle(fontSize: 11, color: palette.muted),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    deviceName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: palette.messageText,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            // Decline.
+            GestureDetector(
+              onTap: onDecline,
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.redAccent.withValues(alpha: 0.14),
+                  border: Border.all(
+                    color: Colors.redAccent.withValues(alpha: 0.5),
+                  ),
+                ),
+                child: const Icon(Icons.close, color: Colors.redAccent, size: 20),
+              ),
+            ),
+            const SizedBox(width: 8),
+            // Accept.
+            GestureDetector(
+              onTap: onAccept,
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                width: 46,
+                height: 40,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(20),
+                  gradient: LinearGradient(colors: palette.sentGradient),
+                  boxShadow: [
+                    BoxShadow(
+                      color: palette.sentGlow,
+                      blurRadius: 8,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.check_rounded,
+                  color: Colors.white,
+                  size: 22,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

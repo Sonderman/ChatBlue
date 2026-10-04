@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:chatblue/config.dart';
 import 'package:chatblue/controllers/chat_transport.dart';
 import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
+import 'package:chatblue/screens/chat_ui/connection_request.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -19,6 +20,10 @@ class BtController extends GetxController implements ChatTransport {
   final RxList<BtDeviceInfo> pairedDevices = <BtDeviceInfo>[].obs;
   BtDeviceInfo? connectedDevice;
   bool _chatOpen = false;
+
+  /// True while this device is the one initiating a connection (no incoming
+  /// request banner is shown for self-initiated connects).
+  bool _outgoingConnect = false;
   @override
   final Rxn<TransferState> outgoingTransfer = Rxn<TransferState>();
   @override
@@ -26,6 +31,22 @@ class BtController extends GetxController implements ChatTransport {
   @override
   final Rxn<String> lastDisconnectReason = Rxn<String>();
   Timer? _serverAutoStopTimer;
+
+  /// Frame the ACCEPTING side sends once the user approved the connection;
+  /// the initiating side opens its chat only upon receiving it.
+  static const String _connectReadyFrame = '@@CHATBLUE_CONNECT@@';
+
+  /// Peer of the pending (not yet accepted) connection attempt.
+  BtDeviceInfo? _pendingRemote;
+
+  /// True while THIS device is waiting for the peer's acceptance (initiator
+  /// side) — the link exists but is not yet "connected".
+  bool _pendingAccept = false;
+
+  /// Data consumer registered by the chat screen; the controller owns the
+  /// service's onSocketData slot and delegates through [_dispatchSocketData].
+  void Function(Uint8List bytes, String text, {required String kind})?
+      _chatDataCallback;
 
   late BtClassicService _service;
 
@@ -66,28 +87,39 @@ class BtController extends GetxController implements ChatTransport {
     };
 
     _service.onSocketConnected = (remote) {
-      isConnected.value = true;
-      connectedDevice = remote;
+      _pendingRemote = remote;
       // Refresh paired devices list from native on any new connection
       refreshPairedDevices();
       if (kDebugMode) {
         debugPrint('Socket connected to ${remote.address}');
       }
 
-      if (!_chatOpen) {
-        _chatOpen = true;
-        // The scan screen's loading dialog may still be on top: dismiss it
-        // BEFORE pushing the chat screen, so no later pop (which removes the
-        // top route) can ever close the chat screen by mistake.
-        if (Get.isDialogOpen == true) {
-          Navigator.of(Get.overlayContext!, rootNavigator: true).pop();
-        }
-        Get.to(() => const BChatScreen());
+      if (_outgoingConnect || _pendingAccept) {
+        // We initiated the connection (or are still awaiting our own
+        // request's acceptance): hold off isConnected/chat until the peer's
+        // READY frame arrives. NO banner on this side — the user knows they
+        // asked to connect; outcomes surface via isConnected or the
+        // declined snackbar.
+        _startWaitingAcceptance();
+      } else {
+        // Incoming request (accepting side): show the request card; the
+        // connection only becomes "connected" on user acceptance.
+        _showIncomingRequest(remote.name ?? remote.address);
       }
     };
 
     _service.onSocketDisconnected = (reason) {
       isConnected.value = false;
+      ConnectionRequestBanner.dismiss();
+      if (_pendingAccept) {
+        _pendingAccept = false;
+        _pendingRemote = null;
+        Get.snackbar(
+          'Connection declined',
+          'The peer declined the request or the link was lost.',
+          snackPosition: SnackPosition.BOTTOM,
+        );
+      }
       if (kDebugMode) {
         debugPrint('Socket disconnected: $reason');
       }
@@ -103,6 +135,11 @@ class BtController extends GetxController implements ChatTransport {
       // Deliberately not surfaced as a snackbar/modal: transient link errors
       // during scanning are common and would spam the UI.
     };
+
+    // The controller owns the service data slot so the READY handshake frame
+    // can be intercepted before the chat screen (which is closed at that
+    // point) would consume it.
+    _service.onSocketData = _dispatchSocketData;
 
     super.onInit();
   }
@@ -137,7 +174,9 @@ class BtController extends GetxController implements ChatTransport {
 
   @override
   void onSocketData(Function(Uint8List bytes, String text, {required String kind}) callback) {
-    _service.onSocketData = callback;
+    // The controller owns the service slot (for the READY handshake); the
+    // chat screen registers its consumer behind the dispatcher.
+    _chatDataCallback = callback;
   }
 
   /// Load paired devices (bonded) from native and publish to UI list
@@ -190,6 +229,71 @@ class BtController extends GetxController implements ChatTransport {
     isScanning.value = false;
   }
 
+  /// Opens the chat screen for the current connection (guarding against
+  /// double navigation, and dismissing any loading dialog on top first).
+  void _openChat() {
+    if (_chatOpen) return;
+    _chatOpen = true;
+    // The scan screen's loading dialog may still be on top: dismiss it
+    // BEFORE pushing the chat screen, so no later pop (which removes the
+    // top route) can ever close the chat screen by mistake.
+    if (Get.isDialogOpen == true) {
+      Navigator.of(Get.overlayContext!, rootNavigator: true).pop();
+    }
+    Get.to(() => const BChatScreen());
+  }
+
+  /// Shows the incoming connection request banner; Accept marks the link as
+  /// connected, notifies the initiator with the READY frame and opens the
+  /// chat; Decline (or timeout) tears the socket down.
+  void _showIncomingRequest(String deviceName) {
+    ConnectionRequestBanner.show(
+      deviceName: deviceName,
+      onAccept: () {
+        if (_chatOpen) return;
+        isConnected.value = true;
+        connectedDevice = _pendingRemote;
+        _pendingRemote = null;
+        _service.sendString(_connectReadyFrame);
+        _openChat();
+      },
+      onDecline: () {
+        if (!_pendingAccept) {
+          // Request side: full teardown.
+          connectedDevice = null;
+          isConnected.value = false;
+          _service.disconnect();
+        }
+      },
+    );
+  }
+
+  /// Marks the initiating side as awaiting acceptance. No banner is shown:
+  /// the user already knows they asked to connect; the peer's decision
+  /// surfaces through isConnected or the declined snackbar on disconnect.
+  void _startWaitingAcceptance() {
+    _pendingAccept = true;
+  }
+
+  /// Intercepts the READY handshake frame while waiting for acceptance,
+  /// then delegates everything else to the chat screen's consumer.
+  void _dispatchSocketData(
+    Uint8List bytes,
+    String text, {
+    required String kind,
+  }) {
+    if (_pendingAccept && text == _connectReadyFrame) {
+      _pendingAccept = false;
+      ConnectionRequestBanner.dismiss();
+      isConnected.value = true;
+      connectedDevice = _pendingRemote;
+      _pendingRemote = null;
+      _openChat();
+      return;
+    }
+    _chatDataCallback?.call(bytes, text, kind: kind);
+  }
+
   /// Connect to a discovered or paired device and await connection result.
   Future<bool> connectToDevice(BtDeviceInfo device) => connectToPeer(device.address);
 
@@ -197,6 +301,7 @@ class BtController extends GetxController implements ChatTransport {
   @override
   Future<bool> connectToPeer(String address) async {
     final Completer<bool> completer = Completer<bool>();
+    _outgoingConnect = true;
 
     // Stop scanning if still running to avoid connection interference
     if (isScanning.value) {
@@ -215,6 +320,7 @@ class BtController extends GetxController implements ChatTransport {
       _service.onSocketConnected = prevConnected;
       _service.onSocketDisconnected = prevDisconnected;
       _service.onSocketError = prevError;
+      _outgoingConnect = false;
     }
 
     _service.onSocketConnected = (remote) {
@@ -242,6 +348,8 @@ class BtController extends GetxController implements ChatTransport {
       // screen shows its own result message, and forwarding would queue a
       // snackbar behind the loading dialog.
       if (!completer.isCompleted) {
+        ConnectionRequestBanner.dismiss();
+        _pendingAccept = false;
         completer.complete(false);
       }
     };
@@ -262,6 +370,10 @@ class BtController extends GetxController implements ChatTransport {
         onTimeout: () async => await _service.isConnected(),
       );
       restore();
+      if (!result) {
+        ConnectionRequestBanner.dismiss();
+        _pendingAccept = false;
+      }
       return result;
     } catch (_) {
       restore();
