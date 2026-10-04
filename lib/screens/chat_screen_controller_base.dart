@@ -114,16 +114,23 @@ abstract class ChatScreenControllerBase extends GetxController {
     if (transport.isConnected.value || isConnecting.value) return;
     final address = chatSession.device['address'] as String?;
     if (address == null || address.isEmpty) {
-      Get.snackbar('Cannot connect', 'No device address stored for this chat.');
+      Get.snackbar('cannotConnectTitle'.tr, 'noDeviceAddressMessage'.tr);
       return;
     }
     isConnecting.value = true;
     final bool ok = await transport.connectToPeer(address);
     isConnecting.value = false;
-    if (!ok && !transport.isConnected.value) {
+    // A timeout while the peer is still deciding is not a failure: the link
+    // is alive and the READY frame will flip the chat to connected.
+    if (!ok && !transport.isConnected.value && !transport.isAwaitingAcceptance) {
       Get.snackbar(
-        'Could not connect!',
-        'Make sure the other device is discoverable and in range.',
+        'couldNotConnectTitle'.tr,
+        'couldNotConnectMessage'.tr,
+      );
+    } else if (!ok && !transport.isConnected.value) {
+      Get.snackbar(
+        'waitingAcceptanceTitle'.tr,
+        'waitingAcceptanceMessage'.tr,
       );
     }
   }
@@ -201,12 +208,25 @@ abstract class ChatScreenControllerBase extends GetxController {
     }
 
     setupCallbacks();
+    // Backfill ids for messages persisted by the old Hive schema (which
+    // never wrote `id`): deletion and progress bookkeeping key on ids, so
+    // legacy history needs one before it can be deleted.
+    var backfilled = false;
+    for (var i = 0; i < messages.length; i++) {
+      if (messages[i].id == null) {
+        messages[i] = messages[i].copyWith(id: Uuid().v4());
+        backfilled = true;
+      }
+    }
+    if (backfilled) {
+      _scheduleSave();
+    }
     // Opening the chat counts as "chat open" for the transport: a connection
     // arriving while this screen is visible must not push a second chat.
     transport.onChatOpened();
     _disconnectSubscription = transport.lastDisconnectReason.listen((reason) {
       if (reason != null && reason.isNotEmpty) {
-        Get.snackbar('Disconnected', 'Other device closed the connection');
+        Get.snackbar('disconnectedTitle'.tr, 'peerClosedConnectionMessage'.tr);
       }
     });
 
@@ -643,7 +663,7 @@ abstract class ChatScreenControllerBase extends GetxController {
 
     if (idx != -1 && idx < messages.length) {
       messages[idx] = messages[idx].copyWith(
-        text: '[Image] (${bytes.lengthInBytes} bytes)',
+        text: 'imageCaption'.trParams({'size': '${bytes.lengthInBytes}'}),
         isSentByMe: false,
         timestamp: DateTime.now(),
         imagePath: filePath,
@@ -654,7 +674,7 @@ abstract class ChatScreenControllerBase extends GetxController {
         0,
         MessageModel(
           id: Uuid().v4(),
-          text: '[Image] (${bytes.lengthInBytes} bytes)',
+          text: 'imageCaption'.trParams({'size': '${bytes.lengthInBytes}'}),
           isSentByMe: false,
           timestamp: DateTime.now(),
           imagePath: filePath,
@@ -801,6 +821,18 @@ abstract class ChatScreenControllerBase extends GetxController {
     }
   }
 
+  /// Removes one of the user's own messages by id (UI + persisted Hive
+  /// session). Local only: the peer's copy is untouched, so a later history
+  /// sync may re-deliver the message.
+  void deleteMessage(String? id) {
+    if (id == null) return;
+    final idx = messages.indexWhere((m) => m.id == id);
+    if (idx == -1) return;
+    messages.removeAt(idx);
+    _scheduleSave();
+    update();
+  }
+
   Future<void> pickAndSendImage() => _pickAndSend(ImageSource.gallery);
 
   Future<void> showImageSourceSheet() async {
@@ -822,7 +854,7 @@ abstract class ChatScreenControllerBase extends GetxController {
             children: [
               ListTile(
                 leading: const Icon(Icons.photo_library),
-                title: const Text('Gallery'),
+                title: Text('gallerySource'.tr),
                 onTap: () async {
                   Get.back();
                   await _pickAndSend(ImageSource.gallery);
@@ -830,7 +862,7 @@ abstract class ChatScreenControllerBase extends GetxController {
               ),
               ListTile(
                 leading: const Icon(Icons.photo_camera),
-                title: const Text('Camera'),
+                title: Text('cameraSource'.tr),
                 onTap: () async {
                   Get.back();
                   await _pickAndSend(ImageSource.camera);
@@ -910,7 +942,7 @@ abstract class ChatScreenControllerBase extends GetxController {
             : messages.indexWhere((m) => m.id == _outgoingProgressId);
         if (idx != null && idx >= 0 && idx < messages.length) {
           messages[idx] = messages[idx].copyWith(
-            text: '[Failed to send image]',
+            text: 'imageSendFailed'.tr,
             isTransferring: false,
           );
         }
@@ -942,7 +974,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     if (isRecording.value || !transport.isConnected.value) return;
     final status = await Permission.microphone.request();
     if (!status.isGranted) {
-      Get.snackbar('Microphone permission', 'Recording is not available.');
+      Get.snackbar('micPermissionTitle'.tr, 'recordingUnavailableMessage'.tr);
       return;
     }
     final dir = await getApplicationDocumentsDirectory();
@@ -960,7 +992,7 @@ abstract class ChatScreenControllerBase extends GetxController {
       }
       _recorder = null;
       _recordingPath = null;
-      Get.snackbar('Recording error', 'Could not start recording.');
+      Get.snackbar('recordingErrorTitle'.tr, 'recordingStartFailedMessage'.tr);
       return;
     }
     recordSeconds.value = 0;

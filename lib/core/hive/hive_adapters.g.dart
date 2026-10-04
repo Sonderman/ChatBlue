@@ -66,6 +66,7 @@ class MessageModelAdapter extends TypeAdapter<MessageModel> {
       for (int i = 0; i < numOfFields; i++) reader.readByte(): reader.read(),
     };
     return MessageModel(
+      id: fields[9] as String?,
       text: fields[0] as String,
       isSentByMe: fields[1] as bool,
       timestamp: fields[2] as DateTime,
@@ -80,7 +81,7 @@ class MessageModelAdapter extends TypeAdapter<MessageModel> {
   @override
   void write(BinaryWriter writer, MessageModel obj) {
     writer
-      ..writeByte(8)
+      ..writeByte(9)
       ..writeByte(0)
       ..write(obj.text)
       ..writeByte(1)
@@ -96,7 +97,9 @@ class MessageModelAdapter extends TypeAdapter<MessageModel> {
       ..writeByte(7)
       ..write(obj.transferKind)
       ..writeByte(8)
-      ..write(obj.imagePath);
+      ..write(obj.imagePath)
+      ..writeByte(9)
+      ..write(obj.id);
   }
 
   @override

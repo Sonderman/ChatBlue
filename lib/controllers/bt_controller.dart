@@ -24,6 +24,12 @@ class BtController extends GetxController implements ChatTransport {
   /// True while this device is the one initiating a connection (no incoming
   /// request banner is shown for self-initiated connects).
   bool _outgoingConnect = false;
+
+  /// When the last `connectToPeer` was started. Incoming socket events
+  /// within a short window after an initiation are treated as part of that
+  /// initiation (e.g. the peer connecting back simultaneously), so a
+  /// "Connection request" card can never appear for a link we started.
+  DateTime? _connectInitiatedAt;
   @override
   final Rxn<TransferState> outgoingTransfer = Rxn<TransferState>();
   @override
@@ -83,7 +89,7 @@ class BtController extends GetxController implements ChatTransport {
         debugPrint('Scan error: $message');
       }
       isScanning.value = false;
-      Get.snackbar('Scan error', message);
+      Get.snackbar('scanErrorTitle'.tr, message);
     };
 
     _service.onSocketConnected = (remote) {
@@ -94,7 +100,13 @@ class BtController extends GetxController implements ChatTransport {
         debugPrint('Socket connected to ${remote.address}');
       }
 
-      if (_outgoingConnect || _pendingAccept) {
+      // Treat connections arriving shortly after we initiated as part of
+      // our own attempt (the peer may be connecting back simultaneously).
+      final bool withinInitiationWindow =
+          _connectInitiatedAt != null &&
+          DateTime.now().difference(_connectInitiatedAt!).inSeconds < 20;
+
+      if (_outgoingConnect || _pendingAccept || withinInitiationWindow) {
         // We initiated the connection (or are still awaiting our own
         // request's acceptance): hold off isConnected/chat until the peer's
         // READY frame arrives. NO banner on this side — the user knows they
@@ -111,12 +123,13 @@ class BtController extends GetxController implements ChatTransport {
     _service.onSocketDisconnected = (reason) {
       isConnected.value = false;
       ConnectionRequestBanner.dismiss();
+      _connectInitiatedAt = null;
       if (_pendingAccept) {
         _pendingAccept = false;
         _pendingRemote = null;
         Get.snackbar(
-          'Connection declined',
-          'The peer declined the request or the link was lost.',
+          'connectionDeclinedTitle'.tr,
+          'connectionDeclinedMessage'.tr,
           snackPosition: SnackPosition.BOTTOM,
         );
       }
@@ -149,6 +162,9 @@ class BtController extends GetxController implements ChatTransport {
 
   @override
   String? get connectedDeviceName => connectedDevice?.name;
+
+  @override
+  bool get isAwaitingAcceptance => _pendingAccept;
 
   @override
   void onClose() {
@@ -275,18 +291,25 @@ class BtController extends GetxController implements ChatTransport {
     _pendingAccept = true;
   }
 
-  /// Intercepts the READY handshake frame while waiting for acceptance,
-  /// then delegates everything else to the chat screen's consumer.
+  /// Intercepts the READY handshake frame, then delegates everything else to
+  /// the chat screen's consumer.
+  ///
+  /// The frame is matched unconditionally (not only while [_pendingAccept]):
+  /// if the initiator's connect attempt timed out while the peer was still
+  /// deciding, the READY frame may arrive after [_pendingAccept] was reset —
+  /// it must still bind the connection and never leak into the chat as a
+  /// user-visible message.
   void _dispatchSocketData(
     Uint8List bytes,
     String text, {
     required String kind,
   }) {
-    if (_pendingAccept && text == _connectReadyFrame) {
+    if (text == _connectReadyFrame) {
       _pendingAccept = false;
+      _connectInitiatedAt = null;
       ConnectionRequestBanner.dismiss();
       isConnected.value = true;
-      connectedDevice = _pendingRemote;
+      connectedDevice ??= _pendingRemote;
       _pendingRemote = null;
       _openChat();
       return;
@@ -302,6 +325,7 @@ class BtController extends GetxController implements ChatTransport {
   Future<bool> connectToPeer(String address) async {
     final Completer<bool> completer = Completer<bool>();
     _outgoingConnect = true;
+    _connectInitiatedAt = DateTime.now();
 
     // Stop scanning if still running to avoid connection interference
     if (isScanning.value) {
@@ -371,8 +395,12 @@ class BtController extends GetxController implements ChatTransport {
       );
       restore();
       if (!result) {
+        // Deliberately NOT clearing _pendingAccept here: the socket may
+        // still be alive (the peer's accept can arrive late). The flag
+        // stays set until the READY frame is received or the socket
+        // disconnects, so a late event can never surface a
+        // "Connection request" card for a link we initiated ourselves.
         ConnectionRequestBanner.dismiss();
-        _pendingAccept = false;
       }
       return result;
     } catch (_) {

@@ -13,57 +13,86 @@ class WifiDirectScanScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = ensureRegistered(WifiController());
     return Scaffold(
-          appBar: AppBar(title: Text('Discover & Connect via Wifi'), centerTitle: true),
+          appBar: AppBar(title: Text('discoverConnectWifiTitle'.tr), centerTitle: true),
           body: Obx(
             () => Column(
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: controller.isServerModeActive.value ? Colors.green : null,
-                        foregroundColor: controller.isServerModeActive.value ? Colors.white : null,
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: controller.isServerModeActive.value
+                                  ? Colors.green
+                                  : null,
+                              foregroundColor: controller.isServerModeActive.value
+                                  ? Colors.white
+                                  : null,
+                            ),
+                            onPressed: controller.isServerModeActive.value
+                                ? controller.stopServer
+                                : () async {
+                                    controller.startServer();
+                                  },
+                            child: Text(
+                              controller.isServerModeActive.value
+                                  ? 'stopServer'.tr
+                                  : 'startServer'.tr,
+                            ),
+                          ),
+                        ),
                       ),
-                      onPressed: controller.isServerModeActive.value
-                          ? controller.stopServer
-                          : () async {
-                              controller.startServer();
-                            },
-                      child: Text(
-                        controller.isServerModeActive.value ? 'Stop Server' : 'Start Server',
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: controller.isScanning.value
+                                  ? Colors.green
+                                  : null,
+                              foregroundColor: controller.isScanning.value
+                                  ? Colors.white
+                                  : null,
+                            ),
+                            onPressed: controller.isScanning.value
+                                ? controller.stopDiscovery
+                                : () async {
+                                    controller.startDiscovery();
+                                  },
+                            child: Text(
+                              controller.isScanning.value
+                                  ? 'stopDiscovery'.tr
+                                  : 'startDiscovery'.tr,
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: controller.isScanning.value ? Colors.green : null,
-                        foregroundColor: controller.isScanning.value ? Colors.white : null,
-                      ),
-                      onPressed: controller.isScanning.value
-                          ? controller.stopDiscovery
-                          : () async {
-                              controller.startDiscovery();
-                            },
-                      child: Text(
-                        controller.isScanning.value ? 'Stop Discovery' : 'Start Discovery',
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
                 Expanded(
                   child: DefaultTabController(
                     length: 2,
                     child: Column(
                       children: [
-                        if (controller.isScanning.value) Text("Scanning for Devices"),
-                        Text("Nearby Devices (${controller.peers.length})"),
+                        if (controller.isScanning.value) Text('scanningForDevices'.tr),
+                        Text(
+                          'nearbyDevices'.trParams({
+                            'count': '${controller.peers.length}',
+                          }),
+                        ),
                         Expanded(
                           child: ListView.builder(
                             itemCount: controller.peers.length,
                             itemBuilder: (context, index) {
                               WdPeerInfo device = controller.peers[index];
                               return ListTile(
-                                title: Text(device.deviceName ?? 'Unknown'),
+                                title: Text(device.deviceName ?? 'unknownDevice'.tr),
                                 subtitle: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [Text(device.deviceAddress)],
@@ -83,18 +112,26 @@ class WifiDirectScanScreen extends StatelessWidget {
 
                                   await controller.connectToDevice(device);
 
-                                  // On success, WifiController dismisses the
-                                  // loading dialog itself and navigates to the
-                                  // chat screen; this screen only cleans up
-                                  // after failures.
-                                  if (!controller.isConnected.value && loading) {
+                                  if (loading) {
                                     Navigator.of(
                                       Get.overlayContext!,
                                       rootNavigator: true,
                                     ).pop();
+                                  }
+                                  // A timeout with the peer still deciding is
+                                  // NOT a failure: the link is alive and the
+                                  // READY frame will open the chat once the
+                                  // peer accepts.
+                                  if (!controller.isConnected.value &&
+                                      !controller.isAwaitingAcceptance) {
                                     Get.snackbar(
-                                      'Could not connect!',
-                                      "Make sure the other device is discoverable and in range.",
+                                      'couldNotConnectTitle'.tr,
+                                      'couldNotConnectMessage'.tr,
+                                    );
+                                  } else if (!controller.isConnected.value) {
+                                    Get.snackbar(
+                                      'waitingAcceptanceTitle'.tr,
+                                      'waitingAcceptanceMessage'.tr,
                                     );
                                   }
                                 },

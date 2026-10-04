@@ -179,8 +179,8 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
                       const SizedBox(width: 6),
                       Text(
                         controller.isConnected.value
-                            ? 'Connected'
-                            : 'Not Connected',
+                            ? 'connectedStatus'.tr
+                            : 'notConnectedStatus'.tr,
                         style: TextStyle(
                           fontSize: 11,
                           color: controller.isConnected.value
@@ -199,7 +199,7 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
       actions: [
         IconButton(
           icon: Icon(Icons.delete_sweep_outlined, color: p.muted),
-          tooltip: 'Clear Chat',
+          tooltip: 'clearChatTooltip'.tr,
           onPressed: () => showChatClearDialog(controller),
         ),
       ],
@@ -287,15 +287,15 @@ Future<void> showChatClearDialog(ChatScreenControllerBase controller) async {
         borderRadius: BorderRadius.circular(20),
         side: BorderSide(color: p.border),
       ),
-      title: Text('Clear conversation', style: TextStyle(color: p.messageText)),
+      title: Text('clearConversationTitle'.tr, style: TextStyle(color: p.messageText)),
       content: Text(
-        'Are you sure you want to clear all messages?',
+        'clearConversationMessage'.tr,
         style: TextStyle(color: p.muted),
       ),
       actions: [
         TextButton(
           onPressed: () => Get.back(result: false),
-          child: Text('Cancel', style: TextStyle(color: p.muted)),
+          child: Text('cancel'.tr, style: TextStyle(color: p.muted)),
         ),
         FilledButton(
           style: FilledButton.styleFrom(
@@ -303,7 +303,7 @@ Future<void> showChatClearDialog(ChatScreenControllerBase controller) async {
             foregroundColor: Colors.white,
           ),
           onPressed: () => Get.back(result: true),
-          child: const Text('Clear'),
+          child: Text('clearAction'.tr),
         ),
       ],
     ),
@@ -311,6 +311,46 @@ Future<void> showChatClearDialog(ChatScreenControllerBase controller) async {
   if (clear == true) {
     controller.messages.clear();
     controller.saveChatSession();
+  }
+}
+
+/// Theme-aware confirmation dialog for removing one of the user's own
+/// messages (local only — the peer's copy is untouched).
+Future<void> showDeleteMessageDialog(
+  ChatScreenControllerBase controller,
+  MessageModel message,
+) async {
+  final p = _dialogPalette();
+  final delete = await Get.dialog<bool>(
+    AlertDialog(
+      backgroundColor: p.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: p.border),
+      ),
+      title: Text('deleteMessageTitle'.tr, style: TextStyle(color: p.messageText)),
+      content: Text(
+        'deleteMessageBody'.tr,
+        style: TextStyle(color: p.muted),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Get.back(result: false),
+          child: Text('cancel'.tr, style: TextStyle(color: p.muted)),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFFC62828),
+            foregroundColor: Colors.white,
+          ),
+          onPressed: () => Get.back(result: true),
+          child: Text('delete'.tr),
+        ),
+      ],
+    ),
+  );
+  if (delete == true) {
+    controller.deleteMessage(message.id);
   }
 }
 
@@ -324,16 +364,15 @@ Future<bool?> showChatTransferDialog() {
         borderRadius: BorderRadius.circular(20),
         side: BorderSide(color: p.border),
       ),
-      title: Text('Transfer in progress', style: TextStyle(color: p.messageText)),
+      title: Text('transferInProgressTitle'.tr, style: TextStyle(color: p.messageText)),
       content: Text(
-        'An image transfer is still running. Leaving now will close '
-        'the connection and cancel it.',
+        'transferInProgressMessage'.tr,
         style: TextStyle(color: p.muted),
       ),
       actions: [
         TextButton(
           onPressed: () => Get.back(result: false),
-          child: Text('Stay', style: TextStyle(color: p.accent)),
+          child: Text('stayAction'.tr, style: TextStyle(color: p.accent)),
         ),
         FilledButton(
           style: FilledButton.styleFrom(
@@ -341,7 +380,7 @@ Future<bool?> showChatTransferDialog() {
             foregroundColor: Colors.white,
           ),
           onPressed: () => Get.back(result: true),
-          child: const Text('Leave'),
+          child: Text('leaveAction'.tr),
         ),
       ],
     ),
@@ -363,11 +402,12 @@ class ChatSyncBanner extends StatelessWidget {
     final p = ChatPalette.of(context);
     return Obx(() {
       if (!controller.isSyncing.value) return const SizedBox.shrink();
-      // The app bar floats above the canvas (extendBodyBehindAppBar), so the
-      // banner starts below its 64 px height plus the status bar inset.
-      final topInset = MediaQuery.paddingOf(context).top + 64;
+      // The app bar floats above the canvas (extendBodyBehindAppBar). The
+      // body sits inside a SafeArea that already consumes the status bar
+      // inset, so the banner only needs the app bar's 64 px toolbar height
+      // to sit flush against its bottom edge.
       return Container(
-        margin: EdgeInsets.only(top: topInset, left: 10, right: 10),
+        margin: const EdgeInsets.only(top: 66, left: 10, right: 10),
         padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
         decoration: BoxDecoration(
           color: p.bar,
@@ -390,7 +430,7 @@ class ChatSyncBanner extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  'Syncing history…',
+                  'syncingHistory'.tr,
                   style: TextStyle(fontSize: 11, color: p.muted),
                 ),
               ],
@@ -420,9 +460,11 @@ class ChatMessageList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // The app bar floats above the canvas (extendBodyBehindAppBar), so the
-    // list starts below its 64 px height plus the status bar inset.
-    final topInset = MediaQuery.paddingOf(context).top + 72;
+    // The app bar floats above the canvas (extendBodyBehindAppBar). The
+    // body sits inside a SafeArea that already consumes the status bar
+    // inset, so the list only needs the app bar's 64 px toolbar height plus
+    // a small breathing gap to start below it.
+    const topInset = 72.0;
     return Obx(
       () => ListView.builder(
         reverse: true,
@@ -474,6 +516,44 @@ class ChatMessageBubble extends StatelessWidget {
         children: [
           SelectableText(
             message.text,
+            // Long-press opens the text selection toolbar: Copy is always
+            // offered (without requiring a selection it copies the whole
+            // message); own messages additionally get a Delete action that
+            // routes through the themed confirmation dialog.
+            contextMenuBuilder: (context, editableTextState) {
+              final items = editableTextState.contextMenuButtonItems;
+              items.add(
+                ContextMenuButtonItem(
+                  label: 'copyAction'.tr,
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: message.text));
+                    editableTextState.hideToolbar();
+                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(''),
+                        duration: Duration(milliseconds: 800),
+                      ),
+                    );
+                  },
+                ),
+              );
+              if (mine && controller != null) {
+                items.add(
+                  ContextMenuButtonItem(
+                    label: 'delete'.tr,
+                    onPressed: () {
+                      editableTextState.hideToolbar();
+                      showDeleteMessageDialog(controller!, message);
+                    },
+                  ),
+                );
+              }
+              return AdaptiveTextSelectionToolbar.buttonItems(
+                buttonItems: items,
+                anchors: editableTextState.contextMenuAnchors,
+              );
+            },
             style: TextStyle(
               height: 1.25,
               fontSize: 15,
@@ -493,28 +573,38 @@ class ChatMessageBubble extends StatelessWidget {
       );
     }
 
-    return Align(
-      alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        constraints: BoxConstraints(maxWidth: 78.w),
-        margin: const EdgeInsets.symmetric(vertical: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        decoration: BoxDecoration(
-          gradient: mine ? LinearGradient(colors: p.sentGradient) : null,
-          color: mine ? null : p.bubbleIn,
-          borderRadius: radius,
-          border: mine ? null : Border.all(color: p.border),
-          boxShadow: mine
-              ? [
-                  BoxShadow(
-                    color: p.sentGlow,
-                    blurRadius: 14,
-                    offset: const Offset(0, 4),
-                  ),
-                ]
-              : null,
+    // Long-press on any (non-text) own bubble asks before deleting; text
+    // bubbles are handled via their selection toolbar above. Transfers in
+    // flight are excluded — mid-transfer deletions would corrupt the
+    // progress-bubble bookkeeping.
+    return GestureDetector(
+      onLongPress:
+          (mine && !message.isTransferring && controller != null)
+          ? () => showDeleteMessageDialog(controller!, message)
+          : null,
+      child: Align(
+        alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          constraints: BoxConstraints(maxWidth: 78.w),
+          margin: const EdgeInsets.symmetric(vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            gradient: mine ? LinearGradient(colors: p.sentGradient) : null,
+            color: mine ? null : p.bubbleIn,
+            borderRadius: radius,
+            border: mine ? null : Border.all(color: p.border),
+            boxShadow: mine
+                ? [
+                    BoxShadow(
+                      color: p.sentGlow,
+                      blurRadius: 14,
+                      offset: const Offset(0, 4),
+                    ),
+                  ]
+                : null,
+          ),
+          child: content,
         ),
-        child: content,
       ),
     );
   }
@@ -704,7 +794,8 @@ class ChatMessageBubble extends StatelessWidget {
         ),
         const SizedBox(height: 6),
         Text(
-          '${mine ? 'Sending' : 'Receiving'} $current/$total bytes ($pct%)',
+          '${mine ? 'sendingLabel'.tr : 'receivingLabel'.tr} '
+          '$current/$total bytes ($pct%)',
           textAlign: TextAlign.right,
           style: TextStyle(
             fontSize: 11,
@@ -811,7 +902,7 @@ class ChatInputBar extends StatelessWidget {
                 ),
                 IconButton(
                   icon: Icon(Icons.image_outlined, color: p.accent),
-                  tooltip: 'Send image',
+                  tooltip: 'sendImageTooltip'.tr,
                   onPressed: () => controller.showImageSourceSheet(),
                 ),
             Expanded(
@@ -821,7 +912,7 @@ class ChatInputBar extends StatelessWidget {
                 textInputAction: TextInputAction.send,
                 onSubmitted: (_) => _send(),
                 decoration: InputDecoration(
-                  hintText: 'Type a message',
+                  hintText: 'typeMessageHint'.tr,
                   hintStyle: TextStyle(color: p.muted),
                   isDense: true,
                   filled: true,
@@ -862,7 +953,10 @@ class _RecordingBanner extends StatelessWidget {
     return Obx(() {
       final seconds = controller.recordSeconds.value;
       final label =
-          'Recording ${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+          'recordingLabel'.trParams({
+            'time':
+                '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}',
+          });
     return GestureDetector(
       // Long-press anywhere on the banner also cancels.
       onLongPress: controller.cancelRecording,
@@ -905,7 +999,7 @@ class _RecordingBanner extends StatelessWidget {
                   Icon(Icons.close, size: 14, color: palette.muted),
                   const SizedBox(width: 4),
                   Text(
-                    'Cancel',
+                    'cancel'.tr,
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w600,
@@ -946,7 +1040,7 @@ class _ConnectBar extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            'Not connected',
+            'notConnectedBar'.tr,
             style: TextStyle(fontSize: 11, color: palette.muted),
           ),
           const SizedBox(height: 8),
@@ -982,14 +1076,14 @@ class _ConnectBar extends StatelessWidget {
                               color: Colors.white,
                             ),
                           )
-                        : const Row(
+                        : Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(Icons.link_rounded, color: Colors.white, size: 20),
-                              SizedBox(width: 8),
+                              const Icon(Icons.link_rounded, color: Colors.white, size: 20),
+                              const SizedBox(width: 8),
                               Text(
-                                'Connect',
-                                style: TextStyle(
+                                'connectAction'.tr,
+                                style: const TextStyle(
                                   color: Colors.white,
                                   fontWeight: FontWeight.w700,
                                   fontSize: 15,
@@ -1067,7 +1161,7 @@ class ChatImagePreviewScreen extends StatelessWidget {
         actions: [
           IconButton(
             icon: Icon(Icons.save_alt, color: p.accent),
-            tooltip: 'Save to Gallery',
+            tooltip: 'saveToGalleryTooltip'.tr,
             onPressed: () => _saveToGallery(context),
           ),
         ],
@@ -1090,7 +1184,7 @@ class ChatImagePreviewScreen extends StatelessWidget {
       if (!status.isGranted) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Permission is required to save images.')),
+            SnackBar(content: Text('permissionRequiredMessage'.tr)),
           );
         }
         return;
@@ -1102,7 +1196,7 @@ class ChatImagePreviewScreen extends StatelessWidget {
         if (!status.isGranted) {
           if (context.mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Photos permission is required to save images.')),
+              SnackBar(content: Text('photosPermissionRequiredMessage'.tr)),
             );
           }
           return;
@@ -1118,7 +1212,7 @@ class ChatImagePreviewScreen extends StatelessWidget {
     if (context.mounted) {
       final ok = res is Map && (res['isSuccess'] == true || res['filePath'] != null);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ok ? 'Saved to gallery' : 'Save failed')),
+        SnackBar(content: Text(ok ? 'savedToGallery'.tr : 'saveFailed'.tr)),
       );
     }
   }

@@ -26,11 +26,11 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (controller) {
         return Scaffold(
           appBar: AppBar(
-            title: Text(_tabIndex == 0 ? appName : 'Settings'),
+            title: Text(_tabIndex == 0 ? appName : 'settingsTab'.tr),
             actions: _tabIndex == 0
                 ? [
                     IconButton(
-                      tooltip: 'Scan & Connect with Bluetooth',
+                      tooltip: 'scanBluetoothTooltip'.tr,
                       icon: const Icon(Icons.bluetooth_searching),
                       onPressed: () {
                         Get.to(() => BluetoothScanScreen())
@@ -38,7 +38,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       },
                     ),
                     IconButton(
-                      tooltip: 'Scan & Connect with Wifi Direct',
+                      tooltip: 'scanWifiTooltip'.tr,
                       icon: const Icon(Icons.wifi_tethering),
                       onPressed: () {
                         Get.to(() => WifiDirectScanScreen())
@@ -58,16 +58,16 @@ class _HomeScreenState extends State<HomeScreen> {
           bottomNavigationBar: NavigationBar(
             selectedIndex: _tabIndex,
             onDestinationSelected: (index) => setState(() => _tabIndex = index),
-            destinations: const [
+            destinations: [
               NavigationDestination(
                 icon: Icon(Icons.chat_bubble_outline),
                 selectedIcon: Icon(Icons.chat_bubble),
-                label: 'Chats',
+                label: 'chatsTab'.tr,
               ),
               NavigationDestination(
                 icon: Icon(Icons.settings_outlined),
                 selectedIcon: Icon(Icons.settings),
-                label: 'Settings',
+                label: 'settingsTab'.tr,
               ),
             ],
           ),
@@ -94,10 +94,10 @@ class _ChatsTab extends StatelessWidget {
             children: [
               Icon(Icons.chat_bubble_outline, size: 64, color: scheme.outlineVariant),
               const SizedBox(height: 12),
-              const Text('No chats yet'),
+              Text('noChatsYet'.tr),
               const SizedBox(height: 4),
               Text(
-                'Tap the bluetooth icon to find a device to chat with',
+                'noChatsHint'.tr,
                 style: TextStyle(color: scheme.onSurfaceVariant),
               ),
             ],
@@ -134,16 +134,19 @@ class _ChatsTab extends StatelessWidget {
               showDialog(
                 context: context,
                 builder: (context) => AlertDialog(
-                  title: Text('Delete ${s.name}'),
-                  content: Text('Are you sure you want to delete this chat session?'),
+                  title: Text('deleteChatTitle'.trParams({'name': s.name})),
+                  content: Text('deleteChatMessage'.tr),
                   actions: [
-                    TextButton(onPressed: () => Get.back(), child: const Text('Cancel')),
+                    TextButton(
+                      onPressed: () => Get.back(),
+                      child: Text('cancel'.tr),
+                    ),
                     TextButton(
                       onPressed: () {
                         controller.deleteSession(s);
                         Get.back();
                       },
-                      child: const Text('Delete'),
+                      child: Text('delete'.tr),
                     ),
                   ],
                 ),

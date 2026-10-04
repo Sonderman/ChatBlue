@@ -31,6 +31,12 @@ abstract interface class ChatTransport {
   /// Human-readable name of the connected peer.
   String? get connectedDeviceName;
 
+  /// True while this device initiated a connect and the peer's acceptance
+  /// (READY frame) is still pending — the link is alive but not yet
+  /// "connected". Callers use this to avoid reporting a false failure when
+  /// `connectToPeer` times out while the peer is still deciding.
+  bool get isAwaitingAcceptance => false;
+
   Future<void> disconnectFromDevice();
   Future<void> sendMessage(String message);
   Future<void> sendBytes(Uint8List bytes);

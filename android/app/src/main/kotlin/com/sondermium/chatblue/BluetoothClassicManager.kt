@@ -91,9 +91,9 @@ class BluetoothClassicManager(private val context: Context) {
     }
 
     fun startDiscovery() {
-        val adapter = bluetoothAdapter ?: return onScanError?.invoke("Bluetooth not supported") ?: Unit
+        val adapter = bluetoothAdapter ?: return onScanError?.invoke(context.getString(R.string.bt_scan_error_no_adapter)) ?: Unit
         if (!hasScanPermission()) {
-            onScanError?.invoke("Missing BLUETOOTH_SCAN permission")
+            onScanError?.invoke(context.getString(R.string.bt_scan_error_no_permission))
             return
         }
         tryRegisterReceiver()
@@ -104,16 +104,14 @@ class BluetoothClassicManager(private val context: Context) {
         val started = try {
             adapter.startDiscovery()
         } catch (e: SecurityException) {
-            onScanError?.invoke("Scan permission missing: ${e.message}")
+            onScanError?.invoke(context.getString(R.string.bt_scan_error_permission_denied, e.message.orEmpty()))
             return
         }
         if (!started) {
             // startDiscovery() returns false when the stack refuses (e.g.
             // MIUI with Location services off, or Bluetooth mid-toggle).
             // Surface it instead of failing silently.
-            onScanError?.invoke(
-                "Scan could not start. Enable Bluetooth and Location services, then retry."
-            )
+            onScanError?.invoke(context.getString(R.string.bt_scan_error_could_not_start))
         }
     }
 
@@ -246,7 +244,7 @@ class BluetoothClassicManager(private val context: Context) {
                             } catch (_: SecurityException) {}
                         }
                     } catch (e: SecurityException) {
-                        onScanError?.invoke("SecurityException: ${e.message}")
+                        onScanError?.invoke(context.getString(R.string.bt_scan_error_security, e.message.orEmpty()))
                     }
                 }
                 BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
@@ -267,7 +265,7 @@ class BluetoothClassicManager(private val context: Context) {
                             candidatesByAddress.remove(device.address)
                         }
                     } catch (e: Exception) {
-                        onScanError?.invoke("UUID check failed: ${e.message}")
+                        onScanError?.invoke(context.getString(R.string.bt_scan_error_uuid, e.message.orEmpty()))
                     }
                 }
             }

@@ -21,7 +21,7 @@ ChatBlue: GetX tabanlı Flutter P2P mesajlaşma uygulaması. İki taşıma kanal
 ## Konvansiyonlar
 
 - Yanıt dili: **Türkçe** (kullanıcı İngilizce yazarsa o dile geçilir).
-- UI dili: **İngilizce**.
+- UI dili: **İngilizce varsayılan + Türkçe seçeneği** (Settings → Language; ilk açılışta cihaz dili Türkçe ise Türkçe başlar; çeviriler `lib/core/translations/app_translations.dart` üzerinden `.tr` ile tüketilir).
 - Göreve başlamadan önce `project_overview.md` oku; önemli değişikliklerden sonra onu güncelle (architecture / directory / recent-changes bölümleri).
 - Commit istendiğinde: tek commit, mesaj tüm değişiklikleri kapsar, commit öncesi `project_overview.md` güncellenir.
 - Kod: mevcut stile ve GetX katman düzenine (services → controllers → screens) uy; mevcut özellikleri bozmadan değişiklik yap.

@@ -1,7 +1,9 @@
 import 'package:chatblue/config.dart';
 import 'package:chatblue/core/services/hive_service.dart';
+import 'package:chatblue/core/services/locale_service.dart';
 import 'package:chatblue/core/services/theme_service.dart';
 import 'package:chatblue/core/theme/app_theme.dart';
+import 'package:chatblue/core/translations/app_translations.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -23,10 +25,14 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final themeService = Get.find<ThemeService>();
+    final localeService = Get.find<LocaleService>();
     return Sizer(
       builder: (context, orientation, deviceType) => GetMaterialApp(
         title: appName,
         debugShowCheckedModeBanner: false,
+        translations: AppTranslations(),
+        locale: localeService.locale.value,
+        fallbackLocale: const Locale('en', 'US'),
         theme: AppTheme.light,
         darkTheme: AppTheme.dark,
         themeMode: themeService.mode.value,
@@ -52,6 +58,15 @@ Future<void> setupServices() async {
     // Fail open: theme stays on system default.
     if (kDebugMode && showDebugLogs) {
       debugPrint('ThemeService init failed: $e');
+    }
+  }
+  try {
+    // Locale persistence box (depends on Hive being up).
+    await Get.putAsync(() => LocaleService().init());
+  } catch (e) {
+    // Fail open: locale falls back to the device language.
+    if (kDebugMode && showDebugLogs) {
+      debugPrint('LocaleService init failed: $e');
     }
   }
 }

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Bluetooth tarama hata mesajları (uygulama snackbar'ında görünür). -->
+    <string name="bt_scan_error_no_adapter">Bluetooth desteklenmiyor</string>
+    <string name="bt_scan_error_no_permission">BLUETOOTH_SCAN izni eksik</string>
+    <string name="bt_scan_error_permission_denied">Tarama izni eksik: %1$s</string>
+    <string name="bt_scan_error_could_not_start">Tarama başlatılamadı. Bluetooth ve Konum servislerini açıp tekrar deneyin.</string>
+    <string name="bt_scan_error_security">Güvenlik istisnası: %1$s</string>
+    <string name="bt_scan_error_uuid">UUID kontrolü başarısız: %1$s</string>
+</resources>

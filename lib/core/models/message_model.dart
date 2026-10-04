@@ -3,16 +3,36 @@
 
 import 'package:hive_ce/hive.dart';
 
+/// Field indexes are part of the persisted schema — keep them stable.
+/// The generator appends `id` at the end (index 9); older records simply
+/// lack it (read back as null and backfilled on chat open).
 class MessageModel extends HiveObject {
-  final String? id;
+  @HiveField(0)
   final String text;
+
+  @HiveField(1)
   final bool isSentByMe;
+
+  @HiveField(2)
   final DateTime timestamp;
-  final String? imagePath;
+
+  @HiveField(3)
+  final String? id;
+
+  @HiveField(4)
   final bool isTransferring;
+
+  @HiveField(5)
   final int? transferCurrent;
+
+  @HiveField(6)
   final int? transferTotal;
+
+  @HiveField(7)
   final String? transferKind; // 'bytes' | 'text'
+
+  @HiveField(8)
+  final String? imagePath;
 
   MessageModel({
     this.id,

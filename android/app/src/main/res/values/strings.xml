@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Bluetooth scan error messages surfaced in the app's snackbar. -->
+    <string name="bt_scan_error_no_adapter">Bluetooth not supported</string>
+    <string name="bt_scan_error_no_permission">Missing BLUETOOTH_SCAN permission</string>
+    <string name="bt_scan_error_permission_denied">Scan permission missing: %1$s</string>
+    <string name="bt_scan_error_could_not_start">Scan could not start. Enable Bluetooth and Location services, then retry.</string>
+    <string name="bt_scan_error_security">Security exception: %1$s</string>
+    <string name="bt_scan_error_uuid">UUID check failed: %1$s</string>
+</resources>

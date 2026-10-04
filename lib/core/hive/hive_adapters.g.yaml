@@ -21,7 +21,7 @@ types:
         index: 5
   MessageModel:
     typeId: 1
-    nextIndex: 9
+    nextIndex: 10
     fields:
       text:
         index: 0
@@ -39,3 +39,5 @@ types:
         index: 7
       imagePath:
         index: 8
+      id:
+        index: 9

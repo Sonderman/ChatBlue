@@ -172,7 +172,7 @@ class _ConnectionRequestCard extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    'Connection request',
+                    'connectionRequestTitle'.tr,
                     style: TextStyle(fontSize: 11, color: palette.muted),
                   ),
                   const SizedBox(height: 2),

@@ -13,44 +13,67 @@ class BluetoothScanScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = ensureRegistered(BtController());
     return Scaffold(
-          appBar: AppBar(title: Text('Discover & Connect'), centerTitle: true),
+          appBar: AppBar(title: Text('discoverConnectTitle'.tr), centerTitle: true),
           body: Obx(
             () => Column(
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: controller.isServerModeActive.value ? Colors.green : null,
-                        foregroundColor: controller.isServerModeActive.value ? Colors.white : null,
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: controller.isServerModeActive.value
+                                  ? Colors.green
+                                  : null,
+                              foregroundColor: controller.isServerModeActive.value
+                                  ? Colors.white
+                                  : null,
+                            ),
+                            onPressed: controller.isServerModeActive.value
+                                ? controller.stopServer
+                                : () async {
+                                    controller.startServer();
+                                  },
+                            child: Text(
+                              controller.isServerModeActive.value
+                                  ? 'stopDiscoverable'.tr
+                                  : 'makeDiscoverable'.tr,
+                            ),
+                          ),
+                        ),
                       ),
-                      onPressed: controller.isServerModeActive.value
-                          ? controller.stopServer
-                          : () async {
-                              controller.startServer();
-                            },
-                      child: Text(
-                        controller.isServerModeActive.value
-                            ? 'Stop Discoverable'
-                            : 'Make Discoverable',
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: controller.isScanning.value
+                                  ? Colors.green
+                                  : null,
+                              foregroundColor: controller.isScanning.value
+                                  ? Colors.white
+                                  : null,
+                            ),
+                            onPressed: controller.isScanning.value
+                                ? controller.stopScan
+                                : () async {
+                                    controller.startScan();
+                                  },
+                            child: Text(
+                              controller.isScanning.value
+                                  ? 'stopScanning'.tr
+                                  : 'scanForDevices'.tr,
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: controller.isScanning.value ? Colors.green : null,
-                        foregroundColor: controller.isScanning.value ? Colors.white : null,
-                      ),
-                      onPressed: controller.isScanning.value
-                          ? controller.stopScan
-                          : () async {
-                              controller.startScan();
-                            },
-                      child: Text(
-                        controller.isScanning.value ? 'Stop Scanning' : 'Scan for Devices',
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
                 Expanded(
                   child: DefaultTabController(
@@ -59,8 +82,16 @@ class BluetoothScanScreen extends StatelessWidget {
                       children: [
                         TabBar(
                           tabs: [
-                            Tab(text: 'Nearby Devices (${controller.scanResults.length})'),
-                            Tab(text: 'Paired Devices (${controller.pairedDevices.length})'),
+                            Tab(
+                              text: 'nearbyDevices'.trParams({
+                                'count': '${controller.scanResults.length}',
+                              }),
+                            ),
+                            Tab(
+                              text: 'pairedDevices'.trParams({
+                                'count': '${controller.pairedDevices.length}',
+                              }),
+                            ),
                           ],
                         ),
                         Expanded(
@@ -71,7 +102,7 @@ class BluetoothScanScreen extends StatelessWidget {
                                 itemBuilder: (context, index) {
                                   BtDeviceInfo device = controller.scanResults[index];
                                   return ListTile(
-                                    title: Text(device.name ?? 'Unknown'),
+                                    title: Text(device.name ?? 'unknownDevice'.tr),
                                     subtitle: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [Text(device.address)],
@@ -92,18 +123,26 @@ class BluetoothScanScreen extends StatelessWidget {
 
                                       await controller.connectToDevice(device);
 
-                                      // On success, BtController dismisses the
-                                      // loading dialog itself and navigates to
-                                      // the chat screen; this screen only
-                                      // cleans up after failures.
-                                      if (!controller.isConnected.value && loading) {
+                                      if (loading) {
                                         Navigator.of(
                                           Get.overlayContext!,
                                           rootNavigator: true,
                                         ).pop();
+                                      }
+                                      // A timeout with the peer still deciding
+                                      // is NOT a failure: the link is alive
+                                      // and the READY frame will open the
+                                      // chat once the peer accepts.
+                                      if (!controller.isConnected.value &&
+                                          !controller.isAwaitingAcceptance) {
                                         Get.snackbar(
-                                          'Could not connect!',
-                                          "Make sure the other device is discoverable and in range.",
+                                          'couldNotConnectTitle'.tr,
+                                          'couldNotConnectMessage'.tr,
+                                        );
+                                      } else if (!controller.isConnected.value) {
+                                        Get.snackbar(
+                                          'waitingAcceptanceTitle'.tr,
+                                          'waitingAcceptanceMessage'.tr,
                                         );
                                       }
                                     },
@@ -116,8 +155,10 @@ class BluetoothScanScreen extends StatelessWidget {
                                 itemBuilder: (context, index) {
                                   BtDeviceInfo device = controller.pairedDevices[index];
                                   return ListTile(
-                                    title: Text(device.name ?? 'Unknown'),
-                                    subtitle: Text('${device.address} | Previously connected'),
+                                    title: Text(device.name ?? 'unknownDevice'.tr),
+                                    subtitle: Text(
+                                      '${device.address} | ${'previouslyConnected'.tr}',
+                                    ),
                                     leading: Icon(Icons.phone_android),
                                     trailing: Icon(Icons.link, color: Colors.blue),
                                     onTap: () async {
@@ -137,10 +178,21 @@ class BluetoothScanScreen extends StatelessWidget {
                                                                               ).pop();
                                                                             }
 
-                                                                            if (!(connected && controller.isConnected.value)) {
+                                                                            // A timeout with the peer still deciding is NOT a
+                                                                            // failure: the link is alive and the READY frame
+                                                                            // will open the chat once the peer accepts.
+                                                                            if (!connected &&
+                                                                                !controller.isConnected.value &&
+                                                                                !controller.isAwaitingAcceptance) {
                                                                               Get.snackbar(
-                                                                                'Could not connect!',
-                                                                                "Make sure the other device is discoverable and in range.",
+                                                                                'couldNotConnectTitle'.tr,
+                                                                                'couldNotConnectMessage'.tr,
+                                                                              );
+                                                                            } else if (!connected &&
+                                                                                !controller.isConnected.value) {
+                                                                              Get.snackbar(
+                                                                                'waitingAcceptanceTitle'.tr,
+                                                                                'waitingAcceptanceMessage'.tr,
                                                                               );
                                                                             }
                                                                             // On success, BtController navigates to
@@ -153,8 +205,10 @@ class BluetoothScanScreen extends StatelessWidget {
                                                                               ).pop();
                                                                             }
                                                                             Get.snackbar(
-                                                                              'Connection Error',
-                                                                              'Could not connect to device: $e',
+                                                                              'connectionError'.tr,
+                                                                              'connectErrorDetail'.trParams(
+                                                                                {'error': '$e'},
+                                                                              ),
                                                                             );
                                                                           }
                                                                         },
