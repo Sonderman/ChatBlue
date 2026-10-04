@@ -1,5 +1,6 @@
 // Settings panel: language, theme switching and app info. Reached from the
-// home screen's bottom navigation.
+// home screen's settings tab (app-bar icon). Owns its Scaffold/AppBar so it
+// renders with the proper theme even when shown as a standalone tab.
 
 import 'package:chatblue/config.dart';
 import 'package:chatblue/core/services/locale_service.dart';
@@ -16,10 +17,12 @@ class SettingsScreen extends StatelessWidget {
     final localeService = Get.find<LocaleService>();
     final scheme = Theme.of(context).colorScheme;
 
-    return ListView(
-      padding: const EdgeInsets.all(16),
-      children: [
-        _SectionLabel('appearanceSection'.tr),
+    return Scaffold(
+      appBar: AppBar(title: Text('settingsTab'.tr)),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _SectionLabel('appearanceSection'.tr),
         const SizedBox(height: 8),
         _settingsCard(
           scheme: scheme,
@@ -130,6 +133,7 @@ class SettingsScreen extends StatelessWidget {
           ),
         ),
       ],
+      ),
     );
   }
 

@@ -7,8 +7,10 @@ import 'package:chatblue/screens/wifid_scan_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
-/// Lists previous chat sessions (tab 1) and hosts the settings panel
-/// (tab 2) behind a bottom navigation bar.
+/// Hosts the chat session list (tab 0) and the two scan entry points
+/// (Bluetooth / Wi‑Fi Direct, tabs 1-2) behind a bottom navigation bar;
+/// those tabs live in an IndexedStack — switching is in-place, never a
+/// pushed route. Settings is pushed as its own route from the app-bar icon.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -25,39 +27,36 @@ class _HomeScreenState extends State<HomeScreen> {
       init: HomeController(),
       builder: (controller) {
         return Scaffold(
-          appBar: AppBar(
-            title: Text(_tabIndex == 0 ? appName : 'settingsTab'.tr),
-            actions: _tabIndex == 0
-                ? [
+          // Only the Chats tab gets the home app bar; the scan screens
+          // provide their own app bar inside the tab.
+          appBar: _tabIndex == 0
+              ? AppBar(
+                  title: const Text(appName),
+                  actions: [
                     IconButton(
-                      tooltip: 'scanBluetoothTooltip'.tr,
-                      icon: const Icon(Icons.bluetooth_searching),
-                      onPressed: () {
-                        Get.to(() => BluetoothScanScreen())
-                            ?.then((_) => controller.refreshSessions());
-                      },
+                      tooltip: 'settingsTab'.tr,
+                      icon: const Icon(Icons.settings_outlined),
+                      onPressed: () => Get.to(() => const SettingsScreen()),
                     ),
-                    IconButton(
-                      tooltip: 'scanWifiTooltip'.tr,
-                      icon: const Icon(Icons.wifi_tethering),
-                      onPressed: () {
-                        Get.to(() => WifiDirectScanScreen())
-                            ?.then((_) => controller.refreshSessions());
-                      },
-                    ),
-                  ]
-                : null,
-          ),
+                  ],
+                )
+              : null,
           body: IndexedStack(
             index: _tabIndex,
             children: [
               _ChatsTab(controller: controller),
-              const SettingsScreen(),
+              const BluetoothScanScreen(),
+              const WifiDirectScanScreen(),
             ],
           ),
           bottomNavigationBar: NavigationBar(
             selectedIndex: _tabIndex,
-            onDestinationSelected: (index) => setState(() => _tabIndex = index),
+            onDestinationSelected: (index) {
+              setState(() => _tabIndex = index);
+              if (index == 0) {
+                controller.refreshSessions();
+              }
+            },
             destinations: [
               NavigationDestination(
                 icon: Icon(Icons.chat_bubble_outline),
@@ -65,9 +64,12 @@ class _HomeScreenState extends State<HomeScreen> {
                 label: 'chatsTab'.tr,
               ),
               NavigationDestination(
-                icon: Icon(Icons.settings_outlined),
-                selectedIcon: Icon(Icons.settings),
-                label: 'settingsTab'.tr,
+                icon: const Icon(Icons.bluetooth),
+                label: 'bluetoothTab'.tr,
+              ),
+              NavigationDestination(
+                icon: const Icon(Icons.wifi_tethering),
+                label: 'wifiTab'.tr,
               ),
             ],
           ),
