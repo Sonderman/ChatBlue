@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'package:flutter/services.dart';
 
 /// Platform channel wrapper for Android Wi‑Fi Direct (Wi‑Fi P2P).

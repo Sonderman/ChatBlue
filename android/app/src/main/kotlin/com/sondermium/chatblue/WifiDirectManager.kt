@@ -393,14 +393,19 @@ class WifiDirectManager(private val context: Context) {
         }
 
         override fun run() {
-            try {
-                val s = server?.accept()
-                if (s != null) manageConnectedSocket(s, isGroupOwner = true)
-            } catch (e: IOException) {
-                if (!cancelled.get()) onSocketError?.invoke("Accept failed: ${e.message}")
-            } finally {
-                cancel()
+            while (!cancelled.get()) {
+                try {
+                    val s = server?.accept()
+                    if (s != null) manageConnectedSocket(s, isGroupOwner = true)
+                    // Keep accepting: previously connected peers can reconnect.
+                    // A new peer replaces the current connection
+                    // (manageConnectedSocket cancels it with "replaced").
+                } catch (e: IOException) {
+                    if (!cancelled.get()) onSocketError?.invoke("Accept failed: ${e.message}")
+                    break
+                }
             }
+            cancel()
         }
 
         fun cancel() {

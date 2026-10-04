@@ -3,6 +3,7 @@ package com.sondermium.chatblue
 import android.Manifest
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.content.Context
 import android.content.pm.PackageManager
 import android.content.Intent
 import android.os.Build
@@ -53,6 +54,13 @@ class MainActivity : FlutterActivity() {
         when (requestCode) {
             REQUEST_ENABLE_BT -> {
                 val granted = resultCode == Activity.RESULT_OK
+                if (granted) {
+                    // Remember consent so future launches enable Bluetooth silently
+                    getSharedPreferences("chatblue_prefs", Context.MODE_PRIVATE)
+                        .edit()
+                        .putBoolean("bt_enable_consent_granted", true)
+                        .apply()
+                }
                 pendingEnableBtResult?.success(granted)
                 pendingEnableBtResult = null
             }
@@ -201,10 +209,18 @@ class MainActivity : FlutterActivity() {
                     result.success(BluetoothAdapter.getDefaultAdapter()?.isEnabled == true)
                 }
                 "requestEnableBluetooth" -> {
-                    val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-                    pendingEnableBtResult = result
-                    @Suppress("DEPRECATION")
-                    startActivityForResult(intent, REQUEST_ENABLE_BT)
+                    val prefs = getSharedPreferences("chatblue_prefs", Context.MODE_PRIVATE)
+                    if (prefs.getBoolean("bt_enable_consent_granted", false)) {
+                        // User consented before: enable silently instead of asking again
+                        @Suppress("MissingPermission")
+                        runCatching { BluetoothAdapter.getDefaultAdapter()?.enable() }
+                        result.success(BluetoothAdapter.getDefaultAdapter()?.isEnabled == true)
+                    } else {
+                        val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                        pendingEnableBtResult = result
+                        @Suppress("DEPRECATION")
+                        startActivityForResult(intent, REQUEST_ENABLE_BT)
+                    }
                 }
                 "requestBluetoothPermissions" -> {
                     val needed = requiredRuntimePermissions()

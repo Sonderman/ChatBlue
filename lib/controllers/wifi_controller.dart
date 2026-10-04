@@ -1,21 +1,34 @@
 import 'dart:async';
+import 'package:chatblue/config.dart';
+import 'package:chatblue/controllers/chat_transport.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/core/services/wd_service.dart';
 import 'package:chatblue/screens/w_chatscreen/w_chat_screen.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
-class WifiController extends GetxController {
+class WifiController extends GetxController implements ChatTransport {
   final RxList<WdPeerInfo> peers = <WdPeerInfo>[].obs;
   final RxBool isServerModeActive = false.obs;
   final RxBool isScanning = false.obs;
+  @override
   final RxBool isConnected = false.obs;
   WdPeerInfo? connectedDevice;
   late WifiDirectService _service;
-  late Rxn<String> lastDisconnectReason;
+  @override
+  final Rxn<String> lastDisconnectReason = Rxn<String>();
+  @override
   final Rxn<TransferState> outgoingTransfer = Rxn<TransferState>();
+  @override
   final Rxn<TransferState> incomingTransfer = Rxn<TransferState>();
   bool _chatOpen = false;
+
+  @override
+  String? get connectedDeviceKey => connectedDevice?.deviceAddress;
+
+  @override
+  String? get connectedDeviceName => connectedDevice?.deviceName;
 
   @override
   void onInit() async {
@@ -53,11 +66,15 @@ class WifiController extends GetxController {
     isScanning.value = false;
   }
 
-  /// Connect to a discovered or paired device and await connection result.
-  Future<bool> connectToDevice(WdPeerInfo device) async {
+  /// Connect to a discovered peer and await connection result.
+  Future<bool> connectToDevice(WdPeerInfo device) => connectToPeer(device.deviceAddress);
+
+  /// Connect to a peer by address and await the connection result.
+  @override
+  Future<bool> connectToPeer(String address) async {
     final Completer<bool> completer = Completer<bool>();
     if (kDebugMode) {
-      print('connecting to device: ${device.deviceName}');
+      debugPrint('connecting to device: $address');
     }
 
     // Stop scanning if still running to avoid connection interference
@@ -82,7 +99,7 @@ class WifiController extends GetxController {
     _service.onSocketConnected = (remote) {
       // Keep original behavior
       prevConnected?.call(remote);
-      if (remote.deviceAddress == device.deviceAddress && !completer.isCompleted) {
+      if (remote.deviceAddress == address && !completer.isCompleted) {
         completer.complete(true);
       }
     };
@@ -97,24 +114,22 @@ class WifiController extends GetxController {
     // If any socket error occurs during the connection attempt,
     // immediately fail this attempt without waiting.
     _service.onSocketError = (message) {
-      if (kDebugMode) {
-        print('Socket error during connect: $message');
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Socket error during connect: $message');
       }
-      prevError?.call(message);
+      // Note: intentionally not forwarding to prevError — the connecting
+      // screen shows its own result message, and forwarding would queue a
+      // snackbar behind the loading dialog.
       if (!completer.isCompleted) {
         completer.complete(false);
       }
     };
 
     try {
-      await _service.connect(device.deviceAddress);
+      await _service.connect(address);
     } catch (e) {
-      if (kDebugMode) {
-        print('Error initiating connection: $e');
-      }
-      // Ensure any lingering dialogs are dismissed
-      if (Get.isDialogOpen == true) {
-        Get.back();
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Error initiating connection: $e');
       }
       restore();
       return false;
@@ -126,19 +141,14 @@ class WifiController extends GetxController {
         onTimeout: () async => await _service.isConnected(),
       );
       restore();
-      if (Get.isDialogOpen == true) {
-        Get.back();
-      }
       return result;
     } catch (_) {
       restore();
-      if (Get.isDialogOpen == true) {
-        Get.back();
-      }
       return false;
     }
   }
 
+  @override
   Future<void> disconnectFromDevice() async {
     if (isConnected.value) {
       await _service.disconnect();
@@ -146,11 +156,20 @@ class WifiController extends GetxController {
     }
   }
 
+  @override
   void onChatClosed() {
     _chatOpen = false;
   }
 
+  /// Called by the chat screen when it opens: suppresses the automatic chat
+  /// navigation if a connection arrives while the screen is already visible.
+  @override
+  void onChatOpened() {
+    _chatOpen = true;
+  }
+
   /// Send string to the peer (client/server agnostic)
+  @override
   Future<void> sendMessage(String message) async {
     if (isConnected.value) {
       await _service.sendString(message);
@@ -158,16 +177,19 @@ class WifiController extends GetxController {
   }
 
   /// Send raw bytes (e.g., image) to the peer
+  @override
   Future<void> sendBytes(Uint8List bytes) async {
     if (isConnected.value) {
       await _service.sendBytes(bytes);
     }
   }
 
+  @override
   void onSocketData(Function(Uint8List bytes, String text, {required String kind}) callback) {
     _service.onSocketData = callback;
   }
 
+  @override
   void onTransferProgress(
     Function({
       required String direction,
@@ -182,26 +204,50 @@ class WifiController extends GetxController {
 
   void setupListeners() {
     _service.onPeerFound = (peer) {
-      print('Peer found: ${peer.deviceName} (${peer.deviceAddress})');
-      peers.add(peer);
-      update();
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Peer found: ${peer.deviceName} (${peer.deviceAddress})');
+      }
+      if (!peers.any((p) => p.deviceAddress == peer.deviceAddress)) {
+        peers.add(peer);
+      }
+    };
+    _service.onScanError = (message) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Scan error: $message');
+      }
+      isScanning.value = false;
+      Get.snackbar('Scan error', message);
     };
     _service.onSocketError = (error) {
-      print('Socket error: $error');
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Socket error: $error');
+      }
+      // Deliberately not surfaced as a snackbar/modal: transient link errors
+      // during scanning are common and would spam the UI.
     };
     _service.onSocketConnected = (remote) {
       isConnected.value = true;
       connectedDevice = remote;
-      print('Socket connected: ${remote.deviceAddress}');
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Socket connected: ${remote.deviceAddress}');
+      }
       if (!_chatOpen) {
         _chatOpen = true;
+        // The scan screen's loading dialog may still be on top: dismiss it
+        // BEFORE pushing the chat screen, so no later pop (which removes the
+        // top route) can ever close the chat screen by mistake.
+        if (Get.isDialogOpen == true) {
+          Navigator.of(Get.overlayContext!, rootNavigator: true).pop();
+        }
         Get.to(() => const WChatScreen());
       }
     };
     _service.onSocketDisconnected = (reason) {
       isConnected.value = false;
-      print('Socket disconnected: $reason');
-      update();
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Socket disconnected: $reason');
+      }
+      lastDisconnectReason.value = reason;
     };
   }
 }

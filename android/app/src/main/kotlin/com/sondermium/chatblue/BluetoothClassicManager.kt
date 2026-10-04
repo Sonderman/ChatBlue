@@ -323,8 +323,10 @@ class BluetoothClassicManager(private val context: Context) {
                 try {
                     val socket = serverSocket?.accept() ?: break
                     manageConnectedSocket(socket)
-                    // Only one connection at a time; close server to prevent multiple clients
-                    break
+                    // Keep accepting: the server stays alive so previously
+                    // paired devices can reconnect. A second client replaces
+                    // the current connection (manageConnectedSocket cancels
+                    // it with "replaced"), preserving single-connection use.
                 } catch (e: IOException) {
                     if (!cancelled.get()) onSocketError?.invoke("Server accept failed: ${e.message}")
                     break

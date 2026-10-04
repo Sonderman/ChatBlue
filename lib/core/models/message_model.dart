@@ -4,6 +4,7 @@
 import 'package:hive_ce/hive.dart';
 
 class MessageModel extends HiveObject {
+  final String? id;
   final String text;
   final bool isSentByMe;
   final DateTime timestamp;
@@ -14,6 +15,7 @@ class MessageModel extends HiveObject {
   final String? transferKind; // 'bytes' | 'text'
 
   MessageModel({
+    this.id,
     required this.text,
     required this.isSentByMe,
     required this.timestamp,
@@ -25,6 +27,7 @@ class MessageModel extends HiveObject {
   });
 
   MessageModel copyWith({
+    String? id,
     String? text,
     bool? isSentByMe,
     DateTime? timestamp,
@@ -35,6 +38,7 @@ class MessageModel extends HiveObject {
     String? transferKind,
   }) {
     return MessageModel(
+      id: id ?? this.id,
       text: text ?? this.text,
       isSentByMe: isSentByMe ?? this.isSentByMe,
       timestamp: timestamp ?? this.timestamp,

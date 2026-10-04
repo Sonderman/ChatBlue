@@ -1,8 +1,8 @@
 // DeviceScanScreen for discovering nearby Bluetooth devices and connecting to them.
 // Uses GetX for state management.
+import 'package:chatblue/controllers/chat_transport.dart';
 import 'package:chatblue/controllers/wifi_controller.dart';
 import 'package:chatblue/core/services/wd_service.dart';
-import 'package:chatblue/screens/w_chatscreen/w_chat_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
@@ -11,10 +11,8 @@ class WifiDirectScanScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GetBuilder<WifiController>(
-      init: WifiController(),
-      builder: (controller) {
-        return Scaffold(
+    final controller = ensureRegistered(WifiController());
+    return Scaffold(
           appBar: AppBar(title: Text('Discover & Connect via Wifi'), centerTitle: true),
           body: Obx(
             () => Column(
@@ -72,21 +70,32 @@ class WifiDirectScanScreen extends StatelessWidget {
                                 ),
                                 leading: Icon(Icons.wifi_tethering),
                                 onTap: () async {
-                                  // Show loading dialog
+                                  // Show loading dialog and track its life:
+                                  // the dialog is closed via the root
+                                  // navigator (snackbars are overlay entries,
+                                  // not routes, so this can never close the
+                                  // wrong thing).
+                                  var loading = true;
                                   Get.dialog(
-                                    Center(child: CircularProgressIndicator()),
+                                    const Center(child: CircularProgressIndicator()),
                                     barrierDismissible: false,
-                                  );
+                                  ).then((_) => loading = false);
 
-                                  bool isConnected = await controller.connectToDevice(device);
+                                  await controller.connectToDevice(device);
 
-                                  // Close loading dialog if still open
-                                  if (Get.isDialogOpen == true) {
-                                    Get.back();
-                                  }
-
-                                  if (isConnected && controller.isConnected.value) {
-                                    Get.to(() => WChatScreen());
+                                  // On success, WifiController dismisses the
+                                  // loading dialog itself and navigates to the
+                                  // chat screen; this screen only cleans up
+                                  // after failures.
+                                  if (!controller.isConnected.value && loading) {
+                                    Navigator.of(
+                                      Get.overlayContext!,
+                                      rootNavigator: true,
+                                    ).pop();
+                                    Get.snackbar(
+                                      'Could not connect!',
+                                      "Make sure the other device is discoverable and in range.",
+                                    );
                                   }
                                 },
                               );
@@ -101,7 +110,5 @@ class WifiDirectScanScreen extends StatelessWidget {
             ),
           ),
         );
-      },
-    );
   }
 }

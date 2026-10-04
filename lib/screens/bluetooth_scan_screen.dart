@@ -1,8 +1,8 @@
 // DeviceScanScreen for discovering nearby Bluetooth devices and connecting to them.
 // Uses GetX for state management.
 import 'package:chatblue/controllers/bt_controller.dart';
+import 'package:chatblue/controllers/chat_transport.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
-import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
@@ -11,10 +11,8 @@ class BluetoothScanScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GetBuilder<BtController>(
-      init: BtController(),
-      builder: (controller) {
-        return Scaffold(
+    final controller = ensureRegistered(BtController());
+    return Scaffold(
           appBar: AppBar(title: Text('Discover & Connect'), centerTitle: true),
           body: Obx(
             () => Column(
@@ -81,21 +79,32 @@ class BluetoothScanScreen extends StatelessWidget {
                                     leading: Icon(Icons.bluetooth),
                                     trailing: _buildSignalIndicator(device.rssi),
                                     onTap: () async {
-                                      // Show loading dialog
+                                      // Show loading dialog and track its life:
+                                      // the dialog is closed via the root
+                                      // navigator (snackbars are overlay
+                                      // entries, not routes, so this can never
+                                      // close the wrong thing).
+                                      var loading = true;
                                       Get.dialog(
-                                        Center(child: CircularProgressIndicator()),
+                                        const Center(child: CircularProgressIndicator()),
                                         barrierDismissible: false,
-                                      );
+                                      ).then((_) => loading = false);
 
-                                      bool isConnected = await controller.connectToDevice(device);
+                                      await controller.connectToDevice(device);
 
-                                      // Close loading dialog if still open
-                                      if (Get.isDialogOpen == true) {
-                                        Get.back();
-                                      }
-
-                                      if (isConnected && controller.isConnected.value) {
-                                        Get.to(() => BChatScreen());
+                                      // On success, BtController dismisses the
+                                      // loading dialog itself and navigates to
+                                      // the chat screen; this screen only
+                                      // cleans up after failures.
+                                      if (!controller.isConnected.value && loading) {
+                                        Navigator.of(
+                                          Get.overlayContext!,
+                                          rootNavigator: true,
+                                        ).pop();
+                                        Get.snackbar(
+                                          'Could not connect!',
+                                          "Make sure the other device is discoverable and in range.",
+                                        );
                                       }
                                     },
                                   );
@@ -112,39 +121,43 @@ class BluetoothScanScreen extends StatelessWidget {
                                     leading: Icon(Icons.phone_android),
                                     trailing: Icon(Icons.link, color: Colors.blue),
                                     onTap: () async {
-                                      try {
-                                        // Show loading dialog
-                                        Get.dialog(
-                                          Center(child: CircularProgressIndicator()),
-                                          barrierDismissible: false,
-                                        );
+                                                                          var loading = true;
+                                                                          Get.dialog(
+                                                                            const Center(child: CircularProgressIndicator()),
+                                                                            barrierDismissible: false,
+                                                                          ).then((_) => loading = false);
+                                                                          try {
+                                                                            final bool connected =
+                                                                                await controller.connectToDevice(device);
 
-                                        bool connected = await controller.connectToDevice(device);
+                                                                            if (loading) {
+                                                                              Navigator.of(
+                                                                                Get.overlayContext!,
+                                                                                rootNavigator: true,
+                                                                              ).pop();
+                                                                            }
 
-                                        // Close loading dialog if still open
-                                        if (Get.isDialogOpen == true) {
-                                          Get.back();
-                                        }
-
-                                        if (connected && controller.isConnected.value) {
-                                          Get.to(() => BChatScreen());
-                                        } else {
-                                          Get.snackbar(
-                                            'Could not connect!',
-                                            "Make sure the other device is discoverable and in range.",
-                                          );
-                                        }
-                                      } catch (e) {
-                                        // Close loading dialog if still open
-                                        if (Get.isDialogOpen == true) {
-                                          Get.back();
-                                        }
-                                        Get.snackbar(
-                                          'Connection Error',
-                                          'Could not connect to device: $e',
-                                        );
-                                      }
-                                    },
+                                                                            if (!(connected && controller.isConnected.value)) {
+                                                                              Get.snackbar(
+                                                                                'Could not connect!',
+                                                                                "Make sure the other device is discoverable and in range.",
+                                                                              );
+                                                                            }
+                                                                            // On success, BtController navigates to
+                                                                            // the chat screen itself.
+                                                                          } catch (e) {
+                                                                            if (loading) {
+                                                                              Navigator.of(
+                                                                                Get.overlayContext!,
+                                                                                rootNavigator: true,
+                                                                              ).pop();
+                                                                            }
+                                                                            Get.snackbar(
+                                                                              'Connection Error',
+                                                                              'Could not connect to device: $e',
+                                                                            );
+                                                                          }
+                                                                        },
                                   );
                                 },
                               ),
@@ -159,8 +172,6 @@ class BluetoothScanScreen extends StatelessWidget {
             ),
           ),
         );
-      },
-    );
   }
 
   // Builds a signal strength indicator based on RSSI (in dBm).

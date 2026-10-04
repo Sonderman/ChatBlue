@@ -1,0 +1,62 @@
+import 'dart:typed_data';
+
+import 'package:chatblue/core/services/bt_classic_service.dart';
+import 'package:get/get.dart';
+
+/// Returns the registered instance of [T], or registers a fresh [instance]
+/// when none exists yet.
+///
+/// Screens call this on first access so controllers are created lazily (no
+/// permission dialogs at app startup) without depending on `main()` having
+/// run — hot reloads re-build the widget tree but do not re-run `main()`.
+T ensureRegistered<T extends GetxController>(T instance) {
+  if (Get.isRegistered<T>()) {
+    return Get.find<T>();
+  }
+  Get.put<T>(instance);
+  return instance;
+}
+
+/// Uniform surface over [BtController] and [WifiController] used by the shared
+/// chat screen controller so both transports share one implementation.
+abstract interface class ChatTransport {
+  RxBool get isConnected;
+  Rxn<String> get lastDisconnectReason;
+  Rxn<TransferState> get outgoingTransfer;
+  Rxn<TransferState> get incomingTransfer;
+
+  /// Stable identifier of the connected peer (BT MAC / WFD address).
+  String? get connectedDeviceKey;
+
+  /// Human-readable name of the connected peer.
+  String? get connectedDeviceName;
+
+  Future<void> disconnectFromDevice();
+  Future<void> sendMessage(String message);
+  Future<void> sendBytes(Uint8List bytes);
+
+  /// Connects to a peer by its stable address and resolves when the attempt
+  /// finishes (or times out). Used by scan screens and by the chat screen's
+  /// reconnect button.
+  Future<bool> connectToPeer(String address);
+
+  /// Called by the chat screen when it opens. Suppresses the automatic
+  /// chat navigation when a connection is established while the chat screen
+  /// is already visible (e.g. reconnecting from an opened chat session).
+  void onChatOpened();
+
+  void onSocketData(
+    void Function(Uint8List bytes, String text, {required String kind}) callback,
+  );
+
+  void onTransferProgress(
+    void Function({
+      required String direction,
+      required int current,
+      required int total,
+      required String kind,
+    }) callback,
+  );
+
+  void onChatClosed();
+}

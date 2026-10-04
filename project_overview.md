@@ -1,90 +1,108 @@
 # Project Overview: ChatBlue
 
 ## Project Description
-ChatBlue is a Flutter-based Bluetooth Classic chat application. The app enables device-to-device messaging over RFCOMM. State management is powered by GetX. Chat sessions and messages are now persisted locally using Hive, including support for sending/receiving image messages with transfer progress.
+ChatBlue is a Flutter-based peer-to-peer chat application supporting **two transports**: Bluetooth Classic (RFCOMM) and Wi‑Fi Direct (P2P over framed TCP sockets). Both transports are implemented natively in Kotlin and exposed via Platform Channels. State management is powered by GetX; chat sessions and messages are persisted locally with Hive (CE), including image message transfer with progress tracking. The UI follows a modern navy/cyan design language with full light/dark theming.
 
 ## Architecture
 - **Framework**: Flutter
-- **State Management**: GetX
-- **Local Storage**: Hive (CE)
+- **State Management**: GetX (controllers + reactive state)
+- **Local Storage**: Hive (CE) with codegen (`hive_ce_generator`) — chat sessions + theme mode (`settings` box)
 - **Bluetooth (Classic)**: Custom Android native implementation via Platform Channels
 - **Wi‑Fi Direct (P2P)**: Custom Android native implementation via Platform Channels
 - **Platform Channels**:
   - Bluetooth
-    - MethodChannel: `com.sondermium.chatblue/bt`
-    - EventChannels:
-      - Scan: `com.sondermium.chatblue/scan`
-      - Socket: `com.sondermium.chatblue/socket`
+    - MethodChannel: `com.sondermium.chatblue/bt` (isBluetoothAvailable, isBluetoothEnabled, requestEnableBluetooth, requestBluetoothPermissions, requestDiscoverable, startScan, stopScan, getDiscoveredDevices, clearDiscoveredDevices, getPairedDevices, startServer, stopServer, connect, disconnect, isConnected, sendString, sendBytes)
+    - EventChannels: `com.sondermium.chatblue/scan` (started/device/finished), `com.sondermium.chatblue/socket` (connected/disconnected/data/progress)
   - Wi‑Fi Direct
-    - MethodChannel: `com.sondermium.chatblue/wd`
-    - EventChannels:
-      - Scan: `com.sondermium.chatblue/wd_scan` (started/peer/finished)
-      - Socket: `com.sondermium.chatblue/wd_socket` (connected/disconnected/data/progress)
-- **Data Models**:
-  - `ChatSessionModel` and `MessageModel` (HiveObject) in `lib/core/models`
+    - MethodChannel: `com.sondermium.chatblue/wd` (isWifiP2pSupported, requestWifiDirectPermissions, startDiscovery, stopDiscovery, getDiscoveredPeers, clearDiscoveredPeers, createGroup, removeGroup, connect, disconnect, isConnected, sendString, sendBytes)
+    - EventChannels: `com.sondermium.chatblue/wd_scan` (started/peer/finished), `com.sondermium.chatblue/wd_socket` (connected/disconnected/data/progress)
+- **Data Models**: `ChatSessionModel` and `MessageModel` (HiveObject) in `lib/core/models`
 - **Services**:
-  - `HiveService` for Hive initialization and CRUD on chat sessions (`lib/core/services/hive_service.dart`)
-  - `BtClassicService` for Bluetooth operations (`lib/core/services/bt_classic_service.dart`) backed by `lib/core/platform/bt_platform_channel.dart`
-  - `WifiDirectService` for Wi‑Fi Direct operations (`lib/core/services/wd_service.dart`) backed by `lib/core/platform/wd_platform_channel.dart`
+  - `HiveService` — Hive init + CRUD on `chat_sessions` box (`lib/core/services/hive_service.dart`)
+  - `ThemeService` — persistent theme mode (system/light/dark) in a `settings` box, applied via `Get.changeThemeMode` (`lib/core/services/theme_service.dart`)
+  - `BtClassicService` — Bluetooth ops with typed event streams + callbacks (`lib/core/services/bt_classic_service.dart`) over `BtPlatformChannel`
+  - `WifiDirectService` — Wi‑Fi Direct ops, same pattern (`lib/core/services/wd_service.dart`) over `WdPlatformChannel`
+- **Theming**: `AppTheme` (light/dark, cyan seed, navy canvas) in `lib/core/theme/app_theme.dart`; chat screens use a theme-aware `ChatPalette` (dark = navy glass, light = bright variant)
 - **Controllers**:
-  - `BtController` orchestrates scan/connect/socket lifecycle and exposes reactive states
-  - `HomeController` manages persisted chat sessions list (load/refresh/delete)
-  - `ChatScreenController` manages per-chat messages, sending text/images, transfer progress, and persistence
+  - `BtController` — Bluetooth scan/server/socket lifecycle, reactive states, transfer progress; implements `ChatTransport` (`lib/controllers/bt_controller.dart`)
+  - `WifiController` — Wi‑Fi Direct equivalent, implements `ChatTransport` (`lib/controllers/wifi_controller.dart`)
+  - `ChatTransport` — shared interface over both transport controllers (`lib/controllers/chat_transport.dart`): connection state, send/message APIs, `connectToPeer(address)`, `onChatOpened()`/`onChatClosed()`
+  - `HomeController` — chat session list (load/refresh/delete)
+  - `ChatScreenControllerBase` — single implementation of the conversation logic (messages, image transfers, persistence, history sync, send queue) shared by both transports (`lib/screens/chat_screen_controller_base.dart`)
+  - `BChatScreenController` / `WChatScreenController` — thin subclasses binding the transport (`Get.find<BtController>` / `Get.find<WifiController>`)
 - **Screens**:
-  - `HomeScreen`: Lists previous chat sessions with quick action to scan/connect
-  - `DeviceScanScreen`: Discover nearby/paired devices and connect
-  - `ChatScreen`: Conversation UI with text and image bubbles, progress indicators
-- **Entry Point**:
-  - `main.dart` initializes `HiveService` asynchronously and sets `HomeScreen` as the home widget
+  - `HomeScreen` — session list + bottom navigation (Chats / Settings tabs)
+  - `SettingsScreen` — theme switching (System/Light/Dark) + app info (`lib/screens/settings/settings_screen.dart`)
+  - `BluetoothScanScreen` — BT discovery/paired devices/server mode/connect
+  - `WifiDirectScanScreen` — WFD discovery/server (group) mode/connect
+  - `BChatScreen` / `WChatScreen` — per-transport conversation UI built from the shared `chat_ui` kit (ChatAppBar, ChatMessageList, ChatMessageBubble, ChatInputBar, ChatSyncBanner, Connect bar, image preview)
+- **UI Kit**: `lib/screens/chat_ui/chat_ui.dart` — shared modern chat widgets (navy/cyan, gradient bubbles, glass surfaces, theme-aware `ChatPalette`)
+- **Entry Point**: `main.dart` — Sizer + GetMaterialApp (`theme`/`darkTheme`/`themeMode`), async `HiveService` + `ThemeService` init (fail-open), `HomeScreen` as home
 
 ## Key Dependencies
 - get, sizer, auto_size_text
 - hive_ce, hive_ce_generator, build_runner
 - path_provider, uuid
-- image_picker, flutter_image_compress, image_gallery_saver_plus
+- image_picker, flutter_image_compress, image_gallery_saver_plus, device_info_plus
 - permission_handler, cupertino_icons
 
 ## Directory Structure
 - `lib/`
-  - `main.dart`: Entry point with `GetMaterialApp`
-  - `config.dart`: App constants
+  - `main.dart`: entry point; `config.dart`: app constants
   - `core/`
     - `models/`: `chatsession_model.dart`, `message_model.dart`
-    - `platform/`: `bt_platform_channel.dart`
-    - `services/`: `bt_classic_service.dart`, `hive_service.dart`
-    - `hive/`: adapters and registrar (`hive_adapters.dart`, generated files)
-  - `controllers/`: `bt_controller.dart`, `home_controller.dart`, `chatscreen_controller.dart`
-  - `screens/`: `home_screen.dart`, `device_scan_screen.dart`, `chat_screen.dart`
-- `android/`: Android-specific configuration and native Bluetooth manager
-- `ios/`: iOS scaffolding was removed in this branch (see Recent Changes)
+    - `platform/`: `bt_platform_channel.dart`, `wd_platform_channel.dart`
+    - `services/`: `bt_classic_service.dart`, `wd_service.dart`, `hive_service.dart`, `theme_service.dart`
+    - `theme/`: `app_theme.dart` (light/dark ThemeData)
+    - `hive/`: `hive_adapters.dart` (`@GenerateAdapters`) + generated `.g.dart` files
+  - `controllers/`: `bt_controller.dart`, `wifi_controller.dart`, `chat_transport.dart`
+  - `screens/`: `chat_screen_controller_base.dart`, `chat_ui/` (chat_ui.dart — shared chat widget kit), `homescreen/` (home_screen + home_controller), `settings/` (settings_screen.dart), `b_chatscreen/` (b_chat_screen + b_chatscreen_controller), `w_chatscreen/` (w_chat_screen + w_chatscreen_controller), `bluetooth_scan_screen.dart`, `wifid_scan_screen.dart`
+- `test/`: unit tests — model serialization, `TransferState`, Hive persistence contract
+- `android/`: Gradle config + native Kotlin
+  - `app/src/main/kotlin/com/sondermium/chatblue/`: `MainActivity.kt`, `BluetoothClassicManager.kt`, `WifiDirectManager.kt`
+- `ios/`: scaffolding removed; iOS target not configured on this branch
 
 ## Notable Implementation Details
-- Android Bluetooth Classic is implemented natively in Kotlin (`BluetoothClassicManager`) and exposed via platform channels. Discovery, discoverable mode, paired devices, RFCOMM server/client, and string/byte transfer are supported.
-- Android Wi‑Fi Direct is implemented natively in Kotlin (`WifiDirectManager`) and exposed via platform channels. Discovery, group creation, peer connection, and framed TCP socket I/O (text/bytes) with transfer progress are supported.
-- `HiveService` initializes Hive and persists chat sessions in a `chat_sessions` box. Sessions are keyed by device address (or a generated id) and sorted by `updatedAt`.
-- Image messages are transferred as bytes with progress bubbles. Incoming bytes are saved to application documents directory and the bubble is finalized with an `imagePath`. Outgoing progress bubbles are converted to final image bubbles once transfer completes.
-- `ChatScreen` shows connection status, prevents sending when disconnected, supports clearing the conversation, and allows full-screen image preview with optional save-to-gallery (runtime permissions handled per platform).
-- `DeviceScanScreen` exposes discoverable/server mode, start/stop scanning, lists nearby and paired devices, and connects with feedback dialogs and snackbars.
+- Android Bluetooth Classic (`BluetoothClassicManager`): discovery with RSSI, bonded devices, discoverable request, RFCOMM SPP server/client (accept + connect threads), framed byte-stream protocol, string/byte transfer with progress callbacks, known-address persistence via SharedPreferences. The accept loop stays alive after a connection (peers can reconnect to an already-started server; a new peer replaces the current socket with "replaced").
+- Android Wi‑Fi Direct (`WifiDirectManager`): peer discovery, group creation/removal (GO negotiation), client connection via WifiP2pInfo, TCP server/client socket threads with the same framed protocol and progress events; server thread also keeps accepting (same reconnect semantics); permission feature checks.
+- Framed protocol: message frames carry a type flag ('text' vs 'bytes') and a 4-byte length; both managers emit `onTransferProgress(direction, current, total, kind)` and `onSocketData(bytes, text, kind)` on separate reader threads; writes run on a single-thread executor (atomic frames, FIFO order).
+- `HiveService` persists sessions in the `chat_sessions` box; sessions keyed by id, sorted by `updatedAt`; `MessageModel` stores `imagePath` (not in-memory bytes) plus optional transfer state fields.
+- **History sync** (`ChatScreenControllerBase`): on (re)connection, the last 10 messages are exchanged once per chat screen: texts in one small packet, each image in its own packet (base64-embedded, ≤ 3 MB). Incoming images are rehydrated to disk; dedup uses (text + direction + ±10 s) with a content-hash (FNV-1a) fallback for images. A thin "Syncing history…" banner under the app bar shows frame progress. Sync sends ride outside the user send queue so live messages are never blocked behind sync packets.
+- **Send queue**: user text/image sends are serialized in a FIFO queue — an in-flight image transfer never interleaves with other sends; bubbles appear immediately, writes are ordered.
+- Image messages: outgoing images are compressed pre-send; both directions use progress bubbles that finalize to image bubbles once transfer completes; incoming bytes saved under application documents directory (background isolate).
+- Chat UX: connection status in the header (glowing dot), composer hidden when disconnected and replaced by a **Connect** button that reconnects to the session's device (`connectToPeer`); clearing conversation and full-screen image preview with save-to-gallery (Android 13+ `Permission.photos`/READ_MEDIA_IMAGES, older `Permission.storage`; iOS `photosAddOnly`/`photos`).
+- Dialog/snackbar hygiene: loading dialogs are closed via the root navigator (GetX snackbars are overlay entries, not routes), never via `Get.back()` while a snackbar is open; socket errors are logged only (no snackbar spam); scan errors still surface.
+- Progress bubbles are tracked by message id (bubble UUID); Hive writes are debounced (250 ms) and flushed on close; outgoing images are compressed exactly once.
+- Chat screens use `PopScope` to warn before leaving while a transfer is in flight; theme-aware dialogs (`ChatPalette` via `Get.context`).
+- `analysis_options.yaml` excludes `build/**` and `android/**` from analysis.
 
 ## Android Build Configuration
-- compileSdk: 36
-- targetSdk: 36
-- minSdk: 24
-- Java/Kotlin: 17 (sourceCompatibility/targetCompatibility/jvmTarget)
+- AGP: 9.4.1 (settings.gradle.kts), Kotlin: 2.4.20, foojay-resolver-convention 1.0.0
+- compileSdk: 37, targetSdk: 36, minSdk: 24
+- Java/Kotlin: 17 — `compileOptions` (Java) + Kotlin `jvmTarget` via `compilerOptions` DSL (kotlinOptions kaldırıldı; KGP ≥2.2'de error)
+- Gradle wrapper: 9.6.0
+- `gradle.properties`: AGP 9 compatibility flags (`android.newDsl=false`, `android.builtInKotlin=false`, `android.uniquePackageNames=false`, `android.usesSdkInManifest.disallowed=false`, enableJetifier, R8/resource flags)
+- Manifest: `WRITE_EXTERNAL_STORAGE maxSdkVersion=29` overrides `image_gallery_saver_plus`'s 28 via `tools:replace`; `requestLegacyExternalStorage="true"`
 
 ## Recent Changes (This Branch)
-- Moved platform channel file to `lib/core/platform/bt_platform_channel.dart` and updated imports accordingly.
-- Introduced `HiveService` and full chat session persistence.
-  - Added Hive adapters/registrar for `ChatSessionModel` and `MessageModel`.
-  - `MessageModel` uses `imagePath` instead of in-memory bytes.
-  - Added `path_provider` and `uuid` dependencies.
-- Enhanced image messaging with progress bubbles and finalization, persisting messages after each update.
-- Added `HomeScreen` and `HomeController` to manage and navigate chat sessions.
-- Updated `main.dart` to initialize Hive and set `HomeScreen` as the start screen.
-- Improved `DeviceScanScreen` UI/UX (button states, paired devices tab, loading dialog, connection failure snackbar).
-- `BtController` now handles connection attempt errors immediately and uses a 10-second timeout for connections.
-- Android Gradle updates: compile/target SDKs, minSdk, and Java/Kotlin 17.
-- Android Manifest: added `NEARBY_WIFI_DEVICES` (API 33+), `ACCESS_FINE_LOCATION` (<33), and `INTERNET` for Wi‑Fi Direct TCP socket.
-- iOS: Runner workspace/storyboards/Info.plist and asset catalog files were removed; iOS target is currently not configured in this branch and would need re-setup if required.
+- **Theme system**: `AppTheme` light/dark themes (cyan seed, navy canvas); `ThemeService` persists the mode (system/light/dark) in a Hive `settings` box and applies it via `Get.changeThemeMode`; `main.dart` wires `theme`/`darkTheme`/`themeMode`; fails open on init errors.
+- **Settings panel + bottom navigation**: `HomeScreen` now has a Material 3 `NavigationBar` with Chats / Settings tabs (`IndexedStack`); `SettingsScreen` provides Appearance (segmented System/Light/Dark) and About sections; session-list colors became theme-aware.
+- **Modern chat UI kit** (`lib/screens/chat_ui/chat_ui.dart`): shared widgets for both transports — gradient glass app bar with device avatar + glowing status dot, gradient own-bubbles / glass incoming bubbles, rounded glass composer with gradient send button, image preview screen; all theme-aware through `ChatPalette` (dark: navy glass, light: bright variant); both chat screens rewritten as thin shells.
+- **Connect on demand**: `ChatTransport.connectToPeer(address)` (refactored out of `connectToDevice`) + `onChatOpened()`; chat opened from the session list shows a **Connect** button when offline (loading spinner while connecting, "Could not connect!" on failure); `onChatOpened` prevents pushing a second chat screen when a connection arrives while the chat is already visible.
+- **History sync for reconnecting peers**: on (re)connection the last 10 messages are exchanged once per chat screen — texts first, each image in its own base64 packet (≤ 3 MB), content-hash dedup, thin "Syncing history…" progress banner under the app bar; one sync per chat screen (no resync on every reconnect); sync is sent outside the user send queue so live sends are never blocked behind it.
+- **Send queue**: user text/image sends are serialized FIFO — no interleaving during image transfers; queued jobs discarded on chat close.
+- **Reconnect fixes (native)**: both `AcceptThread`/server-threads previously stopped after the first connection — peers could not reconnect to an already-started server; they now accept until cancelled (single-connection semantics preserved via "replaced").
+- **Dialog/snackbar fixes**: loading dialogs dismissed via root-navigator pop (GetX counts snackbars as dialogs and `Get.back()` would close the wrong route / assert); removed snackbars from socket-error callbacks (log-only); bottom sheet converted from `Container(decoration)` to `Material` (ListTile ink visibility assertion); dark-themed chat dialogs.
+- **Git hygiene**: `android/.gitignore` ignores `/build/` and `gradle-daemon-jvm.properties`; removed dead `#wifi_direct_plugin` line from pubspec.
+- **AGENTS.md added at repo root** (agent rules moved out of `.cursor/rules`, which were deleted): prohibitions (no build/run without explicit permission, no git writes), verification via `flutter analyze lib` only, Turkish responses, overview maintenance.
+- **Android toolchain upgrade** (settings.gradle.kts): AGP 8.13.0 → 9.4.1, Kotlin 2.1.0 → 2.4.20, added `org.gradle.toolchains.foojay-resolver-convention` 1.0.0; `gradle.properties` got AGP 9 compatibility flags; `kotlin-android` plugin id removed from the app module (Flutter Gradle Plugin applies Kotlin internally).
+- Kotlin `jvmTarget` migrated from deprecated `kotlinOptions {}` (error in KGP ≥2.2) to `compilerOptions` DSL (`JvmTarget.JVM_17`).
+- Gradle wrapper 8.14.3 → 8.14.5 → 9.6.0; `analysis_options.yaml` excludes `build/**` and `android/**`.
+- Dependency update: all packages bumped (`flutter pub upgrade`, 90 dependencies changed).
+  - Major bumps: `cupertino_icons` 1.x → 2.0.0, `image_gallery_saver_plus` 4.x → 5.1.1, `permission_handler` 12.x → 13.0.2 (requires Android compileSdk 37), `flutter_lints` 5.x → 6.0.0.
+  - In-constraint bumps: `get` 4.7.3, `hive_ce` 2.20.1, `hive_ce_generator` 1.11.3, `image_picker` 1.2.3, `flutter_image_compress` 2.5.1, `path_provider` 2.1.6, `sizer` 3.1.3, `uuid` 4.6.0, `build_runner` 2.16.1.
+  - `flutter analyze lib` → 0 errors.
+- Android Build Configuration section aligned with compileSdk 37 / manifest `tools:replace` fix for the manifest-merger conflict with `image_gallery_saver_plus`.
+- (Earlier on branch) Wi‑Fi Direct implementation; classes renamed to B/W split (`BtController`/`WifiController`, `BChatScreen`/`WChatScreen`, `BluetoothScanScreen`/`WifiDirectScanScreen`); Hive persistence; image messaging with progress bubbles; HomeScreen session list.
 
-This overview will be kept up-to-date as the project evolves. 
+This overview will be kept up-to-date as the project evolves.

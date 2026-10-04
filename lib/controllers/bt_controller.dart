@@ -1,12 +1,16 @@
 import 'dart:async';
+import 'package:chatblue/config.dart';
+import 'package:chatblue/controllers/chat_transport.dart';
 import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 
 /// High-level GetX controller that orchestrates Bluetooth Classic operations
 /// through BtClassicService and exposes reactive UI state.
-class BtController extends GetxController {
+class BtController extends GetxController implements ChatTransport {
+  @override
   final RxBool isConnected = false.obs;
   final RxBool isServerModeActive = false.obs;
   final RxBool isScanning = false.obs;
@@ -15,9 +19,13 @@ class BtController extends GetxController {
   final RxList<BtDeviceInfo> pairedDevices = <BtDeviceInfo>[].obs;
   BtDeviceInfo? connectedDevice;
   bool _chatOpen = false;
+  @override
   final Rxn<TransferState> outgoingTransfer = Rxn<TransferState>();
+  @override
   final Rxn<TransferState> incomingTransfer = Rxn<TransferState>();
+  @override
   final Rxn<String> lastDisconnectReason = Rxn<String>();
+  Timer? _serverAutoStopTimer;
 
   late BtClassicService _service;
 
@@ -45,14 +53,16 @@ class BtController extends GetxController {
     _service.onScanFinished = () {
       isScanning.value = false;
       if (kDebugMode) {
-        print('Scan finished');
+        debugPrint('Scan finished');
       }
     };
 
     _service.onScanError = (message) {
-      if (kDebugMode) {
-        print('Scan error: $message');
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Scan error: $message');
       }
+      isScanning.value = false;
+      Get.snackbar('Scan error', message);
     };
 
     _service.onSocketConnected = (remote) {
@@ -61,11 +71,17 @@ class BtController extends GetxController {
       // Refresh paired devices list from native on any new connection
       refreshPairedDevices();
       if (kDebugMode) {
-        print('Socket connected to ${remote.address}');
+        debugPrint('Socket connected to ${remote.address}');
       }
 
       if (!_chatOpen) {
         _chatOpen = true;
+        // The scan screen's loading dialog may still be on top: dismiss it
+        // BEFORE pushing the chat screen, so no later pop (which removes the
+        // top route) can ever close the chat screen by mistake.
+        if (Get.isDialogOpen == true) {
+          Navigator.of(Get.overlayContext!, rootNavigator: true).pop();
+        }
         Get.to(() => const BChatScreen());
       }
     };
@@ -73,7 +89,7 @@ class BtController extends GetxController {
     _service.onSocketDisconnected = (reason) {
       isConnected.value = false;
       if (kDebugMode) {
-        print('Socket disconnected: $reason');
+        debugPrint('Socket disconnected: $reason');
       }
       // Refresh paired devices list from native on disconnect as well
       refreshPairedDevices();
@@ -81,22 +97,32 @@ class BtController extends GetxController {
     };
 
     _service.onSocketError = (message) {
-      if (kDebugMode) {
-        print('Socket error: $message');
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Socket error: $message');
       }
+      // Deliberately not surfaced as a snackbar/modal: transient link errors
+      // during scanning are common and would spam the UI.
     };
 
     super.onInit();
   }
 
   @override
+  String? get connectedDeviceKey => connectedDevice?.address;
+
+  @override
+  String? get connectedDeviceName => connectedDevice?.name;
+
+  @override
   void onClose() {
+    _serverAutoStopTimer?.cancel();
     _service.stopServer();
     _service.stopScan();
     _service.dispose();
     super.onClose();
   }
 
+  @override
   void onTransferProgress(
     Function({
       required String direction,
@@ -109,6 +135,7 @@ class BtController extends GetxController {
     _service.onTransferProgress = callback;
   }
 
+  @override
   void onSocketData(Function(Uint8List bytes, String text, {required String kind}) callback) {
     _service.onSocketData = callback;
   }
@@ -120,7 +147,7 @@ class BtController extends GetxController {
       pairedDevices.assignAll(list);
     } catch (e) {
       if (kDebugMode) {
-        print('Failed to load paired devices: $e');
+        debugPrint('Failed to load paired devices: $e');
       }
     }
   }
@@ -135,12 +162,13 @@ class BtController extends GetxController {
       // Auto-stop after discoverable duration if provided
       final int durationSec = (res['durationSec'] as int?) ?? 0;
       if (durationSec > 0) {
-        Future.delayed(Duration(seconds: durationSec), () {
+        _serverAutoStopTimer?.cancel();
+        _serverAutoStopTimer = Timer(Duration(seconds: durationSec), () {
           stopServer();
         });
       }
     } else {
-      if (kDebugMode) print('Discoverable request denied');
+      if (kDebugMode) debugPrint('Discoverable request denied');
     }
   }
 
@@ -163,7 +191,11 @@ class BtController extends GetxController {
   }
 
   /// Connect to a discovered or paired device and await connection result.
-  Future<bool> connectToDevice(BtDeviceInfo device) async {
+  Future<bool> connectToDevice(BtDeviceInfo device) => connectToPeer(device.address);
+
+  /// Connect to a peer by MAC address and await the connection result.
+  @override
+  Future<bool> connectToPeer(String address) async {
     final Completer<bool> completer = Completer<bool>();
 
     // Stop scanning if still running to avoid connection interference
@@ -188,7 +220,7 @@ class BtController extends GetxController {
     _service.onSocketConnected = (remote) {
       // Keep original behavior
       prevConnected?.call(remote);
-      if (remote.address == device.address && !completer.isCompleted) {
+      if (remote.address == address && !completer.isCompleted) {
         completer.complete(true);
       }
     };
@@ -203,24 +235,22 @@ class BtController extends GetxController {
     // If any socket error occurs during the connection attempt,
     // immediately fail this attempt without waiting.
     _service.onSocketError = (message) {
-      if (kDebugMode) {
-        print('Socket error during connect: $message');
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Socket error during connect: $message');
       }
-      prevError?.call(message);
+      // Note: intentionally not forwarding to prevError — the connecting
+      // screen shows its own result message, and forwarding would queue a
+      // snackbar behind the loading dialog.
       if (!completer.isCompleted) {
         completer.complete(false);
       }
     };
 
     try {
-      await _service.connect(device.address);
+      await _service.connect(address);
     } catch (e) {
-      if (kDebugMode) {
-        print('Error initiating connection: $e');
-      }
-      // Ensure any lingering dialogs are dismissed
-      if (Get.isDialogOpen == true) {
-        Get.back();
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Error initiating connection: $e');
       }
       restore();
       return false;
@@ -232,20 +262,15 @@ class BtController extends GetxController {
         onTimeout: () async => await _service.isConnected(),
       );
       restore();
-      if (Get.isDialogOpen == true) {
-        Get.back();
-      }
       return result;
     } catch (_) {
       restore();
-      if (Get.isDialogOpen == true) {
-        Get.back();
-      }
       return false;
     }
   }
 
   /// Disconnect from current connection
+  @override
   Future<void> disconnectFromDevice() async {
     if (isConnected.value) {
       await _service.disconnect();
@@ -254,6 +279,7 @@ class BtController extends GetxController {
   }
 
   /// Send string to the peer (client/server agnostic)
+  @override
   Future<void> sendMessage(String message) async {
     if (isConnected.value) {
       await _service.sendString(message);
@@ -261,6 +287,7 @@ class BtController extends GetxController {
   }
 
   /// Send raw bytes (e.g., image) to the peer
+  @override
   Future<void> sendBytes(Uint8List bytes) async {
     if (isConnected.value) {
       await _service.sendBytes(bytes);
@@ -268,7 +295,15 @@ class BtController extends GetxController {
   }
 
   /// Called by ChatViewController when chat screen is closed
+  @override
   void onChatClosed() {
     _chatOpen = false;
+  }
+
+  /// Called by the chat screen when it opens: suppresses the automatic chat
+  /// navigation if a connection arrives while the screen is already visible.
+  @override
+  void onChatOpened() {
+    _chatOpen = true;
   }
 }

@@ -1,5 +1,6 @@
 import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/services/hive_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 
 /// GetX controller responsible for managing chat sessions (in-memory).
@@ -11,12 +12,24 @@ class HomeController extends GetxController {
 
   @override
   void onInit() async {
-    sessions.value = await HiveService.to.getAllChatSessions();
+    try {
+      sessions.value = await HiveService.to.getAllChatSessions();
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('Failed to load chat sessions: $e');
+      }
+    }
     super.onInit();
   }
 
   void refreshSessions() async {
-    sessions.value = await HiveService.to.getAllChatSessions();
+    try {
+      sessions.value = await HiveService.to.getAllChatSessions();
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('Failed to refresh chat sessions: $e');
+      }
+    }
   }
 
   void deleteSession(ChatSessionModel session) async {
