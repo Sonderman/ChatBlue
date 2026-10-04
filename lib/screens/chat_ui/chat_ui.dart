@@ -429,7 +429,7 @@ class ChatMessageList extends StatelessWidget {
         padding: EdgeInsets.fromLTRB(10, topInset, 10, 8),
         itemCount: controller.messages.length,
         itemBuilder: (context, index) =>
-            ChatMessageBubble(message: controller.messages[index]),
+            ChatMessageBubble(message: controller.messages[index], controller: controller),
       ),
     );
   }
@@ -437,11 +437,15 @@ class ChatMessageList extends StatelessWidget {
 
 // ── Message bubble ─────────────────────────────────────────────────────────
 
-/// A single message: text, image thumbnail or transfer progress.
+/// A single message: text, image thumbnail, transfer progress or voice note.
 class ChatMessageBubble extends StatelessWidget {
-  const ChatMessageBubble({super.key, required this.message});
+  const ChatMessageBubble({super.key, required this.message, this.controller});
 
   final MessageModel message;
+
+  /// Optional controller: needed only when the message is a voice note
+  /// (playback controls).
+  final ChatScreenControllerBase? controller;
 
   @override
   Widget build(BuildContext context) {
@@ -457,7 +461,9 @@ class ChatMessageBubble extends StatelessWidget {
     );
 
     final Widget content;
-    if (message.imagePath != null) {
+    if (message.isAudio && message.imagePath != null) {
+      content = _audioBubble(p, mine);
+    } else if (message.imagePath != null) {
       content = _imageBubble(p, mine, showProgress);
     } else if (showProgress) {
       content = _progressBubble(p, mine);
@@ -554,6 +560,135 @@ class ChatMessageBubble extends StatelessWidget {
     );
   }
 
+  /// Voice-note bubble: play/pause button, duration caption and a thin
+  /// playback progress line. The file path lives in `imagePath` (see base).
+  Widget _audioBubble(ChatPalette p, bool mine) {
+    return Column(
+      crossAxisAlignment:
+          mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Obx(() {
+              final isThis = controller?.playingAudioId.value == message.id;
+              final playing = isThis && (controller?.isAudioPlaying.value ?? false);
+              return GestureDetector(
+                onTap: controller == null
+                    ? null
+                    : () => controller!.toggleAudio(message),
+                child: Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: LinearGradient(colors: p.sentGradient),
+                    border: Border.all(
+                      color: mine
+                          ? Colors.white.withValues(alpha: 0.45)
+                          : p.border,
+                    ),
+                  ),
+                  child: Icon(
+                    playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                    color: Colors.white,
+                    size: 26,
+                  ),
+                ),
+              );
+            }),
+            const SizedBox(width: 10),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      message.text,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: mine ? Colors.white : p.messageText,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    // ±10 s seek buttons.
+                    if (controller != null) ...[
+                      _AudioSkipButton(
+                        icon: Icons.replay_10,
+                        color: mine ? Colors.white : p.accent,
+                        onTap: () => controller!.skipAudio(
+                          const Duration(seconds: -10),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      _AudioSkipButton(
+                        icon: Icons.forward_10,
+                        color: mine ? Colors.white : p.accent,
+                        onTap: () => controller!.skipAudio(
+                          const Duration(seconds: 10),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 2),
+                // Draggable seek bar (thin slider).
+                SizedBox(
+                  width: 170,
+                  child: Obx(() {
+                    final isThis =
+                        controller?.playingAudioId.value == message.id;
+                    final durationMs = controller?.audioDurationMs ?? 0;
+                    final value = isThis
+                        ? (controller!.audioProgress.value * durationMs)
+                        : 0.0;
+                    return SliderTheme(
+                      data: SliderThemeData(
+                        trackHeight: 3,
+                        thumbShape: const RoundSliderThumbShape(
+                          enabledThumbRadius: 6,
+                        ),
+                        overlayShape: const RoundSliderOverlayShape(
+                          overlayRadius: 12,
+                        ),
+                        activeTrackColor: mine ? Colors.white : p.accent,
+                        inactiveTrackColor: mine
+                            ? Colors.white.withValues(alpha: 0.3)
+                            : p.progressTrack,
+                        thumbColor: mine ? Colors.white : p.accent,
+                        overlayColor: (mine ? Colors.white : p.accent)
+                            .withValues(alpha: 0.15),
+                      ),
+                      child: Slider(
+                        value: value.clamp(0.0, durationMs),
+                        max: durationMs > 0 ? durationMs : 1,
+                        onChanged: controller == null
+                            ? null
+                            : (v) => controller!.seekAudio(message, v),
+                      ),
+                    );
+                  }),
+                ),
+              ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          formatChatTimestamp(message.timestamp),
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+            color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
+          ),
+        ),
+      ],
+    );
+  }
+
   /// Bare transfer progress bubble (bubble without a thumbnail yet).
   Widget _progressBubble(ChatPalette p, bool mine) {
     final current = message.transferCurrent ?? 0;
@@ -593,6 +728,31 @@ class ChatMessageBubble extends StatelessWidget {
   }
 }
 
+/// Small icon button used for ±10 s seek jumps in voice bubbles.
+class _AudioSkipButton extends StatelessWidget {
+  const _AudioSkipButton({
+    required this.icon,
+    required this.color,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.all(2),
+        child: Icon(icon, size: 17, color: color),
+      ),
+    );
+  }
+}
+
 // ── Input bar ──────────────────────────────────────────────────────────────
 
 /// Glassy composer: image picker, rounded field and gradient send.
@@ -615,21 +775,45 @@ class ChatInputBar extends StatelessWidget {
       if (!controller.isConnected.value) {
         return _ConnectBar(controller: controller, palette: p);
       }
-      return Container(
-        margin: const EdgeInsets.fromLTRB(10, 4, 10, 10),
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-        decoration: BoxDecoration(
-          color: p.bar,
-          borderRadius: BorderRadius.circular(28),
-          border: Border.all(color: p.border),
-        ),
-        child: Row(
-          children: [
-            IconButton(
-              icon: Icon(Icons.image_outlined, color: p.accent),
-              tooltip: 'Send image',
-              onPressed: () => controller.showImageSourceSheet(),
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (controller.isRecording.value)
+            _RecordingBanner(controller: controller, palette: p),
+          Container(
+            margin: const EdgeInsets.fromLTRB(10, 4, 10, 10),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            decoration: BoxDecoration(
+              color: p.bar,
+              borderRadius: BorderRadius.circular(28),
+              border: Border.all(color: p.border),
             ),
+            child: Row(
+              children: [
+                // Tap-to-record voice message button (tap again to stop & send;
+                // long-press the recording banner to cancel).
+                GestureDetector(
+                  onTap: controller.isRecording.value
+                      ? controller.stopRecordingAndSend
+                      : controller.startRecording,
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Icon(
+                      controller.isRecording.value
+                          ? Icons.graphic_eq
+                          : Icons.mic_none,
+                      color: controller.isRecording.value
+                          ? Colors.redAccent
+                          : p.accent,
+                      size: 24,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: Icon(Icons.image_outlined, color: p.accent),
+                  tooltip: 'Send image',
+                  onPressed: () => controller.showImageSourceSheet(),
+                ),
             Expanded(
               child: TextField(
                 controller: controller.textController,
@@ -657,7 +841,85 @@ class ChatInputBar extends StatelessWidget {
             _SendButton(palette: p, onPressed: _send),
           ],
         ),
+      ),
+      ],
       );
+    });
+  }
+}
+
+/// Thin strip shown above the composer while a voice recording is active.
+class _RecordingBanner extends StatelessWidget {
+  const _RecordingBanner({required this.controller, required this.palette});
+
+  final ChatScreenControllerBase controller;
+  final ChatPalette palette;
+
+  @override
+  Widget build(BuildContext context) {
+    // Own Obx: reads must happen inside it for the seconds counter to
+    // rebuild the banner (the parent chair's Obx only tracks isRecording).
+    return Obx(() {
+      final seconds = controller.recordSeconds.value;
+      final label =
+          'Recording ${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+    return GestureDetector(
+      // Long-press anywhere on the banner also cancels.
+      onLongPress: controller.cancelRecording,
+      child: Container(
+      margin: const EdgeInsets.fromLTRB(10, 4, 10, 6),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: palette.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: palette.border),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.max,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.redAccent,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.redAccent.withValues(alpha: 0.6),
+                  blurRadius: 6,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(label, style: TextStyle(fontSize: 12, color: palette.muted)),
+          const Spacer(),
+          GestureDetector(
+            onTap: controller.cancelRecording,
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.close, size: 14, color: palette.muted),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Cancel',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: palette.accent,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    ),
+    );
     });
   }
 }

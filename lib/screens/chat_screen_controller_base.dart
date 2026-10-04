@@ -8,12 +8,16 @@ import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/core/services/hive_service.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:get/get.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
 typedef _ImageWriteJob = ({String path, Uint8List bytes});
@@ -33,9 +37,10 @@ class _OutgoingJob {
   _OutgoingJob.text(String this.text)
       : kind = _SendKind.text,
         bytes = null,
-        imagePath = null;
+        imagePath = null,
+        audioText = null;
 
-  _OutgoingJob.bytes(Uint8List this.bytes, this.imagePath)
+  _OutgoingJob.bytes(Uint8List this.bytes, this.imagePath, {this.audioText})
       : kind = _SendKind.bytes,
         text = null;
 
@@ -43,6 +48,10 @@ class _OutgoingJob {
   final String? text;
   final Uint8List? bytes;
   final String? imagePath;
+
+  /// When set, the transferred bytes are a voice recording and the bubble
+  /// finalizes as an audio message with this duration caption.
+  final String? audioText;
 }
 
 /// Shared implementation for the Bluetooth and Wi‑Fi Direct chat screens.
@@ -69,6 +78,35 @@ abstract class ChatScreenControllerBase extends GetxController {
 
   /// 0..1 progress of the incoming sync frame (drives the thin header bar).
   final RxDouble syncProgress = 0.0.obs;
+
+  // ── Voice messages ──────────────────────────────────────────────────────
+  final RxBool isRecording = false.obs;
+  final RxInt recordSeconds = 0.obs;
+  Timer? _recordTimer;
+  AudioRecorder? _recorder;
+  String? _recordingPath;
+
+  /// Id of the audio bubble currently playing (null when idle).
+  final Rxn<String> playingAudioId = Rxn<String>();
+
+  /// Mirror of the player's playing state (drives play/pause icons).
+  final RxBool isAudioPlaying = false.obs;
+
+  /// 0..1 playback position of the playing bubble.
+  final RxDouble audioProgress = 0.0.obs;
+
+  /// Duration of the loaded track in milliseconds (0 when nothing loaded).
+  double get audioDurationMs =>
+      _audioPlayer.duration?.inMilliseconds.toDouble() ?? 0;
+  final AudioPlayer _audioPlayer = AudioPlayer();
+
+  /// Duration caption of an incoming voice transfer (announced by the peer
+  /// right before the bytes arrive).
+  String? _pendingAudioMeta;
+
+  /// When set, the outgoing byte transfer is a voice recording; used to
+  /// finalize its bubble as an audio message.
+  String? _pendingOutgoingAudioText;
 
   /// Reconnects to the device this chat session belongs to. Used by the
   /// Connect button shown when the chat is opened without a connection.
@@ -116,6 +154,12 @@ abstract class ChatScreenControllerBase extends GetxController {
   // History sync between previously-chatting peers:
   // - The prefix makes sync packets distinguishable from plain chat text.
   static const String _syncPrefix = '@@CHATBLUE_SYNC@@';
+
+  // Voice-message announcement prefix (duration meta sent before the bytes).
+  static const String _audioPrefix = '@@CHATBLUE_AUDIO@@';
+
+  /// Voice recordings are cut off (and sent) automatically at this length.
+  static const int _maxRecordSeconds = 120;
 
   // A sync packet is sent once per (re)connection; the connection listener
   // in onInit re-triggers it whenever the socket comes up.
@@ -185,6 +229,10 @@ abstract class ChatScreenControllerBase extends GetxController {
     unawaited(_flushPendingSave());
     // Discard queued sends: there is no socket after the chat closes.
     _sendQueue.clear();
+    // Stop any active recording and release the player.
+    _recordTimer?.cancel();
+    _recorder?.dispose();
+    _audioPlayer.dispose();
     textController.dispose();
     // Disconnect when leaving the chat screen to release the socket cleanly.
     // PopScope on the screen confirms there is no active transfer first.
@@ -196,12 +244,37 @@ abstract class ChatScreenControllerBase extends GetxController {
   }
 
   void setupCallbacks() {
+    // Playback position of the active voice bubble.
+    _audioPlayer.positionStream.listen((position) {
+      final duration = _audioPlayer.duration;
+      if (duration != null && duration.inMilliseconds > 0) {
+        audioProgress.value =
+            (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0);
+      }
+    });
+    _audioPlayer.playerStateStream.listen((state) {
+      isAudioPlaying.value = state.playing;
+      if (state.processingState == ProcessingState.completed) {
+        playingAudioId.value = null;
+        audioProgress.value = 0;
+      }
+    });
+
     transport.onSocketData((bytes, text, {required String kind}) async {
       if (kDebugMode && showDebugLogs) {
         debugPrint('Socket data: $text\n Kind: $kind');
       }
       if (kind == 'bytes' && bytes.isNotEmpty) {
-        await _handleIncomingImage(bytes);
+        // A voice announcement precedes the audio bytes; route accordingly.
+        if (_pendingAudioMeta != null) {
+          await _handleIncomingAudio(bytes);
+        } else {
+          await _handleIncomingImage(bytes);
+        }
+      } else if (text.startsWith(_audioPrefix)) {
+        // Voice transfer announcement: remember the duration for the coming
+        // bytes; nothing is added to the chat at this point.
+        _pendingAudioMeta = text.substring(_audioPrefix.length);
       } else if (text.startsWith(_syncPrefix)) {
         // History sync packet from the peer: not a real message, apply it to
         // the local history instead of appending it to the chat.
@@ -262,13 +335,12 @@ abstract class ChatScreenControllerBase extends GetxController {
     });
   }
 
-  /// Sends the last [_syncHistoryCount] messages of this session to the peer
-  /// as sync packets. Called on (re)connection.
-  ///
-  /// Images travel as base64. Each image is sent in its **own** packet — a
-  /// dropped frame only costs that one image, never the whole history — and
-  /// text messages go first as one small packet. All packets are enqueued on
-  /// the same send queue so they never interleave with live user messages.
+  /// Sends the sync **manifest** — a light SHA-256 digest of the last
+  /// [_syncHistoryCount] messages (what the peer may need) — as a single
+  /// small packet. The peer compares it against its own set and only
+  /// requests what it is actually missing; no message payload (and no image
+  /// bytes) is transferred unless needed. Called once per chat screen on
+  /// (re)connection.
   Future<void> _sendHistorySync() async {
     // One sync per chat screen: if a previous connection already synced this
     // session, a re-connect adds nothing new unless the screen was reopened.
@@ -276,55 +348,29 @@ abstract class ChatScreenControllerBase extends GetxController {
     // No socket yet (chat opened from the session list): nothing to send;
     // the connection listener re-invokes this as soon as the link is up.
     if (!transport.isConnected.value) return;
-    // Marked before enqueue: sending is serialized on the queue, but the
-    // state must not allow another trigger while packets are pending.
+    // Marked before sending: the state must not allow another trigger while
+    // the handshake is in flight.
     _syncSentForSession = true;
 
     final history = messages.toList()
       ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    final recent = history.take(_syncHistoryCount);
+    final recent = history.take(_syncHistoryCount).toList();
 
-    final textEntries = <Map<String, dynamic>>[];
-    final imagePackets = <Map<String, dynamic>>[];
+    final counts = await _localHashCounts(recent);
+    if (counts.isEmpty) return;
 
-    for (final m in recent) {
-      final entry = <String, dynamic>{
-        if (m.id != null) 'id': m.id,
-        'text': m.text,
-        'sentByMe': m.isSentByMe,
-        'timestamp': m.timestamp.toIso8601String(),
-      };
-      final imagePath = m.imagePath;
-      if (imagePath != null) {
-        try {
-          final file = File(imagePath);
-          if (await file.exists() && file.lengthSync() <= _syncMaxImageBytes) {
-            final bytes = await file.readAsBytes();
-            entry['type'] = 'image';
-            entry['bytes'] = base64Encode(bytes);
-            imagePackets.add(entry);
-            continue;
-          }
-        } catch (_) {
-          // Unreadable image: keep its text caption instead.
-        }
-      }
-      textEntries.add(entry);
-    }
-
-    if (textEntries.isNotEmpty) {
-      // History sync rides OUTSIDE the user send queue: live messages are
-      // never blocked behind sync packets (the single socket still orders
-      // frames FIFO natively, but user sends submit independently and the
-      // sync is split into small per-image packets, so worst-case wait is
-      // one frame, not the whole history).
-      transport.sendMessage(_syncPrefix + jsonEncode({'messages': textEntries}));
-    }
-    for (final imageEntry in imagePackets) {
-      transport.sendMessage(
-        _syncPrefix + jsonEncode({'messages': [imageEntry]}),
-      );
-    }
+    // Sync traffic rides OUTSIDE the user send queue: live messages are
+    // never blocked behind sync packets (the single socket still orders
+    // frames FIFO natively).
+    transport.sendMessage(
+      _syncPrefix +
+          jsonEncode({
+            'type': 'manifest',
+            'items': [
+              for (final e in counts.entries) {'h': e.key, 'n': e.value},
+            ],
+          }),
+    );
   }
 
   /// Image payloads larger than this are not embedded in the history sync
@@ -338,16 +384,145 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// far smaller).
   static const int _syncProgressThreshold = 4 * 1024;
 
-  /// Applies an incoming history sync packet: integrates the peer's last
-  /// messages into the local history, deduplicating against messages that
-  /// already exist locally (same text, same direction and almost-same
-  /// timestamp — the peer's copy of a message we already hold).
+  /// Dispatches an incoming sync packet by its `type`:
+  /// - `manifest`  → compare against local messages, request what's missing
+  /// - `request`   → send the requested messages (as `message` packets)
+  /// - `message`   → integrate the peer's messages into local history
   Future<void> _applyHistorySync(String payload) async {
-    isSyncing.value = true;
     try {
       final decoded = jsonDecode(payload);
-      if (decoded is! Map || decoded['messages'] is! List) return;
-      final entries = decoded['messages'] as List;
+      if (decoded is! Map) return;
+      final type = decoded['type'] as String? ?? 'message';
+      switch (type) {
+        case 'message':
+          await _applySyncMessages(decoded['messages']);
+        case 'manifest':
+          await _handleSyncManifest(decoded['items']);
+        case 'request':
+          await _handleSyncRequest(decoded['items']);
+        default:
+          break;
+      }
+    } catch (_) {
+      // Malformed sync packet — ignore silently.
+    }
+  }
+
+  /// Compares the peer's manifest against the local message set and requests
+  /// the hashes we are missing (with the missing count each).
+  Future<void> _handleSyncManifest(dynamic itemsRaw) async {
+    if (itemsRaw is! List || itemsRaw.isEmpty) return;
+    final myCounts = await _localHashCounts(messages);
+
+    final missing = <Map<String, dynamic>>[];
+    for (final item in itemsRaw) {
+      if (item is! Map) continue;
+      final h = item['h'] as String?;
+      final n = item['n'] as int? ?? 1;
+      if (h == null) continue;
+      final need = n - (myCounts[h] ?? 0);
+      if (need > 0) missing.add({'h': h, 'n': need});
+    }
+    if (missing.isEmpty) return;
+
+    transport.sendMessage(
+      _syncPrefix + jsonEncode({'type': 'request', 'items': missing}),
+    );
+  }
+
+  /// Sends the requested messages back to the peer: for each requested hash,
+  /// the newest [n] local messages matching it, each in its own packet (so a
+  /// dropped frame only costs one message).
+  Future<void> _handleSyncRequest(dynamic itemsRaw) async {
+    if (itemsRaw is! List || itemsRaw.isEmpty) return;
+    final sorted = messages.toList()
+      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+
+    for (final item in itemsRaw) {
+      if (item is! Map) continue;
+      final h = item['h'] as String?;
+      final n = item['n'] as int? ?? 1;
+      if (h == null || n <= 0) continue;
+      var sent = 0;
+      for (final m in sorted) {
+        if (sent >= n) break;
+        if (await _messageHash(m) != h) continue;
+        transport.sendMessage(
+          _syncPrefix +
+              jsonEncode({
+                'type': 'message',
+                'messages': [await _syncEntryFor(m)],
+              }),
+        );
+        sent++;
+      }
+    }
+  }
+
+  /// Builds the wire entry for one message (images embedded as base64 when
+  /// small enough, otherwise sent as their text caption).
+  Future<Map<String, dynamic>> _syncEntryFor(MessageModel m) async {
+    final entry = <String, dynamic>{
+      if (m.id != null) 'id': m.id,
+      'text': m.text,
+      'sentByMe': m.isSentByMe,
+      'timestamp': m.timestamp.toIso8601String(),
+    };
+    final imagePath = m.imagePath;
+    if (imagePath != null) {
+      try {
+        final file = File(imagePath);
+        if (await file.exists() && file.lengthSync() <= _syncMaxImageBytes) {
+          final isAudio = m.transferKind == 'audio';
+          entry['type'] = isAudio ? 'audio' : 'image';
+          entry['bytes'] = base64Encode(await file.readAsBytes());
+        }
+      } catch (_) {
+        // Unreadable media: keep its text caption instead.
+      }
+    }
+    return entry;
+  }
+
+  /// SHA-256 based content fingerprint of a message:
+  /// - images: `i:<sha256(file bytes)>` — identical pictures hash equal on
+  ///   both devices, different bytes (even same size) hash differently;
+  /// - text:   `t:<sha256(text)>`.
+  Future<String> _messageHash(MessageModel m) async {
+    final imagePath = m.imagePath;
+    if (imagePath != null) {
+      try {
+        final file = File(imagePath);
+        if (await file.exists() && file.lengthSync() <= _syncMaxImageBytes) {
+          final digest = sha256.convert(await file.readAsBytes());
+          return 'i:${digest.toString()}';
+        }
+      } catch (_) {
+        // Fall through to the text fingerprint.
+      }
+    }
+    return 't:${sha256.convert(utf8.encode(m.text)).toString()}';
+  }
+
+  /// Hash → occurrence count map over [msgs].
+  Future<Map<String, int>> _localHashCounts(List<MessageModel> msgs) async {
+    final counts = <String, int>{};
+    for (final m in msgs) {
+      final h = await _messageHash(m);
+      counts[h] = (counts[h] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  /// Applies an incoming `message` packet: integrates the peer's messages
+  /// into the local history, deduplicating against messages that already
+  /// exist locally (same text, same direction and almost-same timestamp —
+  /// the peer's copy of a message we already hold).
+  Future<void> _applySyncMessages(dynamic raw) async {
+    if (raw is! List) return;
+    isSyncing.value = true;
+    try {
+      final entries = raw;
 
       bool changed = false;
       for (final entry in entries) {
@@ -360,21 +535,20 @@ abstract class ChatScreenControllerBase extends GetxController {
         final ts = tsRaw != null ? DateTime.tryParse(tsRaw) : null;
         if (text.isEmpty || ts == null) continue;
 
-        // Rehydrate embedded image bytes (decoded early so the content hash
+        // Rehydrate embedded media bytes (decoded early so the content hash
         // can be used for a robust dedup and the file written only once).
-        Uint8List? imageBytes;
-        if (entry['type'] == 'image') {
-          final b64 = entry['bytes'] as String?;
-          if (b64 != null && b64.isNotEmpty) {
-            try {
-              imageBytes = base64Decode(b64);
-            } catch (_) {
-              imageBytes = null;
-            }
+        final bool isAudioEntry = entry['type'] == 'audio';
+        Uint8List? mediaBytes;
+        final b64 = entry['bytes'] as String?;
+        if (b64 != null && b64.isNotEmpty) {
+          try {
+            mediaBytes = base64Decode(b64);
+          } catch (_) {
+            mediaBytes = null;
           }
         }
         final int? incomingHash =
-            imageBytes == null ? null : _quickHash(imageBytes);
+            mediaBytes == null ? null : _quickHash(mediaBytes);
 
         bool alreadyHave = messages.any(
           (m) =>
@@ -391,13 +565,16 @@ abstract class ChatScreenControllerBase extends GetxController {
         );
         if (alreadyHave) continue;
 
-        // Persist the embedded image to a local file (once, after dedup).
-        String? imagePath;
-        if (imageBytes != null) {
+        // Persist the embedded media to a local file (once, after dedup).
+        String? mediaPath;
+        if (mediaBytes != null) {
           try {
-            imagePath = await _persistIncomingImage(imageBytes);
+            mediaPath = await _persistIncomingBytes(
+              mediaBytes,
+              isAudioEntry ? 'm4a' : 'jpg',
+            );
           } catch (_) {
-            imagePath = null;
+            mediaPath = null;
           }
         }
 
@@ -408,7 +585,8 @@ abstract class ChatScreenControllerBase extends GetxController {
             text: text,
             isSentByMe: sentByMe,
             timestamp: ts,
-            imagePath: imagePath,
+            imagePath: mediaPath,
+            transferKind: isAudioEntry ? 'audio' : null,
           ),
         );
         changed = true;
@@ -461,7 +639,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     }
     _incomingProgressId = null;
 
-    final filePath = await _persistIncomingImage(bytes);
+    final filePath = await _persistIncomingBytes(bytes, 'jpg');
 
     if (idx != -1 && idx < messages.length) {
       messages[idx] = messages[idx].copyWith(
@@ -508,19 +686,22 @@ abstract class ChatScreenControllerBase extends GetxController {
     // Finalize outgoing: convert the progress bubble into the real image message
     if (state.total > 0 && state.current >= state.total) {
       final bytesToAttach = _pendingOutgoingBytes;
+      final audioText = _pendingOutgoingAudioText;
       messages[idx] = messages[idx].copyWith(
-        text: bytesToAttach != null
-            ? '[Image] (${bytesToAttach.lengthInBytes} bytes)'
-            : messages[idx].text,
+        text: audioText ??
+            (bytesToAttach != null
+                ? '[Image] (${bytesToAttach.lengthInBytes} bytes)'
+                : messages[idx].text),
         imagePath: sendingImagePath ?? messages[idx].imagePath,
         isTransferring: false,
         transferCurrent: state.total,
         transferTotal: state.total,
-        transferKind: 'bytes',
+        transferKind: audioText != null ? 'audio' : 'bytes',
       );
       _scheduleSave();
       sendingImagePath = null;
       _pendingOutgoingBytes = null;
+      _pendingOutgoingAudioText = null;
       _outgoingProgressId = null;
     }
     update();
@@ -717,6 +898,7 @@ abstract class ChatScreenControllerBase extends GetxController {
         // bubble; cleared on completion/failure in _updateOutgoingProgress.
         _pendingOutgoingBytes = job.bytes;
         sendingImagePath = job.imagePath;
+        _pendingOutgoingAudioText = job.audioText;
         await transport.sendBytes(job.bytes!);
       } else {
         await transport.sendMessage(job.text!);
@@ -744,11 +926,201 @@ abstract class ChatScreenControllerBase extends GetxController {
     _drainSendQueue();
   }
 
-  Future<String> _persistIncomingImage(Uint8List bytes) async {
+  Future<String> _persistIncomingBytes(Uint8List bytes, String ext) async {
     final dir = await getApplicationDocumentsDirectory();
-    final path = '${dir.path}/${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final path = '${dir.path}/${DateTime.now().millisecondsSinceEpoch}.$ext';
     // Write on a background isolate so large payloads don't jank the UI
     await compute(_writeBytesToFile, (path: path, bytes: bytes));
     return path;
+  }
+
+  // ── Voice recording & playback ───────────────────────────────────────────
+
+  /// Starts a voice recording (hold-to-record). Requires the microphone
+  /// runtime permission; the file is AAc-LC (.m4a) in app documents.
+  Future<void> startRecording() async {
+    if (isRecording.value || !transport.isConnected.value) return;
+    final status = await Permission.microphone.request();
+    if (!status.isGranted) {
+      Get.snackbar('Microphone permission', 'Recording is not available.');
+      return;
+    }
+    final dir = await getApplicationDocumentsDirectory();
+    _recordingPath =
+        '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
+    _recorder = AudioRecorder();
+    try {
+      await _recorder!.start(
+        const RecordConfig(encoder: AudioEncoder.aacLc),
+        path: _recordingPath!,
+      );
+    } catch (e) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Recording start failed: $e');
+      }
+      _recorder = null;
+      _recordingPath = null;
+      Get.snackbar('Recording error', 'Could not start recording.');
+      return;
+    }
+    recordSeconds.value = 0;
+    isRecording.value = true;
+    _recordTimer?.cancel();
+    _recordTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) {
+        recordSeconds.value++;
+        // Automatic cut-off: stop and send at the configured limit.
+        if (recordSeconds.value >= _maxRecordSeconds) {
+          stopRecordingAndSend();
+        }
+      },
+    );
+  }
+
+  /// Stops the recording and queues it for sending (≥ 1 s; shorter takes are
+  /// discarded to avoid accidental taps).
+  Future<void> stopRecordingAndSend() async {
+    if (!isRecording.value) return;
+    final path = _recordingPath;
+    final seconds = recordSeconds.value;
+    await cancelRecording(deleteFile: false);
+    if (path == null) return;
+    final file = File(path);
+    if (!await file.exists() || file.lengthSync() == 0) return;
+    if (seconds < 1) {
+      await file.delete().catchError((_) => file);
+      return;
+    }
+    _enqueueSend(
+      _OutgoingJob.text(_audioPrefix + jsonEncode({'duration': _formatDuration(seconds)})),
+    );
+    _enqueueSend(
+      _OutgoingJob.bytes(await file.readAsBytes(), path, audioText: _formatDuration(seconds)),
+    );
+  }
+
+  /// Aborts the current recording (used when the press is cancelled).
+  Future<void> cancelRecording({bool deleteFile = true}) async {
+    _recordTimer?.cancel();
+    _recordTimer = null;
+    isRecording.value = false;
+    recordSeconds.value = 0;
+    final path = _recordingPath;
+    _recordingPath = null;
+    try {
+      final recorder = _recorder;
+      if (recorder != null && await recorder.isRecording()) {
+        await recorder.stop();
+      }
+    } catch (_) {}
+    _recorder = null;
+    if (deleteFile && path != null) {
+      await File(path).delete().catchError((_) => File(path));
+    }
+  }
+
+  /// Toggles playback of a voice bubble (single player instance).
+  Future<void> toggleAudio(MessageModel msg) async {
+    final path = msg.imagePath;
+    if (path == null) return;
+    if (playingAudioId.value == msg.id) {
+      if (_audioPlayer.playing) {
+        await _audioPlayer.pause();
+      } else {
+        await _audioPlayer.play();
+      }
+      return;
+    }
+    await _audioPlayer.stop();
+    playingAudioId.value = msg.id;
+    audioProgress.value = 0;
+    try {
+      await _audioPlayer.setFilePath(path);
+    } catch (e) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Audio load failed: $e');
+      }
+      playingAudioId.value = null;
+      return;
+    }
+    await _audioPlayer.play();
+  }
+
+  /// Seeks the given bubble to [millis]. Loads the track first when another
+  /// message is currently bound to the player.
+  Future<void> seekAudio(MessageModel msg, double millis) async {
+    if (playingAudioId.value != msg.id) {
+      await toggleAudio(msg);
+    }
+    if (millis < 0) millis = 0;
+    await _audioPlayer.seek(Duration(milliseconds: millis.round()));
+  }
+
+  /// Jumps [delta] (e.g. ±10 s) from the current playback position.
+  Future<void> skipAudio(Duration delta) async {
+    final duration = _audioPlayer.duration;
+    var target = _audioPlayer.position + delta;
+    if (target < Duration.zero) target = Duration.zero;
+    if (duration != null && target > duration) target = duration;
+    await _audioPlayer.seek(target);
+  }
+
+  String _formatDuration(int totalSeconds) {
+    final m = totalSeconds ~/ 60;
+    final s = (totalSeconds % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  /// Processes an incoming voice transfer: persists the bytes and finalizes
+  /// the transfer bubble as an audio message.
+  Future<void> _handleIncomingAudio(Uint8List bytes) async {
+    final meta = _pendingAudioMeta;
+    _pendingAudioMeta = null;
+    String? durationText;
+    if (meta != null && meta.isNotEmpty) {
+      try {
+        durationText = (jsonDecode(meta)['duration'] as String?) ?? '0:00';
+      } catch (_) {
+        durationText = meta;
+      }
+    }
+
+    int idx = _incomingProgressId == null
+        ? -1
+        : messages.indexWhere((m) => m.id == _incomingProgressId);
+    if (idx == -1) {
+      idx = messages.indexWhere(
+        (m) => m.isTransferring && m.transferKind == 'bytes' && !m.isSentByMe,
+      );
+    }
+    _incomingProgressId = null;
+
+    final filePath = await _persistIncomingBytes(bytes, 'm4a');
+
+    if (idx != -1 && idx < messages.length) {
+      messages[idx] = messages[idx].copyWith(
+        text: durationText ?? messages[idx].text,
+        isSentByMe: false,
+        timestamp: DateTime.now(),
+        imagePath: filePath,
+        isTransferring: false,
+        transferKind: 'audio',
+      );
+    } else {
+      messages.insert(
+        0,
+        MessageModel(
+          id: Uuid().v4(),
+          text: durationText ?? '0:00',
+          isSentByMe: false,
+          timestamp: DateTime.now(),
+          imagePath: filePath,
+          transferKind: 'audio',
+        ),
+      );
+    }
+    _scheduleSave();
+    update();
   }
 }

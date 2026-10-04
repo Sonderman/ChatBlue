@@ -26,6 +26,9 @@ class MessageModel extends HiveObject {
     this.transferKind,
   });
 
+  /// True when this message carries a voice recording instead of text/image.
+  bool get isAudio => transferKind == 'audio';
+
   MessageModel copyWith({
     String? id,
     String? text,

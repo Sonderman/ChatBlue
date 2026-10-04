@@ -101,7 +101,20 @@ class BluetoothClassicManager(private val context: Context) {
         candidatesByAddress.clear()
         // Cancel any ongoing discovery to restart a fresh scan
         if (adapter.isDiscovering) adapter.cancelDiscovery()
-        adapter.startDiscovery()
+        val started = try {
+            adapter.startDiscovery()
+        } catch (e: SecurityException) {
+            onScanError?.invoke("Scan permission missing: ${e.message}")
+            return
+        }
+        if (!started) {
+            // startDiscovery() returns false when the stack refuses (e.g.
+            // MIUI with Location services off, or Bluetooth mid-toggle).
+            // Surface it instead of failing silently.
+            onScanError?.invoke(
+                "Scan could not start. Enable Bluetooth and Location services, then retry."
+            )
+        }
     }
 
     fun stopDiscovery() {
