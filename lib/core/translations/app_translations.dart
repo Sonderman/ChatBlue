@@ -76,6 +76,18 @@ class AppTranslations extends Translations {
         'The target could not be identified automatically — pick the '
         'other device from the discovered list.',
 
+    // Deferred media download (history sync placeholders)
+    'photoLabel': 'Photo',
+    'audioLabel': 'Voice message',
+    'downloadMediaHint': 'Tap to download',
+    'downloadingLabel': 'Downloading…',
+    'downloadFailedTitle': 'Download failed',
+    'downloadNeedConnection':
+        'The file is on the other device — connect first to download it.',
+    'downloadTimeoutMessage': 'The other device did not respond.',
+    'downloadUnavailableMessage':
+        'The file is no longer available on the other device.',
+
     // Chat UI
     'connectedStatus': 'Connected',
     'notConnectedStatus': 'Not Connected',
@@ -193,6 +205,18 @@ class AppTranslations extends Translations {
     'wfdPickDeviceHint':
         'Hedef cihaz otomatik tanınamadı — keşfedilen listeden diğer '
         'cihazı seç.',
+
+    // Deferred media download (history sync placeholders)
+    'photoLabel': 'Fotoğraf',
+    'audioLabel': 'Sesli mesaj',
+    'downloadMediaHint': 'İndirmek için dokun',
+    'downloadingLabel': 'İndiriliyor…',
+    'downloadFailedTitle': 'İndirme başarısız',
+    'downloadNeedConnection':
+        'Dosya diğer cihazda — indirmek için önce bağlan.',
+    'downloadTimeoutMessage': 'Diğer cihaz yanıt vermedi.',
+    'downloadUnavailableMessage':
+        'Dosya artık diğer cihazda bulunamadı.',
 
     // Chat UI
     'connectedStatus': 'Bağlı',

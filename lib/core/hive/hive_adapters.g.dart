@@ -74,6 +74,7 @@ class MessageModelAdapter extends TypeAdapter<MessageModel> {
       isSentByMe: fields[1] as bool,
       timestamp: fields[2] as DateTime,
       imagePath: fields[8] as String?,
+      remoteMediaSize: (fields[10] as num?)?.toInt(),
       isTransferring: fields[4] == null ? false : fields[4] as bool,
       transferCurrent: (fields[5] as num?)?.toInt(),
       transferTotal: (fields[6] as num?)?.toInt(),
@@ -84,7 +85,7 @@ class MessageModelAdapter extends TypeAdapter<MessageModel> {
   @override
   void write(BinaryWriter writer, MessageModel obj) {
     writer
-      ..writeByte(9)
+      ..writeByte(10)
       ..writeByte(0)
       ..write(obj.text)
       ..writeByte(1)
@@ -102,7 +103,9 @@ class MessageModelAdapter extends TypeAdapter<MessageModel> {
       ..writeByte(8)
       ..write(obj.imagePath)
       ..writeByte(9)
-      ..write(obj.id);
+      ..write(obj.id)
+      ..writeByte(10)
+      ..write(obj.remoteMediaSize);
   }
 
   @override

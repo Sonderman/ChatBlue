@@ -190,6 +190,13 @@ abstract class ChatScreenControllerBase extends GetxController {
   // session re-send nothing unless a new chat screen is opened.
   bool _syncSentForSession = false;
 
+  // True when this chat open created a BRAND-NEW session because the peer
+  // identity was not (fully) known yet (rotated MAC / identity frame still
+  // in flight). A late identity frame then re-checks for a stored session
+  // of the same peer and merges it in (see _mergeLatePeerSession).
+  bool _openedAsFreshSession = false;
+  bool _lateMergeDone = false;
+
   // Serializes outgoing sends: while a byte transfer (image) is in flight,
   // any further text/image send is queued and only dispatched once the
   // current transfer completes. This keeps the wire order FIFO and prevents
@@ -202,17 +209,82 @@ abstract class ChatScreenControllerBase extends GetxController {
   void updateSessionName(String name) {
     if (name.isEmpty || peerName.value == name) return;
     peerName.value = name;
-    if (chatSession.name == name) return;
+    if (chatSession.name != name) {
+      chatSession = ChatSessionModel(
+        id: chatSession.id,
+        name: name,
+        createdAt: chatSession.createdAt,
+        updatedAt: chatSession.updatedAt,
+        messages: chatSession.messages,
+        device: chatSession.device,
+        transport: chatSession.transport,
+      );
+      _scheduleSave();
+    }
+    // The real (model) device name just landed: if this chat opened as a
+    // fresh session on an unknown identity, an existing session for the
+    // same peer may now be findable and must absorb into this one.
+    unawaited(_mergeLatePeerSession());
+  }
+
+  /// Late identity merge: the chat opened while the peer identity was still
+  /// unknown (rotated P2P MAC / identity frame in flight), so the open
+  /// MISSed and created a fresh session; the identity frame has now arrived
+  /// — if a stored session matches the peer (address, or a
+  /// normalization-insensitive name), it is the same conversation: adopt
+  /// its history here and delete the duplicate so the history sync and the
+  /// home list stay in ONE chat (a split makes the sync look like it did
+  /// nothing while the old history sits in a second chat).
+  Future<void> _mergeLatePeerSession() async {
+    if (!_openedAsFreshSession || _lateMergeDone) return;
+    final duplicate = await _findExistingSessionForPeer();
+    if (duplicate == null || duplicate.id == chatSession.id) return;
+    _lateMergeDone = true;
+    final seen = <String>{};
+    final combined = <MessageModel>[];
+    for (final m in [...duplicate.messages, ...messages]) {
+      final k = m.id ??
+          '${m.timestamp.microsecondsSinceEpoch}|${m.isSentByMe}|'
+              '${m.text}|${m.imagePath}';
+      if (seen.add(k)) combined.add(m);
+    }
+    combined.sort((a, b) => a.timestamp.compareTo(b.timestamp));
     chatSession = ChatSessionModel(
       id: chatSession.id,
-      name: name,
-      createdAt: chatSession.createdAt,
-      updatedAt: chatSession.updatedAt,
-      messages: chatSession.messages,
-      device: chatSession.device,
+      name: chatSession.name,
+      createdAt: duplicate.createdAt.isBefore(chatSession.createdAt)
+          ? duplicate.createdAt
+          : chatSession.createdAt,
+      updatedAt: DateTime.now(),
+      messages: combined,
+      device: {
+        'name': chatSession.device['name'] ?? duplicate.device['name'],
+        'address':
+            chatSession.device['address'] ?? duplicate.device['address'],
+      },
       transport: chatSession.transport,
     );
+    messages.value = combined;
+    try {
+      await HiveService.to.saveChatSession(chatSession);
+      await HiveService.to.deleteChatSession(duplicate.id);
+      if (kDebugMode) {
+        debugPrint(
+          'Late identity merge: adopted "${duplicate.name}" '
+          '(${duplicate.id}) into ${chatSession.id} — '
+          '${combined.length} messages',
+        );
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('Late identity merge failed: $e');
+      }
+    }
     _scheduleSave();
+    // The merged history may be exactly what the peer is missing: run the
+    // sync again now that the session holds the real conversation.
+    _syncSentForSession = false;
+    unawaited(_sendHistorySync());
   }
 
   /// Finds an existing session for the current peer when the computed key
@@ -224,6 +296,13 @@ abstract class ChatScreenControllerBase extends GetxController {
     try {
       final all = await HiveService.to.getAllChatSessions();
       final peerMac = transport.connectedDeviceKey;
+      final peerName = transport.connectedDeviceName;
+      if (kDebugMode) {
+        debugPrint(
+          'Peer merge search: mac=$peerMac name=$peerName over '
+          '${all.map((s) => '${s.name}[${s.id}]').toList()}',
+        );
+      }
       if (peerMac != null &&
           peerMac.isNotEmpty &&
           peerMac != 'unknown' &&
@@ -232,10 +311,13 @@ abstract class ChatScreenControllerBase extends GetxController {
           if (s.device['address'] == peerMac) return s;
         }
       }
-      final peerName = transport.connectedDeviceName;
       if (peerName != null && peerName.isNotEmpty && peerName != 'unknown') {
+        // Names reach us from different sources (discovery name, identity
+        // frame's model name, socket map) and may differ in case, spacing
+        // or punctuation — compare normalized.
+        final target = _normalizePeerName(peerName);
         for (final s in all) {
-          if (s.name == peerName) return s;
+          if (_normalizePeerName(s.name) == target) return s;
         }
       }
     } catch (_) {
@@ -243,6 +325,12 @@ abstract class ChatScreenControllerBase extends GetxController {
     }
     return null;
   }
+
+  /// Normalized device-name comparison for peer merging: lowercase and
+  /// strip everything that is not a letter or digit ("SM-G610F" ==
+  /// "sm g610f" == "SM_G610F").
+  String _normalizePeerName(String? value) =>
+      (value ?? '').toLowerCase().replaceAll(RegExp('[^a-z0-9]'), '');
 
   @override
   void onInit() async {
@@ -339,7 +427,11 @@ abstract class ChatScreenControllerBase extends GetxController {
         // BRAND-NEW session: persist it right away. Saves are otherwise
         // triggered only by dirty events (message, rename, sync) — a chat
         // opened and closed without any of those would never touch Hive and
-        // silently vanish on restart.
+        // silently vanish on restart. The identity frame may still be in
+        // flight (or the MAC rotated): flag the open so a late identity
+        // frame re-checks for a stored session of the same peer and merges
+        // it in instead of leaving two chats for one device.
+        _openedAsFreshSession = true;
         _scheduleSave();
       }
     }
@@ -395,6 +487,11 @@ abstract class ChatScreenControllerBase extends GetxController {
     unawaited(_flushPendingSave());
     // Discard queued sends: there is no socket after the chat closes.
     _sendQueue.clear();
+    // No peer answers deferred-download requests once the chat closes.
+    for (final t in _fetchWatchdogs.values) {
+      t.cancel();
+    }
+    _fetchWatchdogs.clear();
     // Stop any active recording and release the player.
     _recordTimer?.cancel();
     _recorder?.dispose();
@@ -522,16 +619,19 @@ abstract class ChatScreenControllerBase extends GetxController {
     // No socket yet (chat opened from the session list): nothing to send;
     // the connection listener re-invokes this as soon as the link is up.
     if (!transport.isConnected.value) return;
-    // Marked before sending: the state must not allow another trigger while
-    // the handshake is in flight.
-    _syncSentForSession = true;
 
     final history = messages.toList()
       ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
     final recent = history.take(_syncHistoryCount).toList();
 
     final counts = await _localHashCounts(recent);
+    // Nothing to offer yet: leave the flag unset so a later trigger (a
+    // re-connect, or the late identity merge that brings the real history
+    // into this session) can still run the sync.
     if (counts.isEmpty) return;
+    // Marked before sending: the state must not allow another trigger while
+    // the handshake is in flight.
+    _syncSentForSession = true;
 
     // Sync traffic rides OUTSIDE the user send queue: live messages are
     // never blocked behind sync packets (the single socket still orders
@@ -547,21 +647,77 @@ abstract class ChatScreenControllerBase extends GetxController {
     );
   }
 
+  /// Media up to this size rides along with the history sync automatically;
+  /// larger payloads sync as a placeholder only (a size marker) and are
+  /// fetched from the peer when the user taps download.
+  static const int _syncInlineMediaBytes = 512 * 1024;
+
+  /// Payloads above this are never offered for download (they keep only
+  /// their caption): a single JSON frame should never carry absurdly large
+  /// files.
+  static const int _syncMaxFetchBytes = 16 * 1024 * 1024;
+
   /// Image payloads larger than this are not embedded in the history sync
   /// (they fall back to their text caption; a fresh transfer can always be
   /// requested manually). Frames are length-prefixed on both transports and
-  /// written in 8 KB chunks, so multi-MB payloads are fine.
+  /// written in 8 KB chunks, so multi-MB payloads are fine. Also the
+  /// hashing cutoff: bigger media hashes by its caption text.
   static const int _syncMaxImageBytes = 3 * 1024 * 1024;
 
   /// Incoming text frames at or above this size are treated as history sync
-  /// packets for the thin progress bar under the app bar (plain messages are
-  /// far smaller).
+  /// packets for the thin progress bar under the app bar (plain messages
+  /// are far smaller).
   static const int _syncProgressThreshold = 4 * 1024;
+
+  // ── Deferred media download (sync placeholders) ────────────────────────
+  // Large media syncs as a placeholder only (kind + size); the file is
+  // fetched from the peer on tap. One watchdog per requested id keeps a
+  // lost reply from leaving the bubble spinning forever.
+
+  final Map<String, Timer> _fetchWatchdogs = <String, Timer>{};
+
+  /// Asks the peer for the media file behind a placeholder bubble.
+  Future<void> downloadMedia(MessageModel message) async {
+    final id = message.id;
+    if (id == null || !message.hasRemoteMedia) return;
+    if (!transport.isConnected.value) {
+      Get.snackbar('downloadFailedTitle'.tr, 'downloadNeedConnection'.tr);
+      return;
+    }
+    _setMediaFetchBusy(id, true);
+    _fetchWatchdogs[id]?.cancel();
+    _fetchWatchdogs[id] = Timer(const Duration(seconds: 90), () {
+      _fetchWatchdogs.remove(id);
+      _setMediaFetchBusy(id, false);
+      Get.snackbar('downloadFailedTitle'.tr, 'downloadTimeoutMessage'.tr);
+    });
+    transport.sendMessage(
+      _syncPrefix + jsonEncode({'type': 'fetch', 'id': id}),
+    );
+  }
+
+  /// Flips the placeholder bubble's busy flag (spinner) for [id].
+  void _setMediaFetchBusy(String id, bool busy) {
+    final idx = messages.indexWhere((m) => m.id == id);
+    if (idx == -1) return;
+    final cur = messages[idx];
+    if (!cur.hasRemoteMedia || cur.isTransferring == busy) return;
+    messages[idx] = cur.copyWith(isTransferring: busy);
+    update();
+  }
+
+  /// Stops the watchdog of [id] (the file arrived or the peer said no).
+  void _settleFetch(String id) {
+    _fetchWatchdogs.remove(id)?.cancel();
+  }
 
   /// Dispatches an incoming sync packet by its `type`:
   /// - `manifest`  → compare against local messages, request what's missing
   /// - `request`   → send the requested messages (as `message` packets)
   /// - `message`   → integrate the peer's messages into local history
+  /// - `fetch`     → send one message's media file (deferred download)
+  /// - `download`  → the file we asked for (fills a placeholder bubble)
+  /// - `fetchMiss` → the peer no longer holds the requested file
   Future<void> _applyHistorySync(String payload) async {
     try {
       final decoded = jsonDecode(payload);
@@ -574,6 +730,12 @@ abstract class ChatScreenControllerBase extends GetxController {
           await _handleSyncManifest(decoded['items']);
         case 'request':
           await _handleSyncRequest(decoded['items']);
+        case 'fetch':
+          await _handleSyncFetch(decoded['id']);
+        case 'download':
+          await _applySyncMessages(decoded['messages']);
+        case 'fetchMiss':
+          _handleFetchMiss(decoded['id']);
         default:
           break;
       }
@@ -633,9 +795,57 @@ abstract class ChatScreenControllerBase extends GetxController {
     }
   }
 
-  /// Builds the wire entry for one message (images embedded as base64 when
-  /// small enough, otherwise sent as their text caption).
-  Future<Map<String, dynamic>> _syncEntryFor(MessageModel m) async {
+  /// Peer asked for the file behind a placeholder (deferred download): send
+  /// that single message with its bytes embedded (up to the fetch cap), or a
+  /// miss so the requester's spinner can stop.
+  Future<void> _handleSyncFetch(dynamic idRaw) async {
+    final id = idRaw is String ? idRaw : null;
+    if (id == null) return;
+    for (final m in messages) {
+      if (m.id != id) continue;
+      final path = m.imagePath;
+      if (path != null) {
+        try {
+          final file = File(path);
+          if (await file.exists() && file.lengthSync() <= _syncMaxFetchBytes) {
+            transport.sendMessage(
+              _syncPrefix +
+                  jsonEncode({
+                    'type': 'download',
+                    'messages': [await _syncEntryFor(m, forceBytes: true)],
+                  }),
+            );
+            return;
+          }
+        } catch (_) {
+          // Unreadable file: fall through to the miss below.
+        }
+      }
+      break;
+    }
+    transport.sendMessage(
+      _syncPrefix + jsonEncode({'type': 'fetchMiss', 'id': id}),
+    );
+  }
+
+  /// The peer no longer holds the file behind a placeholder: clear the
+  /// spinner and say so.
+  void _handleFetchMiss(dynamic idRaw) {
+    final id = idRaw is String ? idRaw : null;
+    if (id == null) return;
+    _settleFetch(id);
+    _setMediaFetchBusy(id, false);
+    Get.snackbar('downloadFailedTitle'.tr, 'downloadUnavailableMessage'.tr);
+  }
+
+  /// Builds the wire entry for one message. Media is embedded as base64 only
+  /// when small enough to ride the sync automatically; larger payloads ship
+  /// as a size marker (the peer shows a download placeholder and fetches the
+  /// file explicitly — see [_handleSyncFetch] with `forceBytes`).
+  Future<Map<String, dynamic>> _syncEntryFor(
+    MessageModel m, {
+    bool forceBytes = false,
+  }) async {
     final entry = <String, dynamic>{
       if (m.id != null) 'id': m.id,
       'text': m.text,
@@ -643,17 +853,35 @@ abstract class ChatScreenControllerBase extends GetxController {
       'timestamp': m.timestamp.toIso8601String(),
     };
     final imagePath = m.imagePath;
-    if (imagePath != null) {
-      try {
-        final file = File(imagePath);
-        if (await file.exists() && file.lengthSync() <= _syncMaxImageBytes) {
-          final isAudio = m.transferKind == 'audio';
+    if (imagePath == null) {
+      // This side holds the message as a placeholder: pass the marker along
+      // so any further sync keeps knowing where the file lives.
+      final pendingSize = m.remoteMediaSize;
+      if (pendingSize != null && pendingSize > 0) {
+        entry['type'] = m.transferKind == 'audio' ? 'audio' : 'image';
+        entry['remoteSize'] = pendingSize;
+      }
+      return entry;
+    }
+    try {
+      final file = File(imagePath);
+      if (await file.exists()) {
+        final int size = file.lengthSync();
+        final bool isAudio = m.transferKind == 'audio';
+        final int embedLimit =
+            forceBytes ? _syncMaxFetchBytes : _syncInlineMediaBytes;
+        if (size <= embedLimit) {
           entry['type'] = isAudio ? 'audio' : 'image';
           entry['bytes'] = base64Encode(await file.readAsBytes());
+        } else if (size <= _syncMaxFetchBytes) {
+          // Too large to auto-transfer: advertise it for download-on-tap.
+          entry['type'] = isAudio ? 'audio' : 'image';
+          entry['remoteSize'] = size;
         }
-      } catch (_) {
-        // Unreadable media: keep its text caption instead.
+        // Beyond the fetch cap: only the text caption travels.
       }
+    } catch (_) {
+      // Unreadable media: keep its text caption instead.
     }
     return entry;
   }
@@ -724,6 +952,40 @@ abstract class ChatScreenControllerBase extends GetxController {
         final int? incomingHash =
             mediaBytes == null ? null : _quickHash(mediaBytes);
 
+        // Deferred-download completion: an entry that carries the media of
+        // a message we already hold as a placeholder (same id, no file yet)
+        // is not a duplicate — it is the file we asked for. Fill the bubble
+        // (clears the spinner and the pending marker in one step).
+        final entryId = entry['id'] as String?;
+        if (mediaBytes != null && entryId != null) {
+          final int idx = messages.indexWhere((m) => m.id == entryId);
+          if (idx != -1 && messages[idx].hasRemoteMedia) {
+            String? downloaded;
+            try {
+              downloaded = await _persistIncomingBytes(
+                mediaBytes,
+                isAudioEntry ? 'm4a' : 'jpg',
+              );
+            } catch (_) {
+              downloaded = null;
+            }
+            if (downloaded != null) {
+              final cur = messages[idx];
+              messages[idx] = MessageModel(
+                id: cur.id,
+                text: cur.text,
+                isSentByMe: cur.isSentByMe,
+                timestamp: cur.timestamp,
+                imagePath: downloaded,
+                transferKind: isAudioEntry ? 'audio' : cur.transferKind,
+              );
+              _settleFetch(entryId);
+              changed = true;
+              continue;
+            }
+          }
+        }
+
         bool alreadyHave = messages.any(
           (m) =>
               m.text == text &&
@@ -752,15 +1014,22 @@ abstract class ChatScreenControllerBase extends GetxController {
           }
         }
 
+        // Large media arrives as a size marker WITHOUT bytes: create the
+        // placeholder bubble (download on tap) instead of a local file.
+        final int? remoteSize = entry['remoteSize'] as int?;
         messages.add(
           MessageModel(
             // Keep the peer's id so future syncs can deduplicate on it.
-            id: entry['id'] as String?,
+            id: entryId,
             text: text,
             isSentByMe: sentByMe,
             timestamp: ts,
             imagePath: mediaPath,
             transferKind: isAudioEntry ? 'audio' : null,
+            remoteMediaSize:
+                mediaPath == null && remoteSize != null && remoteSize > 0
+                    ? remoteSize
+                    : null,
           ),
         );
         changed = true;

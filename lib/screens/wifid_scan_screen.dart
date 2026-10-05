@@ -47,64 +47,39 @@ class WifiDirectScanScreen extends StatelessWidget {
                     ),
                   )
                 else ...[
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: controller.isServerModeActive.value
-                                  ? Colors.green
-                                  : null,
-                              foregroundColor: controller.isServerModeActive.value
-                                  ? Colors.white
-                                  : null,
-                            ),
-                            onPressed: controller.isServerModeActive.value
-                                ? controller.stopServer
-                                : () async {
-                                    controller.startServer();
-                                  },
-                            child: Text(
-                              controller.isServerModeActive.value
-                                  ? 'stopServer'.tr
-                                  : 'startServer'.tr,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: controller.isScanning.value
-                                  ? Colors.green
-                                  : null,
-                              foregroundColor: controller.isScanning.value
-                                  ? Colors.white
-                                  : null,
-                            ),
-                            onPressed: controller.isScanning.value
-                                ? controller.stopDiscovery
-                                : () async {
-                                    controller.startDiscovery();
-                                  },
-                            child: Text(
-                              controller.isScanning.value
-                                  ? 'stopDiscovery'.tr
-                                  : 'startDiscovery'.tr,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                // Server mode (explicit P2P group owner) is hidden from
+                // the UI for now: connecting works through the scan list
+                // or the chat screen's Connect button; the controller/
+                // service/native code is kept intact. Restore the
+                // commented button below to bring it back:
+                // Expanded(
+                //   child: FittedBox(
+                //     fit: BoxFit.scaleDown,
+                //     child: ElevatedButton(
+                //       style: ElevatedButton.styleFrom(
+                //         backgroundColor:
+                //             controller.isServerModeActive.value
+                //                 ? Colors.green
+                //                 : null,
+                //         foregroundColor:
+                //             controller.isServerModeActive.value
+                //                 ? Colors.white
+                //                 : null,
+                //       ),
+                //       onPressed:
+                //           controller.isServerModeActive.value
+                //               ? controller.stopServer
+                //               : () async {
+                //                   controller.startServer();
+                //                 },
+                //       child: Text(
+                //         controller.isServerModeActive.value
+                //             ? 'stopServer'.tr
+                //             : 'startServer'.tr,
+                //       ),
+                //     ),
+                //   ),
+                // ),
                 Expanded(
                   child: DefaultTabController(
                     length: 2,
@@ -171,6 +146,43 @@ class WifiDirectScanScreen extends StatelessWidget {
                           ),
                         ),
                       ],
+                    ),
+                  ),
+                ),
+                // Primary action: the discovery toggle lives at the bottom
+                // as a full-width button (the top row only held it next to
+                // the now-hidden server button).
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 52,
+                    child: FilledButton.icon(
+                      style: controller.isScanning.value
+                          ? FilledButton.styleFrom(
+                              backgroundColor: Colors.green,
+                              foregroundColor: Colors.white,
+                            )
+                          : null,
+                      onPressed: controller.isScanning.value
+                          ? controller.stopDiscovery
+                          : () async {
+                              controller.startDiscovery();
+                            },
+                      icon: Icon(
+                        controller.isScanning.value
+                            ? Icons.stop
+                            : Icons.wifi_find,
+                      ),
+                      label: Text(
+                        controller.isScanning.value
+                            ? 'stopDiscovery'.tr
+                            : 'startDiscovery'.tr,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
                   ),
                 ),

@@ -510,7 +510,11 @@ class ChatMessageBubble extends StatelessWidget {
     );
 
     final Widget content;
-    if (message.isAudio && message.imagePath != null) {
+    if (message.hasRemoteMedia) {
+      // Deferred media from the history sync: the file still lives on the
+      // peer — offer a download placeholder instead of the media.
+      content = _downloadBubble(p, mine);
+    } else if (message.isAudio && message.imagePath != null) {
       content = _audioBubble(p, mine);
     } else if (message.imagePath != null) {
       content = _imageBubble(p, mine, showProgress);
@@ -614,6 +618,94 @@ class ChatMessageBubble extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// Placeholder bubble for media that was NOT auto-downloaded during the
+  /// history sync (large files live on the peer): shows the kind and size,
+  /// fetches the file on tap and spins while the fetch is in flight.
+  Widget _downloadBubble(ChatPalette p, bool mine) {
+    final bool audio = message.isAudio;
+    final bool busy = message.isTransferring;
+    final int size = message.remoteMediaSize ?? 0;
+    final Color iconColor = mine ? Colors.white : p.accent;
+    return GestureDetector(
+      onTap: busy ? null : () => controller?.downloadMedia(message),
+      child: Column(
+        crossAxisAlignment:
+            mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                audio ? Icons.mic_none : Icons.image_outlined,
+                size: 20,
+                color: iconColor,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                audio ? 'audioLabel'.tr : 'photoLabel'.tr,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: mine ? Colors.white : p.messageText,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (busy)
+                SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(iconColor),
+                  ),
+                )
+              else
+                Icon(Icons.download_rounded, size: 16, color: iconColor),
+              const SizedBox(width: 6),
+              Text(
+                busy
+                    ? 'downloadingLabel'.tr
+                    : '${_formatMediaSize(size)} • ${'downloadMediaHint'.tr}',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color:
+                      mine ? Colors.white.withValues(alpha: 0.85) : p.muted,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            formatChatTimestamp(message.timestamp),
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Compact human size for the download placeholder ("2.4 MB").
+  String _formatMediaSize(int bytes) {
+    if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    if (bytes >= 1024) {
+      return '${(bytes / 1024).round()} KB';
+    }
+    return '$bytes B';
   }
 
   /// Image thumbnail bubble with progress bar while transferring.

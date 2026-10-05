@@ -23,7 +23,7 @@ types:
         index: 6
   MessageModel:
     typeId: 1
-    nextIndex: 10
+    nextIndex: 11
     fields:
       text:
         index: 0
@@ -43,3 +43,5 @@ types:
         index: 8
       id:
         index: 9
+      remoteMediaSize:
+        index: 10
