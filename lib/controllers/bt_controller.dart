@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:chatblue/config.dart';
 import 'package:chatblue/controllers/chat_transport.dart';
+import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
 import 'package:chatblue/screens/chat_ui/connection_request.dart';
 import 'package:flutter/foundation.dart';
@@ -36,6 +37,12 @@ class BtController extends GetxController implements ChatTransport {
   final Rxn<TransferState> incomingTransfer = Rxn<TransferState>();
   @override
   final Rxn<String> lastDisconnectReason = Rxn<String>();
+
+  /// Detailed native reason of the most recent failed connect attempt; the
+  /// chat failure snackbar prefers it over the generic message.
+  @override
+  final Rxn<String> lastConnectError = Rxn<String>();
+
   Timer? _serverAutoStopTimer;
 
   /// Frame the ACCEPTING side sends once the user approved the connection;
@@ -121,6 +128,10 @@ class BtController extends GetxController implements ChatTransport {
     };
 
     _service.onSocketDisconnected = (reason) {
+      // Only a link that WAS up counts as a lost connection: teardown
+      // churn during a connect attempt must not surface as "connection
+      // lost" on the side that never got connected.
+      final bool wasConnected = isConnected.value;
       isConnected.value = false;
       ConnectionRequestBanner.dismiss();
       _connectInitiatedAt = null;
@@ -138,7 +149,9 @@ class BtController extends GetxController implements ChatTransport {
       }
       // Refresh paired devices list from native on disconnect as well
       refreshPairedDevices();
-      lastDisconnectReason.value = reason;
+      if (wasConnected) {
+        lastDisconnectReason.value = reason;
+      }
     };
 
     _service.onSocketError = (message) {
@@ -164,6 +177,23 @@ class BtController extends GetxController implements ChatTransport {
   /// device address (unchanged behavior).
   @override
   String? get connectedDeviceId => null;
+
+  /// Chat sessions created over this transport are tagged 'bt' so the home
+  /// list labels (and reopens) them on the Bluetooth chat screen.
+  @override
+  String get transportType => ChatSessionModel.transportBluetooth;
+
+  /// Bluetooth reconnects straight to the stored MAC — the address is the
+  /// pair's identity, so a missing one is a hard stop (unlike Wi‑Fi
+  /// Direct, which can re-find the device by discovery).
+  @override
+  Future<bool> connectToSessionPeer({required String? address, String? name}) {
+    if (address == null || address.isEmpty) {
+      lastConnectError.value = 'noDeviceAddressMessage'.tr;
+      return Future<bool>.value(false);
+    }
+    return connectToPeer(address);
+  }
 
   @override
   String? get connectedDeviceName => connectedDevice?.name;

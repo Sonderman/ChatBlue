@@ -59,6 +59,14 @@ class WdPlatformChannel {
     return list.cast<Map>();
   }
 
+  /// Asks the framework for the current peer list (the same refresh the
+  /// PEERS_CHANGED broadcast triggers); some OEM stacks suppress that
+  /// broadcast, so scanning callers can poll with this instead.
+  Future<bool> requestPeers() async {
+    final bool ok = await _method.invokeMethod('requestPeers');
+    return ok;
+  }
+
   Future<bool> clearDiscoveredPeers() async {
     final bool ok = await _method.invokeMethod('clearDiscoveredPeers');
     return ok;

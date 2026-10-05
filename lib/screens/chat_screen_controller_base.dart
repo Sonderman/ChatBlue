@@ -118,21 +118,30 @@ abstract class ChatScreenControllerBase extends GetxController {
   Future<void> connectToCurrentSession() async {
     if (transport.isConnected.value || isConnecting.value) return;
     final address = chatSession.device['address'] as String?;
-    if (address == null || address.isEmpty) {
-      Get.snackbar('cannotConnectTitle'.tr, 'noDeviceAddressMessage'.tr);
-      return;
-    }
     isConnecting.value = true;
-    final bool ok = await transport.connectToPeer(address);
+    // The transport decides how to reach the stored peer: Bluetooth dials
+    // the stored address; Wi‑Fi Direct discovers the device first (P2P
+    // addresses rotate) and connects on a match — hence the name, used as
+    // the fallback match when the stored address went stale.
+    transport.lastConnectError.value = null;
+    final bool ok = await transport.connectToSessionPeer(
+      address: address,
+      name: chatSession.name,
+    );
     isConnecting.value = false;
-    // A timeout while the peer is still deciding is not a failure: the link
-    // is alive and the READY frame will flip the chat to connected.
-    if (!ok && !transport.isConnected.value && !transport.isAwaitingAcceptance) {
+    // Not connected yet, but the link is alive (socket up and/or the peer
+    // is still deciding): that is not a failure — tell the user we are
+    // waiting for the peer's acceptance instead. Only a genuinely dead
+    // attempt (no socket, nothing pending) reports failure. Previously the
+    // waiting message required `ok == false`, so a fast socket-up produced
+    // no feedback at all on the initiating side.
+    final bool connected = transport.isConnected.value;
+    if (!connected && !ok && !transport.isAwaitingAcceptance) {
       Get.snackbar(
         'couldNotConnectTitle'.tr,
-        'couldNotConnectMessage'.tr,
+        transport.lastConnectError.value ?? 'couldNotConnectMessage'.tr,
       );
-    } else if (!ok && !transport.isConnected.value) {
+    } else if (!connected) {
       Get.snackbar(
         'waitingAcceptanceTitle'.tr,
         'waitingAcceptanceMessage'.tr,
@@ -201,6 +210,7 @@ abstract class ChatScreenControllerBase extends GetxController {
       updatedAt: chatSession.updatedAt,
       messages: chatSession.messages,
       device: chatSession.device,
+      transport: chatSession.transport,
     );
     _scheduleSave();
   }
@@ -281,6 +291,9 @@ abstract class ChatScreenControllerBase extends GetxController {
               'name': transport.connectedDeviceName,
               'address': macUsable ? mac : null,
             },
+            // Tag the new session with the channel it was created on the
+            // home list shows (and reopens) chats by this value.
+            transport: transport.transportType,
           );
       messages.value = chatSession.messages;
       var session = await HiveService.to.loadChatSession(key);
@@ -310,6 +323,7 @@ abstract class ChatScreenControllerBase extends GetxController {
           updatedAt: session.updatedAt,
           messages: session.messages,
           device: session.device,
+          transport: session.transport,
         );
         messages.value = chatSession.messages;
         try {
@@ -328,6 +342,15 @@ abstract class ChatScreenControllerBase extends GetxController {
         // silently vanish on restart.
         _scheduleSave();
       }
+    }
+
+    // Sessions persisted before the transport field existed carry no tag:
+    // stamp the transport in use now — the home list both labels and
+    // reopens chats by this value, so it always matches the screen the
+    // chat was reached on.
+    if (chatSession.transport == null) {
+      chatSession.transport = transport.transportType;
+      _scheduleSave();
     }
 
     setupCallbacks();

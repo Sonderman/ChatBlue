@@ -38,6 +38,28 @@ abstract interface class ChatTransport {
   /// Human-readable name of the connected peer.
   String? get connectedDeviceName;
 
+  /// Identifier of this transport ('bt' for Bluetooth, 'wfd' for Wi‑Fi
+  /// Direct — see ChatSessionModel.transportBluetooth/transportWifiDirect)
+  /// recorded on chat sessions so the home list can label each chat with
+  /// its channel and reopen it through the same transport.
+  String get transportType;
+
+  /// Detailed native reason of the most recent failed connect attempt
+  /// (e.g. "Location is turned off", "connect failed: BUSY (2)"); the UI
+  /// shows it instead of the generic failure message when set.
+  Rxn<String> get lastConnectError;
+
+  /// Reconnects to the peer of an opened chat session from its stored
+  /// identity. Bluetooth dials the stored address directly; Wi‑Fi Direct
+  /// runs discovery first (P2P addresses rotate) and connects on a match,
+  /// using [name] as the fallback when the address went stale. Same result
+  /// contract as [connectToPeer]; a failure reason lands in
+  /// [lastConnectError].
+  Future<bool> connectToSessionPeer({
+    required String? address,
+    String? name,
+  });
+
   /// True while this device initiated a connect and the peer's acceptance
   /// (READY frame) is still pending — the link is alive but not yet
   /// "connected". Callers use this to avoid reporting a false failure when

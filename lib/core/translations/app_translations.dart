@@ -65,6 +65,16 @@ class AppTranslations extends Translations {
     'stopDiscovery': 'Stop Discovery',
     'wifiOffTitle': 'Wi‑Fi is off. Turn it on to discover nearby devices.',
     'enableWifi': 'Turn on Wi‑Fi',
+    'wfdNoDevicesFound':
+        'No Wi‑Fi Direct devices found nearby — check that Wi‑Fi is on '
+        'and the other device is in range.',
+    'wfdTargetNotFound':
+        'Target device not found (@count nearby device(s) seen) — check '
+        'that the other device has the app open.',
+    'wfdPickDeviceTitle': 'Select the other device',
+    'wfdPickDeviceHint':
+        'The target could not be identified automatically — pick the '
+        'other device from the discovered list.',
 
     // Chat UI
     'connectedStatus': 'Connected',
@@ -172,6 +182,17 @@ class AppTranslations extends Translations {
     'stopDiscovery': 'Keşfi Durdur',
     'wifiOffTitle': 'Wi‑Fi kapalı. Yakındaki cihazları bulmak için Wi‑Fi\'yi açın.',
     'enableWifi': 'Wi‑Fi\'yi Aç',
+
+    'wfdNoDevicesFound':
+        'Yakında Wi‑Fi Direct cihazı bulunamadı — Wi‑Fi açık ve diğer '
+        'cihaz yakında mı?',
+    'wfdTargetNotFound':
+        'Hedef cihaz bulunamadı (yakında @count cihaz görüldü) — diğer '
+        'cihazda uygulama açık mı?',
+    'wfdPickDeviceTitle': 'Diğer cihazı seç',
+    'wfdPickDeviceHint':
+        'Hedef cihaz otomatik tanınamadı — keşfedilen listeden diğer '
+        'cihazı seç.',
 
     // Chat UI
     'connectedStatus': 'Bağlı',

@@ -98,6 +98,28 @@ class WifiDirectService {
   }
 
   List<WdPeerInfo> get discoveredPeers => _peersByAddress.values.toList();
+
+  /// Asks the framework for the current peer list (the same refresh the
+  /// PEERS_CHANGED broadcast triggers). MIUI/HyperOS can swallow that
+  /// broadcast, so scanning flows poll this instead of relying on events.
+  Future<void> requestPeers() async {
+    try {
+      await _platform.requestPeers();
+    } catch (_) {
+      // Best-effort poll; the caller retries on its next tick.
+    }
+  }
+
+  /// Snapshot of the peers the framework knows right now (native cache) —
+  /// the fallback source when PEERS_CHANGED events don't arrive.
+  Future<List<WdPeerInfo>> getDiscoveredPeers() async {
+    try {
+      final list = await _platform.getDiscoveredPeers();
+      return list.map((e) => WdPeerInfo.fromMap(e)).toList();
+    } catch (_) {
+      return const <WdPeerInfo>[];
+    }
+  }
   // endregion
 
   // region Group/Connection

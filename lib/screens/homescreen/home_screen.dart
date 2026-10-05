@@ -1,8 +1,10 @@
 import 'package:chatblue/config.dart';
+import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/screens/bluetooth_scan_screen.dart';
 import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
 import 'package:chatblue/screens/homescreen/home_controller.dart';
 import 'package:chatblue/screens/settings/settings_screen.dart';
+import 'package:chatblue/screens/w_chatscreen/w_chat_screen.dart';
 import 'package:chatblue/screens/wifid_scan_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
@@ -115,6 +117,9 @@ class _ChatsTab extends StatelessWidget {
             ..write(s.device['address'] ?? '')
             ..write('  •  ')
             ..write(_formatDateTime(s.updatedAt));
+          // Which channel this chat runs over — also drives the tap below.
+          final bool isWifi =
+              s.transportKind == ChatSessionModel.transportWifiDirect;
 
           return ListTile(
             leading: CircleAvatar(
@@ -126,11 +131,32 @@ class _ChatsTab extends StatelessWidget {
             ),
             title: Text(s.name),
             subtitle: Text(subtitle.toString()),
+            // Transport badge: a Bluetooth or Wi‑Fi Direct icon at the
+            // right edge, so the channel of every chat is visible at a
+            // glance.
+            trailing: Tooltip(
+              message: (isWifi ? 'wifiTab' : 'bluetoothTab').tr,
+              child: Icon(
+                isWifi ? Icons.wifi_tethering : Icons.bluetooth,
+                size: 20,
+                color: scheme.primary,
+              ),
+            ),
             onTap: () {
-              Get.to(
-                () => BChatScreen(),
-                arguments: s,
-              )?.then((_) => controller.refreshSessions());
+              // Reopen through the chat's own transport: Wi‑Fi Direct
+              // sessions in the WFD screen, everything else (Bluetooth and
+              // legacy untagged sessions) in the Bluetooth screen.
+              if (isWifi) {
+                Get.to(
+                  () => const WChatScreen(),
+                  arguments: s,
+                )?.then((_) => controller.refreshSessions());
+              } else {
+                Get.to(
+                  () => BChatScreen(),
+                  arguments: s,
+                )?.then((_) => controller.refreshSessions());
+              }
             },
             onLongPress: () {
               showDialog(

@@ -5,7 +5,7 @@ nextTypeId: 2
 types:
   ChatSessionModel:
     typeId: 0
-    nextIndex: 6
+    nextIndex: 7
     fields:
       id:
         index: 0
@@ -19,6 +19,8 @@ types:
         index: 4
       device:
         index: 5
+      transport:
+        index: 6
   MessageModel:
     typeId: 1
     nextIndex: 10

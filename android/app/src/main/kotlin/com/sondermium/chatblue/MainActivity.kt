@@ -420,6 +420,7 @@ class MainActivity : FlutterActivity() {
                 "startDiscovery" -> { wifiDirectManager.startDiscovery(); result.success(true) }
                 "stopDiscovery" -> { wifiDirectManager.stopDiscovery(); result.success(true) }
                 "getDiscoveredPeers" -> { result.success(wifiDirectManager.getDiscoveredPeers()) }
+                "requestPeers" -> { wifiDirectManager.requestPeers(); result.success(true) }
                 "clearDiscoveredPeers" -> { wifiDirectManager.clearDiscoveredPeers(); result.success(true) }
                 "createGroup" -> { wifiDirectManager.createGroup(); result.success(true) }
                 "removeGroup" -> { wifiDirectManager.removeGroup(); result.success(true) }

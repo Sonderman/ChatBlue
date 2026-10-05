@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:chatblue/config.dart';
 import 'package:chatblue/controllers/chat_transport.dart';
+import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/core/services/device_id_service.dart';
 import 'package:chatblue/core/services/wd_service.dart';
@@ -36,6 +37,7 @@ class WifiController extends GetxController implements ChatTransport {
   /// Detailed native error of the most recent failed connect attempt
   /// (e.g. "Wi‑Fi Direct is disabled", "connect failed: BUSY (2)") — the
   /// generic "Could not connect!" snackbar alone hides the actual reason.
+  @override
   final Rxn<String> lastConnectError = Rxn<String>();
   @override
   final Rxn<TransferState> outgoingTransfer = Rxn<TransferState>();
@@ -109,6 +111,11 @@ class WifiController extends GetxController implements ChatTransport {
 
   @override
   String? get connectedDeviceName => connectedDevice?.deviceName;
+
+  /// Chat sessions created over this transport are tagged 'wfd' so the home
+  /// list labels (and reopens) them on the Wi‑Fi Direct chat screen.
+  @override
+  String get transportType => ChatSessionModel.transportWifiDirect;
 
   @override
   bool get isAwaitingAcceptance => _pendingAccept;
@@ -185,6 +192,260 @@ class WifiController extends GetxController implements ChatTransport {
   Future<bool> connectToDevice(WdPeerInfo device) {
     _pendingPeerName = device.deviceName;
     return connectToPeer(device.deviceAddress);
+  }
+
+  /// True while the session-reconnect discovery runs: scan errors are
+  /// logged instead of surfaced as snackbars (re-arm attempts can fail
+  /// transiently while the stack throttles discovery).
+  bool _suppressScanErrors = false;
+
+  /// Reconnects to the peer of an opened chat session. P2P device addresses
+  /// rotate between sessions, so the stored one alone is unreliable: this
+  /// runs peer discovery and connects the moment a peer matching the stored
+  /// address — or, when the address rotated, the peer's device name — shows
+  /// up. Wi‑Fi radio off: the system enable flow is offered first.
+  @override
+  Future<bool> connectToSessionPeer({
+    required String? address,
+    String? name,
+  }) async {
+    lastConnectError.value = null;
+
+    // Wi‑Fi radio: nothing can be discovered while it is off — offer the
+    // system enable panel and wait for the user.
+    await _refreshWifiState();
+    if (!isWifiOn.value) {
+      await enableWifi();
+      if (!isWifiOn.value) {
+        lastConnectError.value = 'wifiOffTitle'.tr;
+        return false;
+      }
+    }
+
+    final search = await _discoverSessionPeer(address: address, name: name);
+    // The peer may have connected to us while we were searching (incoming
+    // request accepted) — that is success, not a reason to reconnect.
+    if (isConnected.value) return true;
+    final match = search.match;
+    if (match != null) {
+      // The normal connect path: stops discovery, runs the negotiation and
+      // the two-stage handshake, and flips the chat to connected on READY.
+      return connectToPeer(match.deviceAddress);
+    }
+    if (search.candidates.isNotEmpty) {
+      // The stored identity did not match anything the framework reported
+      // (P2P MACs rotate and the P2P device name can even be empty on some
+      // stacks): the user picks the right device from the discovered list.
+      final picked = await _promptPeerSelection(search.candidates);
+      if (picked == null) {
+        lastConnectError.value ??= 'wfdTargetNotFound'
+            .trParams({'count': '${search.candidates.length}'});
+        return false;
+      }
+      return connectToPeer(picked.deviceAddress);
+    }
+    return false; // nothing discovered at all: reason already captured
+  }
+
+  /// Runs discovery until the session's peer shows up, returning it as
+  /// [match]. When devices are visible but none matches the stored
+  /// identity, the search settles after a short grace window and returns
+  /// them as [candidates] for a manual pick. MIUI/HyperOS often skip
+  /// PEERS_CHANGED broadcasts entirely, so the native peer list is polled
+  /// directly and discovery is re-armed periodically while waiting; gives
+  /// up after 20 s.
+  Future<({WdPeerInfo? match, List<WdPeerInfo> candidates})>
+      _discoverSessionPeer({
+    required String? address,
+    String? name,
+  }) async {
+    const Duration timeout = Duration(seconds: 20);
+    const Duration pollInterval = Duration(milliseconds: 900);
+    const Duration rearmInterval = Duration(seconds: 7);
+
+    // Devices visible but not matching get this long to score an exact or
+    // name match before the manual picker is offered.
+    const Duration matchGrace = Duration(seconds: 5);
+
+    peers.clear();
+    _suppressScanErrors = true;
+    final flowStart = DateTime.now();
+    DateTime? firstPeerAt;
+    ({WdPeerInfo? match, List<WdPeerInfo> candidates}) settle() =>
+        (match: null, candidates: peers.toList());
+    try {
+      await _service.startDiscovery();
+      isScanning.value = true;
+
+      final deadline = flowStart.add(timeout);
+      var nextRearm = flowStart.add(rearmInterval);
+      while (DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(pollInterval);
+
+        if (isConnected.value) return settle(); // connected meanwhile
+
+        var match = _matchSessionPeer(peers, address: address, name: name);
+        if (match != null) return (match: match, candidates: peers.toList());
+
+        // Direct poll: works even when the PEERS_CHANGED broadcast never
+        // arrives (and re-populates the native cache).
+        await _service.requestPeers();
+        for (final peer in await _service.getDiscoveredPeers()) {
+          if (!peers.any((p) => p.deviceAddress == peer.deviceAddress)) {
+            peers.add(peer);
+          }
+        }
+        if (peers.isNotEmpty) {
+          firstPeerAt ??= DateTime.now();
+        }
+        match = _matchSessionPeer(peers, address: address, name: name);
+        if (match != null) return (match: match, candidates: peers.toList());
+
+        // Devices are visible, but none is the target: after the grace
+        // window stop searching and let the caller offer the picker.
+        if (firstPeerAt != null &&
+            DateTime.now().difference(firstPeerAt) >= matchGrace) {
+          return settle();
+        }
+
+        // A hard discovery failure (permissions, P2P unavailable) with
+        // nothing found at all: stop waiting — the reason is captured.
+        // The 10 s grace lets a transient failure (P2P service restart)
+        // clear via the re-arm before giving up.
+        if (peers.isEmpty &&
+            lastConnectError.value != null &&
+            DateTime.now().difference(flowStart).inMilliseconds > 10000) {
+          return settle();
+        }
+
+        // Re-arm: a single discoverPeers call misses phones that become
+        // visible later (and the framework drops discovery on its own
+        // after a while).
+        if (DateTime.now().isAfter(nextRearm)) {
+          nextRearm = DateTime.now().add(rearmInterval);
+          await _service.startDiscovery();
+        }
+      }
+      if (kDebugMode && showDebugLogs) {
+        debugPrint(
+          'WFD session search: no target among '
+          '${peers.map((p) => p.deviceName ?? p.deviceAddress).toList()}',
+        );
+      }
+      if (peers.isEmpty) {
+        // Nothing was discovered at all: say so (a native scan error, when
+        // one occurred, wins).
+        lastConnectError.value ??= 'wfdNoDevicesFound'.tr;
+      }
+      return settle();
+    } catch (e) {
+      lastConnectError.value = e.toString();
+      return settle();
+    } finally {
+      _suppressScanErrors = false;
+      if (isScanning.value) {
+        isScanning.value = false;
+        unawaited(_service.stopDiscovery());
+      }
+    }
+  }
+
+  /// First peer matching the session identity, if any: an exact stored
+  /// address always wins over a device-name match (the name fallback
+  /// exists because P2P MACs rotate; two same-model phones are the
+  /// accepted edge case).
+  WdPeerInfo? _matchSessionPeer(
+    List<WdPeerInfo> candidates, {
+    required String? address,
+    String? name,
+  }) {
+    final String targetName = _normalizeDeviceName(name);
+    WdPeerInfo? byName;
+    for (final peer in candidates) {
+      if (address != null &&
+          address.isNotEmpty &&
+          peer.deviceAddress == address) {
+        return peer;
+      }
+      if (byName == null &&
+          targetName.isNotEmpty &&
+          _normalizeDeviceName(peer.deviceName) == targetName) {
+        byName = peer;
+      }
+    }
+    return byName;
+  }
+
+  /// Device names reach us from two different sources — the identity frame
+  /// (build model, e.g. "Redmi Note 10") and the P2P framework's device
+  /// name — which may differ in case, spacing or punctuation; normalized
+  /// comparison keeps the name fallback usable (a rotated P2P MAC leaves
+  /// the name as the only re-find signal).
+  String _normalizeDeviceName(String? value) =>
+      (value ?? '').toLowerCase().replaceAll(RegExp('[^a-z0-9]'), '');
+
+  /// Manual peer pick for when the stored identity could not be matched
+  /// against anything the framework discovered: lists the candidates (name
+  /// when the stack reported one, address otherwise) and resolves with the
+  /// chosen device — or null when dismissed. Picking the device uses the
+  /// FRESH address discovery reported, so a rotated P2P MAC no longer
+  /// blocks the reconnect.
+  Future<WdPeerInfo?> _promptPeerSelection(List<WdPeerInfo> candidates) {
+    return Get.bottomSheet<WdPeerInfo>(
+      SafeArea(
+        child: Material(
+          color: Get.theme.cardColor,
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.only(
+              topLeft: Radius.circular(12),
+              topRight: Radius.circular(12),
+            ),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                child: Text(
+                  'wfdPickDeviceTitle'.tr,
+                  style: Get.theme.textTheme.titleMedium,
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Text(
+                  'wfdPickDeviceHint'.tr,
+                  style: Get.theme.textTheme.bodySmall,
+                ),
+              ),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 320),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: candidates.length,
+                  itemBuilder: (context, index) {
+                    final peer = candidates[index];
+                    final name = (peer.deviceName ?? '').trim();
+                    return ListTile(
+                      leading: const Icon(Icons.wifi_tethering),
+                      title: Text(name.isEmpty ? 'unknownDevice'.tr : name),
+                      subtitle: Text(peer.deviceAddress),
+                      onTap: () => Get.back(result: peer),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      ),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: false,
+      ignoreSafeArea: false,
+    );
   }
 
   /// Connect to a peer by address and await the connection result.
@@ -592,6 +853,12 @@ class WifiController extends GetxController implements ChatTransport {
         debugPrint('Scan error: $message');
       }
       isScanning.value = false;
+      // Kept for the connect-flow failure snackbar (it prefers the actual
+      // reason over the generic message).
+      lastConnectError.value = message;
+      // Session-reconnect discovery logs them only: re-arm attempts can
+      // fail transiently while the stack throttles discovery.
+      if (_suppressScanErrors) return;
       Get.snackbar('scanErrorTitle'.tr, message);
     };
     _service.onSocketError = (message) {
@@ -643,6 +910,11 @@ class WifiController extends GetxController implements ChatTransport {
       unawaited(_sendOwnName());
     };
     _service.onSocketDisconnected = (reason) {
+      // Only a link that WAS up counts as a lost connection: during a
+      // connect attempt the framework emits disconnect events (group
+      // removal, negotiation/socket churn) that must not surface as
+      // "connection lost" on the side that is still connecting.
+      final bool wasConnected = isConnected.value;
       isConnected.value = false;
       ConnectionRequestBanner.dismiss();
       _connectInitiatedAt = null;
@@ -658,7 +930,9 @@ class WifiController extends GetxController implements ChatTransport {
       if (kDebugMode && showDebugLogs) {
         debugPrint('Socket disconnected: $reason');
       }
-      lastDisconnectReason.value = reason;
+      if (wasConnected) {
+        lastDisconnectReason.value = reason;
+      }
     };
   }
 }

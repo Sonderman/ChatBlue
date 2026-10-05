@@ -183,6 +183,25 @@ class WifiDirectManager(private val context: Context) {
         })
     }
 
+    /// Refreshes the peer list from the framework and pushes every device
+    /// to [onPeerFound]. Also exposed to Dart: some OEM stacks
+    /// (MIUI/HyperOS) never deliver PEERS_CHANGED, so scanning flows poll
+    /// this instead of relying on the broadcast.
+    @SuppressLint("MissingPermission")
+    fun requestPeers() {
+        val m = manager ?: return
+        val c = effectiveChannel() ?: return
+        if (!hasDiscoveryPermission()) return
+        tryRegisterReceiver()
+        m.requestPeers(c) { list: WifiP2pDeviceList ->
+            list.deviceList?.forEach { d: WifiP2pDevice ->
+                val mapped = deviceToMap(d)
+                peersByAddress[d.deviceAddress] = mapped
+                onPeerFound?.invoke(mapped)
+            }
+        }
+    }
+
     fun createGroup() {
         groupOwnerMode.set(true)
         val m = manager ?: return onSocketError?.invoke("Wi‑Fi P2P not supported") ?: Unit
@@ -425,17 +444,7 @@ class WifiDirectManager(private val context: Context) {
                         channel = manager?.initialize(context, context.mainLooper, null)
                     }
                 }
-                WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> {
-                    val m = manager ?: return
-                    val c = channel ?: return
-                    m.requestPeers(c) { list: WifiP2pDeviceList ->
-                        list.deviceList?.forEach { d: WifiP2pDevice ->
-                            val mapped = deviceToMap(d)
-                            peersByAddress[d.deviceAddress] = mapped
-                            onPeerFound?.invoke(mapped)
-                        }
-                    }
-                }
+                WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION -> requestPeers()
                 WifiP2pManager.WIFI_P2P_CONNECTION_CHANGED_ACTION -> {
                     val networkInfo: NetworkInfo? = intent.getParcelableExtra(WifiP2pManager.EXTRA_NETWORK_INFO)
                     if (networkInfo?.isConnected == true) {
