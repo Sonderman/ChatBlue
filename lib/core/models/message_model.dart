@@ -4,8 +4,11 @@
 import 'package:hive_ce/hive.dart';
 
 /// Field indexes are part of the persisted schema — keep them stable.
-/// The generator appends `id` at the end (index 9); older records simply
-/// lack it (read back as null and backfilled on chat open). Message-level
+/// The AdapterSpec generator assigns indexes from `hive_adapters.g.yaml`
+/// while that schema file exists; the annotations below mirror the
+/// persisted indexes anyway, so a from-scratch regeneration (schema file
+/// lost) keeps the same layout. `id` persisted at index 9 — older records
+/// lack it (read back as null and backfilled on chat open); message-level
 /// additions keep appending: `remoteMediaSize` is index 10.
 class MessageModel extends HiveObject {
   @HiveField(0)
@@ -17,7 +20,7 @@ class MessageModel extends HiveObject {
   @HiveField(2)
   final DateTime timestamp;
 
-  @HiveField(3)
+  @HiveField(9)
   final String? id;
 
   @HiveField(4)

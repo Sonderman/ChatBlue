@@ -484,7 +484,11 @@ abstract class ChatScreenControllerBase extends GetxController {
   @override
   void onClose() {
     _saveDebounce?.cancel();
-    unawaited(_flushPendingSave());
+    // Capture the flush future: the refresh below must wait for THIS write
+    // to land. Calling _flushPendingSave() again later would be a no-op
+    // (the debounce is already consumed), so the refresh could otherwise
+    // run before the Hive write completed.
+    final Future<void> flush = _flushPendingSave();
     // Discard queued sends: there is no socket after the chat closes.
     _sendQueue.clear();
     // No peer answers deferred-download requests once the chat closes.
@@ -504,9 +508,11 @@ abstract class ChatScreenControllerBase extends GetxController {
     _connectionSubscription?.cancel();
     transport.onChatClosed();
     // The session list may have new/renamed sessions after a chat: refresh
-    // it AFTER the pending save has actually landed (the flush is debounced
-    // 250 ms and may still be in flight when the screen closes).
-    unawaited(_flushPendingSave().whenComplete(() {
+    // it AFTER the pending save has actually landed — chained on the flush
+    // future captured above, so the refreshed list reflects the final
+    // state (the flush is debounced 250 ms and may still be in flight
+    // when the screen closes).
+    unawaited(flush.whenComplete(() {
       if (Get.isRegistered<HomeController>()) {
         Get.find<HomeController>().refreshSessions();
       }
@@ -1133,7 +1139,10 @@ abstract class ChatScreenControllerBase extends GetxController {
       messages[idx] = messages[idx].copyWith(
         text: audioText ??
             (bytesToAttach != null
-                ? '[Image] (${bytesToAttach.lengthInBytes} bytes)'
+                // Localized like the incoming path: the hardcoded English
+                // caption shipped "[Image] (…)" even on the TR UI.
+                ? 'imageCaption'.trParams(
+                    {'size': '${bytesToAttach.lengthInBytes}'})
                 : messages[idx].text),
         imagePath: sendingImagePath ?? messages[idx].imagePath,
         isTransferring: false,
