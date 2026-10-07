@@ -3,136 +3,134 @@
 // renders with the proper theme even when shown as a standalone tab.
 
 import 'package:chatblue/config.dart';
-import 'package:chatblue/core/services/locale_service.dart';
-import 'package:chatblue/core/services/theme_service.dart';
+import 'package:chatblue/l10n/app_localizations.dart';
+import 'package:chatblue/providers/app_providers.dart';
 import 'package:flutter/material.dart';
-import 'package:get/get.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-class SettingsScreen extends StatelessWidget {
+class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    final themeService = Get.find<ThemeService>();
-    final localeService = Get.find<LocaleService>();
+  Widget build(BuildContext context, WidgetRef ref) {
+    final l10n = AppLocalizations.of(context)!;
     final scheme = Theme.of(context).colorScheme;
+    final themeMode = ref.watch(themeModeProvider);
+    final locale = ref.watch(localeProvider);
 
     return Scaffold(
-      appBar: AppBar(title: Text('settingsTab'.tr)),
+      appBar: AppBar(title: Text(l10n.settingsTab)),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          _SectionLabel('appearanceSection'.tr),
-        const SizedBox(height: 8),
-        _settingsCard(
-          scheme: scheme,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(Icons.palette_outlined, color: scheme.primary),
-                  const SizedBox(width: 10),
-                  Text(
-                    'themeLabel'.tr,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Obx(
-                () => SegmentedButton<ThemeMode>(
+          _SectionLabel(l10n.appearanceSection),
+          const SizedBox(height: 8),
+          _settingsCard(
+            scheme: scheme,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.palette_outlined, color: scheme.primary),
+                    const SizedBox(width: 10),
+                    Text(
+                      l10n.themeLabel,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                SegmentedButton<ThemeMode>(
                   segments: [
                     ButtonSegment(
                       value: ThemeMode.system,
                       icon: const Icon(Icons.brightness_auto_outlined),
-                      label: Text('themeSystem'.tr),
+                      label: Text(l10n.themeSystem),
                     ),
                     ButtonSegment(
                       value: ThemeMode.light,
                       icon: const Icon(Icons.light_mode_outlined),
-                      label: Text('themeLight'.tr),
+                      label: Text(l10n.themeLight),
                     ),
                     ButtonSegment(
                       value: ThemeMode.dark,
                       icon: const Icon(Icons.dark_mode_outlined),
-                      label: Text('themeDark'.tr),
+                      label: Text(l10n.themeDark),
                     ),
                   ],
-                  selected: {themeService.mode.value},
+                  selected: {themeMode},
                   onSelectionChanged: (selection) =>
-                      themeService.setMode(selection.first),
+                      ref.read(themeModeProvider.notifier).setMode(selection.first),
                 ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'themeSystemHint'.tr,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
+                const SizedBox(height: 8),
+                Text(
+                  l10n.themeSystemHint,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
-        const SizedBox(height: 16),
-        _settingsCard(
-          scheme: scheme,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(Icons.language, color: scheme.primary),
-                  const SizedBox(width: 10),
-                  Text(
-                    'languageLabel'.tr,
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Obx(
-                () => SegmentedButton<Locale>(
+          const SizedBox(height: 16),
+          _settingsCard(
+            scheme: scheme,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.language, color: scheme.primary),
+                    const SizedBox(width: 10),
+                    Text(
+                      l10n.languageLabel,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                SegmentedButton<Locale>(
                   segments: [
                     ButtonSegment(
                       value: const Locale('en', 'US'),
-                      label: Text('languageEnglish'.tr),
+                      label: Text(l10n.languageEnglish),
                     ),
                     ButtonSegment(
                       value: const Locale('tr', 'TR'),
-                      label: Text('languageTurkish'.tr),
+                      label: Text(l10n.languageTurkish),
                     ),
                   ],
-                  selected: {localeService.locale.value},
+                  selected: {locale},
                   onSelectionChanged: (selection) =>
-                      localeService.setLocale(selection.first),
+                      ref.read(localeProvider.notifier).setLocale(selection.first),
                 ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'languageHint'.tr,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
+                const SizedBox(height: 8),
+                Text(
+                  l10n.languageHint,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
                 ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 24),
-        _SectionLabel('aboutSection'.tr),
-        const SizedBox(height: 8),
-        _settingsCard(
-          scheme: scheme,
-          child: ListTile(
-            leading: CircleAvatar(
-              backgroundColor: scheme.primaryContainer,
-              child: Icon(Icons.chat_bubble_outline, color: scheme.onPrimaryContainer),
+              ],
             ),
-            title: Text(appName),
-            subtitle: Text('versionLabel'.trParams({'version': appVersion})),
           ),
-        ),
-      ],
+          const SizedBox(height: 24),
+          _SectionLabel(l10n.aboutSection),
+          const SizedBox(height: 8),
+          _settingsCard(
+            scheme: scheme,
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: scheme.primaryContainer,
+                child:
+                    Icon(Icons.chat_bubble_outline, color: scheme.onPrimaryContainer),
+              ),
+              title: Text(appName),
+              subtitle: Text(l10n.versionLabel(appVersion)),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -167,10 +165,10 @@ class _SectionLabel extends StatelessWidget {
     return Text(
       text.toUpperCase(),
       style: Theme.of(context).textTheme.labelSmall?.copyWith(
-        color: Theme.of(context).colorScheme.primary,
-        fontWeight: FontWeight.w700,
-        letterSpacing: 1.1,
-      ),
+            color: Theme.of(context).colorScheme.primary,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.1,
+          ),
     );
   }
 }

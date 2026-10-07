@@ -8,7 +8,6 @@ import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/core/services/hive_service.dart';
-import 'package:chatblue/screens/homescreen/home_controller.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -473,10 +472,16 @@ abstract class ChatScreenControllerBase extends GetxController {
     // history. Chat screens opened through the scan flow already have a
     // socket, so the initial microtask send works; sessions opened without
     // a connection (home -> chat -> Connect button) get the sync as soon as
-    // the socket comes up.
+    // the socket comes up. A drop re-arms the sync: the next successful
+    // connection exchanges manifests again (messages sent while one side
+    // was offline would otherwise never converge).
     Future.microtask(_sendHistorySync);
     _connectionSubscription = transport.isConnected.listen((connected) {
-      if (connected) _sendHistorySync();
+      if (connected) {
+        _sendHistorySync();
+      } else {
+        _syncSentForSession = false;
+      }
     });
     super.onInit();
   }
@@ -513,9 +518,8 @@ abstract class ChatScreenControllerBase extends GetxController {
     // state (the flush is debounced 250 ms and may still be in flight
     // when the screen closes).
     unawaited(flush.whenComplete(() {
-      if (Get.isRegistered<HomeController>()) {
-        Get.find<HomeController>().refreshSessions();
-      }
+      // Home list refresh is handled by the box.watch() stream in
+      // home_providers.dart — no manual refresh needed after a chat closes.
     }));
     super.onClose();
   }
@@ -616,11 +620,11 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// [_syncHistoryCount] messages (what the peer may need) — as a single
   /// small packet. The peer compares it against its own set and only
   /// requests what it is actually missing; no message payload (and no image
-  /// bytes) is transferred unless needed. Called once per chat screen on
-  /// (re)connection.
+  /// bytes) is transferred unless needed. Called once per CONNECTION (a
+  /// drop re-arms it) — on (re)connect, and via the late-identity merge.
   Future<void> _sendHistorySync() async {
-    // One sync per chat screen: if a previous connection already synced this
-    // session, a re-connect adds nothing new unless the screen was reopened.
+    // One sync per connection: re-armed on every disconnect; a re-connect
+    // then re-syncs without a screen reopen.
     if (_syncSentForSession) return;
     // No socket yet (chat opened from the session list): nothing to send;
     // the connection listener re-invokes this as soon as the link is up.

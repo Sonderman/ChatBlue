@@ -11,7 +11,9 @@ import 'package:hive_ce/hive.dart';
 void main() {
   late Directory tempDir;
 
-  setUp(() async {
+  // Hive's TypeAdapter registry is per-isolate and Hive.close() does NOT
+  // clear it — registering in setUpAll runs exactly once.
+  setUpAll(() async {
     tempDir = await Directory.systemTemp.createTemp('chatblue_test');
     Hive.init(tempDir.path);
     Hive.registerAdapters();
@@ -19,6 +21,9 @@ void main() {
 
   tearDown(() async {
     await Hive.close();
+  });
+
+  tearDownAll(() async {
     await tempDir.delete(recursive: true);
   });
 

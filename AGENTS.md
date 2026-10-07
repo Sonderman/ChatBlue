@@ -1,6 +1,6 @@
 # AGENTS.md — ChatBlue
 
-ChatBlue: GetX tabanlı Flutter P2P mesajlaşma uygulaması. İki taşıma kanalı vardır: **Bluetooth Classic (RFCOMM)** ve **Wi‑Fi Direct (TCP socket)**. Her iki taşıma da Android'de native Kotlin (Platform Channels) ile uygulanmıştır.
+ChatBlue: Flutter P2P mesajlaşma uygulaması; state katmanı GetX'ten Riverpod'a taşınıyor (app state + transport notifier'ları Riverpod; chat ekranları geçiş boyunca GetX + `transport_adapter.dart` köprüsü ile çalışır). İki taşıma kanalı vardır: **Bluetooth Classic (RFCOMM)** ve **Wi‑Fi Direct (TCP socket)**. Her iki taşıma da Android'de native Kotlin (Platform Channels) ile uygulanmıştır.
 
 ---
 
@@ -21,7 +21,7 @@ ChatBlue: GetX tabanlı Flutter P2P mesajlaşma uygulaması. İki taşıma kanal
 ## Konvansiyonlar
 
 - Yanıt dili: **Türkçe** (kullanıcı İngilizce yazarsa o dile geçilir).
-- UI dili: **İngilizce varsayılan + Türkçe seçeneği** (Settings → Language; ilk açılışta cihaz dili Türkçe ise Türkçe başlar; çeviriler `lib/core/translations/app_translations.dart` üzerinden `.tr` ile tüketilir).
+- UI dili: **İngilizce varsayılan + Türkçe seçeneği** (Settings → Language; ilk açılışta cihaz dili Türkçe ise Türkçe başlar; çeviriler chat ekranlarında `.tr` (`lib/core/translations/app_translations.dart`), ported ekranlarda gen-l10n (`lib/l10n`, `AppLocalizations`) üzerinden tüketilir).
 - Göreve başlamadan önce `project_overview.md` oku; önemli değişikliklerden sonra onu güncelle (architecture / directory / recent-changes bölümleri).
 - Commit istendiğinde: tek commit, mesaj tüm değişiklikleri kapsar, commit öncesi `project_overview.md` güncellenir.
 - Kod: mevcut stile ve GetX katman düzenine (services → controllers → screens) uy; mevcut özellikleri bozmadan değişiklik yap.
@@ -36,28 +36,31 @@ ChatBlue: GetX tabanlı Flutter P2P mesajlaşma uygulaması. İki taşıma kanal
 
 ```
 lib/
-  main.dart               → Sizer + GetMaterialApp (light/dark/themeMode), HiveService + ThemeService başlatılır, HomeScreen açılır
+  main.dart               → ProviderContainer + UncontrolledProviderScope; Sizer + GetMaterialApp (locale/themeMode provider'lardan), HiveService init, HomeScreen açılır
   config.dart             → appName, appVersion, showDebugLogs
   core/
     models/               → ChatSessionModel, MessageModel (HiveObject)
     platform/             → BtPlatformChannel, WdPlatformChannel (Method/Event Channel tanımları)
-    services/             → HiveService, ThemeService, BtClassicService, WifiDirectService
+    services/             → HiveService, BtClassicService, WifiDirectService
     theme/                → AppTheme (light/dark ThemeData, cyan seed + navy canvas)
     hive/                 → hive_adapters.dart + generated (.g.dart)
   controllers/
-    bt_controller.dart    → Bluetooth Classic akışı (GetX); ChatTransport implementasyonu
-    wifi_controller.dart  → Wi‑Fi Direct akışı (GetX); ChatTransport implementasyonu
-    chat_transport.dart   → Bt/Wifi için ortak arayüz (connectToPeer, onChatOpened/Closed)
+    transport_adapter.dart → GetX↔Riverpod köprüsü (Bt/WdTransportAdapter; Rx ChatTransport yüzeyi)
+    chat_transport.dart   → chat tarafı için ortak arayüz (connectToPeer, onChatOpened/Closed)
+  providers/
+    app_providers.dart    → themeMode/locale notifier'ları, navigatorKey/scaffoldMessengerKey, rootProviderContainer
+    home_providers.dart   → homeSessionsProvider (Hive box.watch stream), deleteChatSessionProvider
+    transport_providers.dart → Bt/WdTransportNotifier (scan/socket/handshake — eski GetX controller'ların Riverpod portu)
   screens/
     chat_screen_controller_base.dart → B/W sohbet mantığının TEK implementasyonu (mesaj, transfer, senkronizasyon, gönderim kuyruğu)
     chat_ui/              → chat_ui.dart: ortak modern sohbet widget kiti (ChatAppBar, Balon, InputBar, SyncBanner, ConnectBar, Preview) — ChatPalette ile tema-duyarlı
-    homescreen/           → HomeScreen (bottom nav: Chats/Settings) + HomeController
+    homescreen/           → HomeScreen (bottom nav: Chats/Settings; Riverpod Consumer)
     settings/             → SettingsScreen (tema seçimi + hakkında)
     b_chatscreen/         → BChatScreen + BChatScreenController (BT sohbet)
     w_chatscreen/         → WChatScreen + WChatScreenController (WFD sohbet)
     bluetooth_scan_screen.dart
     wifid_scan_screen.dart
-test/                     → model/TransferState/Hive unit testleri (flutter test ile çalışır)
+test/                     → model/TransferState/Hive + Riverpod provider/i18n unit testleri (flutter test ile çalışır)
 
 android/app/src/main/kotlin/com/sondermium/chatblue/
   MainActivity.kt                  → kanal kurulumu, handler yönlendirme, runtime istekleri
@@ -69,6 +72,6 @@ android/app/src/main/kotlin/com/sondermium/chatblue/
 - BT: `com.sondermium.chatblue/bt` (method), `/scan` + `/socket` (event)
 - WFD: `com.sondermium.chatblue/wd` (method), `/wd_scan` + `/wd_socket` (event)
 
-**Veri akışı:** `Manager (Kotlin) → PlatformChannel → Service (callback/stream) → Controller (GetX reactive) → Screen`.
+**Veri akışı:** `Manager (Kotlin) → PlatformChannel → Service (callback/stream) → Transport notifier (Riverpod) → transport_adapter (GetX köprüsü) → Chat controller (GetX reactive) → Screen`.
 
 **Not:** B/W sohbet ekranları `ChatScreenControllerBase`'i paylaşır; taşıma farkları `ChatTransport` arayüzü ile soyutlanır. Unit testler `flutter test` ile koşulur (yalnızca kullanıcı isterse çalıştırılır).

@@ -1,13 +1,15 @@
 import 'package:chatblue/config.dart';
 import 'package:chatblue/core/models/chatsession_model.dart';
+import 'package:chatblue/l10n/app_localizations.dart';
+import 'package:chatblue/providers/app_providers.dart';
+import 'package:chatblue/providers/home_providers.dart';
 import 'package:chatblue/screens/bluetooth_scan_screen.dart';
 import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
-import 'package:chatblue/screens/homescreen/home_controller.dart';
 import 'package:chatblue/screens/settings/settings_screen.dart';
 import 'package:chatblue/screens/w_chatscreen/w_chat_screen.dart';
 import 'package:chatblue/screens/wifid_scan_screen.dart';
 import 'package:flutter/material.dart';
-import 'package:get/get.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Hosts the chat session list (tab 0) and the two scan entry points
 /// (Bluetooth / Wi‑Fi Direct, tabs 1-2) behind a bottom navigation bar;
@@ -25,165 +27,168 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return GetBuilder<HomeController>(
-      init: HomeController(),
-      builder: (controller) {
-        return Scaffold(
-          // Only the Chats tab gets the home app bar; the scan screens
-          // provide their own app bar inside the tab.
-          appBar: _tabIndex == 0
-              ? AppBar(
-                  title: const Text(appName),
-                  actions: [
-                    IconButton(
-                      tooltip: 'settingsTab'.tr,
-                      icon: const Icon(Icons.settings_outlined),
-                      onPressed: () => Get.to(() => const SettingsScreen()),
-                    ),
-                  ],
-                )
-              : null,
-          body: IndexedStack(
-            index: _tabIndex,
-            children: [
-              _ChatsTab(controller: controller),
-              const BluetoothScanScreen(),
-              const WifiDirectScanScreen(),
-            ],
+    final l10n = AppLocalizations.of(context)!;
+    return Scaffold(
+      // Only the Chats tab gets the home app bar; the scan screens
+      // provide their own app bar inside the tab.
+      appBar: _tabIndex == 0
+          ? AppBar(
+              title: const Text(appName),
+              actions: [
+                IconButton(
+                  tooltip: l10n.settingsTab,
+                  icon: const Icon(Icons.settings_outlined),
+                  onPressed: () => navigatorKey.currentState!.push(
+                    MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                  ),
+                ),
+              ],
+            )
+          : null,
+      body: IndexedStack(
+        index: _tabIndex,
+        children: const [
+          _ChatsTab(),
+          BluetoothScanScreen(),
+          WifiDirectScanScreen(),
+        ],
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tabIndex,
+        onDestinationSelected: (index) {
+          setState(() => _tabIndex = index);
+        },
+        destinations: [
+          NavigationDestination(
+            icon: Icon(Icons.chat_bubble_outline),
+            selectedIcon: Icon(Icons.chat_bubble),
+            label: l10n.chatsTab,
           ),
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _tabIndex,
-            onDestinationSelected: (index) {
-              setState(() => _tabIndex = index);
-              if (index == 0) {
-                controller.refreshSessions();
-              }
-            },
-            destinations: [
-              NavigationDestination(
-                icon: Icon(Icons.chat_bubble_outline),
-                selectedIcon: Icon(Icons.chat_bubble),
-                label: 'chatsTab'.tr,
-              ),
-              NavigationDestination(
-                icon: const Icon(Icons.bluetooth),
-                label: 'bluetoothTab'.tr,
-              ),
-              NavigationDestination(
-                icon: const Icon(Icons.wifi_tethering),
-                label: 'wifiTab'.tr,
-              ),
-            ],
+          NavigationDestination(
+            icon: const Icon(Icons.bluetooth),
+            label: l10n.bluetoothTab,
           ),
-        );
-      },
+          NavigationDestination(
+            icon: const Icon(Icons.wifi_tethering),
+            label: l10n.wifiTab,
+          ),
+        ],
+      ),
     );
   }
 }
 
 /// Chat session list (first bottom nav tab).
-class _ChatsTab extends StatelessWidget {
-  const _ChatsTab({required this.controller});
-
-  final HomeController controller;
+class _ChatsTab extends ConsumerWidget {
+  const _ChatsTab();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
-    return Obx(() {
-      if (controller.sessions.isEmpty) {
-        return Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.chat_bubble_outline, size: 64, color: scheme.outlineVariant),
-              const SizedBox(height: 12),
-              Text('noChatsYet'.tr),
-              const SizedBox(height: 4),
-              Text(
-                'noChatsHint'.tr,
-                style: TextStyle(color: scheme.onSurfaceVariant),
-              ),
-            ],
-          ),
-        );
-      }
-      return ListView.separated(
-        itemCount: controller.sessions.length,
-        separatorBuilder: (_, _) => const Divider(height: 1),
-        itemBuilder: (context, index) {
-          final s = controller.sessions[index];
-          final subtitle = StringBuffer()
-            ..write(s.device['address'] ?? '')
-            ..write('  •  ')
-            ..write(_formatDateTime(s.updatedAt));
-          // Which channel this chat runs over — also drives the tap below.
-          final bool isWifi =
-              s.transportKind == ChatSessionModel.transportWifiDirect;
+    final l10n = AppLocalizations.of(context)!;
+    // First event loads the list; before that (and on fail-open) show the
+    // empty state, matching the pre-port behavior.
+    final sessions =
+        ref.watch(homeSessionsProvider).value ?? const <ChatSessionModel>[];
 
-          return ListTile(
-            leading: CircleAvatar(
-              backgroundColor: scheme.primaryContainer,
-              child: Text(
-                (s.name.isNotEmpty ? s.name[0] : '?').toUpperCase(),
-                style: TextStyle(color: scheme.onPrimaryContainer),
-              ),
+    if (sessions.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.chat_bubble_outline,
+                size: 64, color: scheme.outlineVariant),
+            const SizedBox(height: 12),
+            Text(l10n.noChatsYet),
+            const SizedBox(height: 4),
+            Text(
+              l10n.noChatsHint,
+              style: TextStyle(color: scheme.onSurfaceVariant),
             ),
-            title: Text(s.name),
-            subtitle: Text(subtitle.toString()),
-            // Transport badge: a Bluetooth or Wi‑Fi Direct icon at the
-            // right edge, so the channel of every chat is visible at a
-            // glance.
-            trailing: Tooltip(
-              message: (isWifi ? 'wifiTab' : 'bluetoothTab').tr,
-              child: Icon(
-                isWifi ? Icons.wifi_tethering : Icons.bluetooth,
-                size: 20,
-                color: scheme.primary,
-              ),
+          ],
+        ),
+      );
+    }
+    return ListView.separated(
+      itemCount: sessions.length,
+      separatorBuilder: (_, _) => const Divider(height: 1),
+      itemBuilder: (context, index) {
+        final s = sessions[index];
+        final subtitle = StringBuffer()
+          ..write(s.device['address'] ?? '')
+          ..write('  •  ')
+          ..write(_formatDateTime(s.updatedAt));
+        // Which channel this chat runs over — also drives the tap below.
+        final bool isWifi = s.transportKind == ChatSessionModel.transportWifiDirect;
+
+        return ListTile(
+          leading: CircleAvatar(
+            backgroundColor: scheme.primaryContainer,
+            child: Text(
+              (s.name.isNotEmpty ? s.name[0] : '?').toUpperCase(),
+              style: TextStyle(color: scheme.onPrimaryContainer),
             ),
-            onTap: () {
-              // Reopen through the chat's own transport: Wi‑Fi Direct
-              // sessions in the WFD screen, everything else (Bluetooth and
-              // legacy untagged sessions) in the Bluetooth screen.
-              if (isWifi) {
-                Get.to(
-                  () => const WChatScreen(),
-                  arguments: s,
-                )?.then((_) => controller.refreshSessions());
-              } else {
-                Get.to(
-                  () => BChatScreen(),
-                  arguments: s,
-                )?.then((_) => controller.refreshSessions());
-              }
-            },
-            onLongPress: () {
-              showDialog(
-                context: context,
-                builder: (context) => AlertDialog(
-                  title: Text('deleteChatTitle'.trParams({'name': s.name})),
-                  content: Text('deleteChatMessage'.tr),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Get.back(),
-                      child: Text('cancel'.tr),
-                    ),
-                    TextButton(
-                      onPressed: () {
-                        controller.deleteSession(s);
-                        Get.back();
-                      },
-                      child: Text('delete'.tr),
-                    ),
-                  ],
+          ),
+          title: Text(s.name),
+          subtitle: Text(subtitle.toString()),
+          // Transport badge: a Bluetooth or Wi‑Fi Direct icon at the
+          // right edge, so the channel of every chat is visible at a
+          // glance.
+          trailing: Tooltip(
+            message: isWifi ? l10n.wifiTab : l10n.bluetoothTab,
+            child: Icon(
+              isWifi ? Icons.wifi_tethering : Icons.bluetooth,
+              size: 20,
+              color: scheme.primary,
+            ),
+          ),
+          onTap: () {
+            // Reopen through the chat's own transport: Wi‑Fi Direct
+            // sessions in the WFD screen, everything else (Bluetooth and
+            // legacy untagged sessions) in the Bluetooth screen.
+            // The home list follows via the box.watch() stream — no
+            // manual refresh needed after the chat closes.
+            if (isWifi) {
+              navigatorKey.currentState!.push(
+                MaterialPageRoute(
+                  builder: (_) => const WChatScreen(),
+                  settings: RouteSettings(arguments: s),
                 ),
               );
-            },
-          );
-        },
-      );
-    });
+            } else {
+              navigatorKey.currentState!.push(
+                MaterialPageRoute(
+                  builder: (_) => BChatScreen(),
+                  settings: RouteSettings(arguments: s),
+                ),
+              );
+            }
+          },
+          onLongPress: () {
+            showDialog<void>(
+              context: context,
+              builder: (dialogContext) => AlertDialog(
+                title: Text(l10n.deleteChatTitle(s.name)),
+                content: Text(l10n.deleteChatMessage),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(),
+                    child: Text(l10n.cancel),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      ref.read(deleteChatSessionProvider)(s);
+                      Navigator.of(dialogContext).pop();
+                    },
+                    child: Text(l10n.delete),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   String _formatDateTime(DateTime dt) {

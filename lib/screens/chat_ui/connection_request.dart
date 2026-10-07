@@ -6,9 +6,11 @@
 
 import 'dart:async';
 
+import 'package:chatblue/l10n/app_localizations.dart';
+import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/screens/chat_ui/chat_ui.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:get/get.dart';
 
 /// Overlay-based connection request banner.
 class ConnectionRequestBanner {
@@ -19,12 +21,12 @@ class ConnectionRequestBanner {
 
   /// Shows the request card. [onAccept] fires on Accept (or auto-accept
   /// never — only manual), [onDecline] on Decline or timeout expiry.
-  /// [liveName], when provided, is an observable that updates the banner
+  /// [liveName], when provided, is a listenable that updates the banner
   /// title in place (used when the peer's device name arrives over the
   /// socket right after the request — WFD peers carry no name pre-accept).
   static void show({
     required String deviceName,
-    Rxn<String>? liveName,
+    ValueListenable<String>? liveName,
     required VoidCallback onAccept,
     required VoidCallback onDecline,
     Duration timeout = const Duration(seconds: 15),
@@ -44,31 +46,34 @@ class ConnectionRequestBanner {
 
   static void _insert({
     required String deviceName,
-    Rxn<String>? liveName,
+    ValueListenable<String>? liveName,
     required VoidCallback onAccept,
     required VoidCallback onDecline,
   }) {
     dismiss();
     // Overlay must be taken from the ROOT NAVIGATOR state itself:
-    // neither Get.overlayContext (MaterialApp root) nor Get.context (the
-    // NavigatorState context) sits UNDER an Overlay — both throw
-    // "No Overlay widget found" when used with Overlay.of().
-    final ctx = Get.context;
+    // neither the MaterialApp root context nor the NavigatorState context
+    // sits UNDER an Overlay — both throw "No Overlay widget found" when
+    // used with Overlay.of().
+    final ctx = navigatorKey.currentContext;
     if (ctx == null) {
       onDecline();
       return;
     }
     final p = ChatPalette.of(ctx);
-    final overlay = Get.key.currentState?.overlay;
+    final overlay = navigatorKey.currentState?.overlay;
     if (overlay == null) {
       onDecline();
       return;
     }
-    // Chat screens end with "ChatScreen" as their route name
+    // Chat screens are pushed with a route name ending in "ChatScreen"
     // (BChatScreen / WChatScreen).
-    final bool isChatScreen = Get.currentRoute.contains('ChatScreen');
+    final bool isChatScreen = (ModalRoute.of(overlay.context)?.settings.name ??
+            '')
+        .contains('ChatScreen');
     final topInset = MediaQuery.paddingOf(ctx).top;
     final bottomInset = MediaQuery.paddingOf(ctx).bottom;
+    final l10n = AppLocalizations.of(ctx)!;
 
     _entry = OverlayEntry(
       builder: (_) => Positioned(
@@ -79,6 +84,7 @@ class ConnectionRequestBanner {
         right: 12,
         child: _ConnectionRequestCard(
           palette: p,
+          l10n: l10n,
           deviceName: deviceName,
           liveName: liveName,
           onAccept: () {
@@ -117,6 +123,7 @@ class ConnectionRequestBanner {
 class _ConnectionRequestCard extends StatelessWidget {
   const _ConnectionRequestCard({
     required this.palette,
+    required this.l10n,
     required this.deviceName,
     this.liveName,
     required this.onAccept,
@@ -124,11 +131,12 @@ class _ConnectionRequestCard extends StatelessWidget {
   });
 
   final ChatPalette palette;
+  final AppLocalizations l10n;
   final String deviceName;
 
-  /// Optional observable that live-updates the title (peer name arrives
+  /// Optional listenable that live-updates the title (peer name arrives
   /// over the socket while the banner is up).
-  final Rxn<String>? liveName;
+  final ValueListenable<String>? liveName;
   final VoidCallback onAccept;
   final VoidCallback onDecline;
 
@@ -166,27 +174,15 @@ class _ConnectionRequestCard extends StatelessWidget {
               ),
               child: Center(
                 child: liveName == null
-                    ? Text(
-                        deviceName.trim().isEmpty
-                            ? '?'
-                            : deviceName.trim()[0].toUpperCase(),
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white,
-                        ),
+                    ? _AvatarLetter(
+                        name: deviceName,
+                        fallback: '?',
                       )
-                    : Obx(() {
-                        final n = (liveName!.value ?? '').trim();
-                        return Text(
-                          n.isEmpty ? '?' : n[0].toUpperCase(),
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.white,
-                          ),
-                        );
-                      }),
+                    : ValueListenableBuilder<String>(
+                        valueListenable: liveName!,
+                        builder: (_, n, _) =>
+                            _AvatarLetter(name: n, fallback: '?'),
+                      ),
               ),
             ),
             const SizedBox(width: 12),
@@ -196,14 +192,14 @@ class _ConnectionRequestCard extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    'connectionRequestTitle'.tr,
+                    l10n.connectionRequestTitle,
                     style: TextStyle(fontSize: 11, color: palette.muted),
                   ),
                   const SizedBox(height: 2),
                   liveName == null
                       ? Text(
                           deviceName.trim().isEmpty
-                              ? 'unknownDevice'.tr
+                              ? l10n.unknownDevice
                               : deviceName.trim(),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -213,10 +209,10 @@ class _ConnectionRequestCard extends StatelessWidget {
                             color: palette.messageText,
                           ),
                         )
-                      : Obx(() {
-                          final n = (liveName!.value ?? '').trim();
-                          return Text(
-                            n.isEmpty ? 'unknownDevice'.tr : n,
+                      : ValueListenableBuilder<String>(
+                          valueListenable: liveName!,
+                          builder: (_, n, _) => Text(
+                            n.trim().isEmpty ? l10n.unknownDevice : n.trim(),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -224,8 +220,8 @@ class _ConnectionRequestCard extends StatelessWidget {
                               fontWeight: FontWeight.w600,
                               color: palette.messageText,
                             ),
-                          );
-                        }),
+                          ),
+                        ),
                 ],
               ),
             ),
@@ -275,6 +271,27 @@ class _ConnectionRequestCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// First letter of [name] (uppercased), or [fallback] when empty.
+class _AvatarLetter extends StatelessWidget {
+  const _AvatarLetter({required this.name, required this.fallback});
+
+  final String name;
+  final String fallback;
+
+  @override
+  Widget build(BuildContext context) {
+    final trimmed = name.trim();
+    return Text(
+      trimmed.isEmpty ? fallback : trimmed[0].toUpperCase(),
+      style: const TextStyle(
+        fontSize: 18,
+        fontWeight: FontWeight.w700,
+        color: Colors.white,
       ),
     );
   }

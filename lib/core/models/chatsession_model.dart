@@ -70,7 +70,9 @@ class ChatSessionModel extends HiveObject {
     return ChatSessionModel(
       id: json['id'],
       name: json['name'],
-      messages: json['messages'].map((e) => MessageModel.fromJson(e)).toList(),
+      messages: (json['messages'] as List)
+          .map((e) => MessageModel.fromJson(e as Map<String, dynamic>))
+          .toList(),
       device: json['device'],
       createdAt: DateTime.parse(json['createdAt']),
       updatedAt: DateTime.parse(json['updatedAt']),

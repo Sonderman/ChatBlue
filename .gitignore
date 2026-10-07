@@ -11,7 +11,11 @@
 .svn/
 .swiftpm/
 .cursor/
+.hermes/
 migrate_working_dir/
+
+# gen-l10n generated localizations (regenerated on build)
+lib/l10n/app_localizations*.dart
 
 # IntelliJ related
 *.iml

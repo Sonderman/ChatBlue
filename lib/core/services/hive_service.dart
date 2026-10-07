@@ -6,18 +6,40 @@ import 'package:hive_ce/hive.dart';
 import 'package:path_provider/path_provider.dart';
 
 class HiveService extends GetxService {
-  static HiveService get to => Get.find<HiveService>();
+  /// App-wide instance, assigned by `main()` right after creation.
+  ///
+  /// [to] prefers this plain static reference over the GetX registry so the
+  /// app path never depends on GetX's instance lifecycle — and not on its
+  /// `Type.toString()` keying, which silently broke once: `Get.put` in a
+  /// `HiveService?` assignment context inferred `S = HiveService?` and keyed
+  /// the entry as "HiveService?", so every `Get.find<HiveService>()` missed
+  /// and the first chat open crashed (see main.dart). Contexts without a
+  /// `main()` (unit tests) still fall back to `Get.find`.
+  static HiveService? instance;
+
+  static HiveService get to {
+    final local = instance;
+    if (local != null) return local;
+    return Get.find<HiveService>();
+  }
+
   late final Box<ChatSessionModel> _chatSessionBox;
 
-  Future<HiveService> init() async {
+  /// Exposed for reactive consumers (Riverpod stream over box.watch()).
+  Box<ChatSessionModel> get chatSessionsBox => _chatSessionBox;
+
+  Future<HiveService> init({String? directoryPath}) async {
     // Initialize Hive
-    final appDocumentDir = await getApplicationDocumentsDirectory();
+    if (directoryPath != null) {
+      Hive.init(directoryPath);
+    } else {
+      final appDocumentDir = await getApplicationDocumentsDirectory();
+      Hive.init(appDocumentDir.path);
+    }
     if (kDebugMode) {
       print("Setting up Hive");
     }
-    Hive
-      ..init(appDocumentDir.path)
-      ..registerAdapters();
+    Hive.registerAdapters();
 
     // Open boxes
     _chatSessionBox = await Hive.openBox<ChatSessionModel>('chat_sessions');
