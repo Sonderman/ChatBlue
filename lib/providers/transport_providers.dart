@@ -209,7 +209,13 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
       final bool wasConnected = state.isConnected;
       state = state.copyWith(isConnected: false);
       ConnectionRequestBanner.dismiss();
-      _connectInitiatedAt = null;
+      // Keep the initiation window while OUR dial is still in flight: a
+      // disconnect event during the attempt (native cleanup of a previous
+      // socket) must not let the real socket that lands moments later read
+      // as an INCOMING request — the dialer would show its own banner.
+      if (!_outgoingConnect) {
+        _connectInitiatedAt = null;
+      }
       if (_pendingAccept) {
         _pendingAccept = false;
         _pendingRemote = null;
@@ -1222,7 +1228,12 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       final bool wasConnected = state.isConnected;
       state = state.copyWith(isConnected: false);
       ConnectionRequestBanner.dismiss();
-      _connectInitiatedAt = null;
+      // Same window rule as the BT transport: don't wipe the initiation
+      // window while our dial is in flight (a mid-attempt disconnect must
+      // not make our own late socket read as an incoming request).
+      if (!_outgoingConnect) {
+        _connectInitiatedAt = null;
+      }
       if (_pendingAccept) {
         _pendingAccept = false;
         _pendingRemote = null;

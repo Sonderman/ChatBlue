@@ -153,7 +153,16 @@ class BluetoothClassicManager(private val context: Context) {
     }
 
     fun connect(address: String, uuidString: String?) {
-        disconnect()
+        // Silent pre-dial cleanup. Cancelling the previous threads must NOT
+        // emit socket events: a spurious "manual" disconnect completes the
+        // Dart-side connect attempt early (false "could not connect") and
+        // wipes its initiation window — the real socket that lands moments
+        // later then reads as an INCOMING request on the dialer (request
+        // banner on both sides).
+        connectThread?.cancel()
+        connectThread = null
+        connectedThread?.cancelSilently()
+        connectedThread = null
         val adapter = bluetoothAdapter ?: run {
             onSocketError?.invoke("Bluetooth not supported")
             return
@@ -484,12 +493,30 @@ class BluetoothClassicManager(private val context: Context) {
 
         fun isActive(): Boolean = active.get()
 
+        /// Emits the disconnect event only when this cancel actually kills a
+        /// LIVE link (live→dead transition). Re-cancelling an already-dead
+        /// thread stays silent: it used to re-emit "manual" whenever a new
+        /// dial's cleanup touched the previous, long-dead socket — that
+        /// spurious event completed the new connect attempt as a failure on
+        /// the Dart side, and its late socket then looked like an incoming
+        /// request (request banner on the dialer itself).
         fun cancel(reason: String) {
+            if (!active.getAndSet(false)) return
+            closeQuietly()
+            onSocketDisconnected?.invoke(reason)
+        }
+
+        /// Closes without emitting a disconnect event (pre-dial cleanup in
+        /// [connect], where the previous socket is not a live link).
+        fun cancelSilently() {
             active.set(false)
+            closeQuietly()
+        }
+
+        private fun closeQuietly() {
             try { input?.close() } catch (_: IOException) {}
             try { output?.close() } catch (_: IOException) {}
             try { socket.close() } catch (_: IOException) {}
-            onSocketDisconnected?.invoke(reason)
         }
     }
 

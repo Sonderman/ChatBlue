@@ -103,6 +103,29 @@ void main() {
       expect(state.isConnected, isFalse);
       expect(state.lastDisconnectReason, 'remote closed');
     });
+
+    test(
+        'mid-dial disconnect keeps the initiation window: the late socket '
+        'still reads as OUR dial (no self-request banner)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(btTransportProvider.notifier);
+      final connectFuture = notifier.connectToPeer('AA:BB:CC');
+      // The native layer used to emit a spurious disconnect (cancelling the
+      // previous, dead socket) as the new dial started; it completed the
+      // attempt as a failure AND wiped the initiation window.
+      service.onSocketDisconnected?.call('manual');
+      expect(await connectFuture, isFalse);
+
+      // The real socket lands moments later — it is OUR dial's result, so
+      // the notifier must wait for acceptance, never show a request banner.
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:BB:CC', name: 'PeerOne'),
+      );
+      expect(notifier.isAwaitingAcceptance, isTrue);
+    });
   });
 
   group('Wi-Fi Direct', () {
@@ -183,6 +206,29 @@ void main() {
       // The scan list is cleared once a session begins.
       expect(state.peers, isEmpty);
       expect(state.connectedDevice?.deviceAddress, 'p2p-1');
+    });
+
+    test(
+        'mid-dial disconnect keeps the initiation window: the late socket '
+        'still reads as OUR dial (no self-request banner)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(wdTransportProvider.notifier);
+      service.wifiEnabled = true;
+      service.onPeerFound?.call(
+        WdPeerInfo(deviceAddress: 'p2p-1', deviceName: 'Redmi'),
+      );
+      final connectFuture = notifier.connectToPeer('p2p-1');
+      service.onSocketDisconnected?.call('manual');
+      expect(await connectFuture, isFalse);
+
+      // Our dial's socket lands late: wait for acceptance, no banner.
+      service.onSocketConnected?.call(
+        WdPeerInfo(deviceAddress: 'p2p-1', deviceName: 'Redmi'),
+      );
+      expect(notifier.isAwaitingAcceptance, isTrue);
     });
   });
 }
