@@ -1,27 +1,56 @@
+import 'dart:async';
+
 import 'package:chatblue/config.dart';
-import 'package:chatblue/core/services/hive_service.dart';
 import 'package:chatblue/core/theme/app_theme.dart';
 import 'package:chatblue/core/translations/app_translations.dart';
+import 'package:chatblue/data/db/app_database.dart';
+import 'package:chatblue/data/session_repository.dart';
+import 'package:chatblue/data/settings_repository.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
 import 'package:chatblue/providers/app_providers.dart';
-import 'package:chatblue/providers/home_providers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:get/get.dart';
-import 'package:hive_ce/hive.dart';
+import 'package:mcp_toolkit/mcp_toolkit.dart';
 import 'package:chatblue/screens/homescreen/home_screen.dart';
 import 'package:sizer/sizer.dart';
 
 void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  final hiveService = await setupServices();
+  if (kDebugMode) {
+    // Agent bridge (flutter-mcp-toolkit), debug-only. initialize() installs
+    // the toolkit's log capture as a global debugPrint override (plain
+    // print() is NOT captured — use debugPrint for agent-visible logs) and
+    // registers the VM-service extensions; the runZonedGuarded zone routes
+    // uncaught async errors to handleZoneError so they stay visible. The
+    // binding is inert in release builds; this gate keeps the release path
+    // exactly as before.
+    runZonedGuarded(
+      () async {
+        WidgetsFlutterBinding.ensureInitialized();
+        MCPToolkitBinding.instance
+          ..initialize()
+          ..initializeFlutterToolkit();
+        await _launchApp();
+      },
+      (error, stack) =>
+          MCPToolkitBinding.instance.handleZoneError(error, stack),
+    );
+  } else {
+    WidgetsFlutterBinding.ensureInitialized();
+    await _launchApp();
+  }
+}
+
+/// App bootstrap after binding/toolkit init: services, container, runApp.
+Future<void> _launchApp() async {
+  final database = await setupServices();
   // Transport controllers are NOT registered here: each screen registers its
   // own on first access via `ensureRegistered`, so no permissions dialog
   // appears on launch and hot reloads (which skip main()) stay consistent.
   final container = ProviderContainer(
     overrides: [
-      if (hiveService != null) hiveServiceProvider.overrideWithValue(hiveService),
+      if (database != null) appDatabaseProvider.overrideWithValue(database),
     ],
   );
   rootProviderContainer = container;
@@ -52,53 +81,31 @@ class MyApp extends ConsumerWidget {
   }
 }
 
-Future<HiveService?> setupServices() async {
-  HiveService? hiveService;
+/// Service bootstrap. Every step fails open: the app starts even when a
+/// service is unavailable — persistence simply degrades. Returns the opened
+/// drift database (null when opening failed) so `main()` can hand it to the
+/// Riverpod container.
+Future<AppDatabase?> setupServices() async {
+  AppDatabase? database;
   try {
-    // Register with GetX UNCONDITIONALLY and permanent — GetX auto-deletes
-    // non-permanent instances not `Get.find`-ed within ~5 s, and nothing on
-    // the GetX side touches HiveService until a chat opens (Home is now
-    // Riverpod-driven), so the legacy `HiveService.to` calls in the chat
-    // controller would crash with "not found" after a few seconds.
-    // (Deliberately `Get.put`, not `putAsync`: a sync, guaranteed
-    // registration — a broken box is a recoverable runtime error, a
-    // missing registration is a crash.)
-    final service = HiveService();
-    // `HiveService.to` prefers this static reference over the GetX registry
-    // (see hive_service.dart) so the app path stays independent of GetX's
-    // instance lifecycle during the GetX→Riverpod migration.
-    HiveService.instance = service;
-    try {
-      await service.init();
-    } catch (e) {
-      // Fail open: app still starts; persistence calls degrade.
-      if (kDebugMode && showDebugLogs) {
-        debugPrint('Hive init failed: $e');
-      }
-    }
-    // The explicit `<HiveService>` type argument is REQUIRED here: in this
-    // ternary the assignment context is `HiveService?`, and type inference
-    // then infers `S = HiveService?` for `put`, keying the registration as
-    // "HiveService?" — every `Get.find<HiveService>()` missed it and the
-    // first chat open crashed with '"HiveService" not found' (verified live
-    // on device over the VM service: isRegistered<HiveService>() false while
-    // isRegistered<HiveService?>() true). Pin the type argument.
-    hiveService = Get.isRegistered<HiveService>()
-        ? Get.find<HiveService>()
-        : Get.put<HiveService>(service, permanent: true);
+    // drift (SQLite) — the app's single local store: chat sessions/messages
+    // plus app settings (themeMode/locale/device_id). The legacy Hive data
+    // was carried over by the one-time importers while Hive was still
+    // present (P1/P2 builds); Hive itself is gone (P3) — boxes remaining on
+    // test devices are inert files.
+    database = await AppDatabase.open();
+    SessionRepository.instance = SessionRepository(database);
+    // Settings cache loads before runApp: the notifiers read synchronously
+    // (no theme/locale flicker on launch).
+    final settings = SettingsRepository(database);
+    SettingsRepository.instance = settings;
+    await settings.load();
   } catch (e) {
+    // Fail open: without the database, chat features degrade but the app
+    // still starts (home list renders empty, settings defaults win).
     if (kDebugMode && showDebugLogs) {
-      debugPrint('HiveService registration failed: $e');
+      debugPrint('Drift init failed: $e');
     }
   }
-  try {
-    // Shared settings box (theme mode / locale); depends on Hive being up.
-    await Hive.openBox('settings');
-  } catch (e) {
-    // Fail open: theme stays on system default, locale on the device language.
-    if (kDebugMode && showDebugLogs) {
-      debugPrint('Settings box init failed: $e');
-    }
-  }
-  return hiveService;
+  return database;
 }

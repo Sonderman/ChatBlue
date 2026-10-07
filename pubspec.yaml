@@ -19,7 +19,6 @@ dependencies:
   flutter_riverpod: ^3.0.0
   riverpod: ^3.4.3
   intl: any
-  hive_ce: ^2.11.3
   permission_handler: ^13.0.2
   auto_size_text: ^3.0.0
   sizer: ^3.0.5
@@ -33,9 +32,17 @@ dependencies:
   record: ^6.2.1
   just_audio: ^0.9.39
 
+  # drift (SQLite): sohbet verisi + ayarlar deposu (Hive geçişi P1–P3 tamam).
+  drift: ^2.35.0
+  sqlite3_flutter_libs: ^0.5.0
+
+  # flutter-mcp-toolkit köprüsü (debug): koşan app'i agent'tan sürmek +
+  # log/hata okumak için; init main.dart'ta kDebugMode-gated.
+  mcp_toolkit: ^7.0.0
+
 dev_dependencies:
   build_runner: ^2.6.0
-  hive_ce_generator: ^1.9.3
+  drift_dev: ^2.35.0
   flutter_test:
     sdk: flutter
 

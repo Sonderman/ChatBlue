@@ -7,7 +7,7 @@ import 'package:chatblue/controllers/chat_transport.dart';
 import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
-import 'package:chatblue/core/services/hive_service.dart';
+import 'package:chatblue/data/session_repository.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -168,7 +168,7 @@ abstract class ChatScreenControllerBase extends GetxController {
   StreamSubscription<String?>? _disconnectSubscription;
   StreamSubscription<bool>? _connectionSubscription;
 
-  // Debounces Hive writes during message bursts (text/image/traffic storms).
+  // Debounces session writes during message bursts (text/image/traffic storms).
   Timer? _saveDebounce;
 
   // History sync between previously-chatting peers:
@@ -265,8 +265,8 @@ abstract class ChatScreenControllerBase extends GetxController {
     );
     messages.value = combined;
     try {
-      await HiveService.to.saveChatSession(chatSession);
-      await HiveService.to.deleteChatSession(duplicate.id);
+      await SessionRepository.instance.saveChatSession(chatSession);
+      await SessionRepository.instance.deleteChatSession(duplicate.id);
       if (kDebugMode) {
         debugPrint(
           'Late identity merge: adopted "${duplicate.name}" '
@@ -293,7 +293,7 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// app).
   Future<ChatSessionModel?> _findExistingSessionForPeer() async {
     try {
-      final all = await HiveService.to.getAllChatSessions();
+      final all = await SessionRepository.instance.getAllChatSessions();
       final peerMac = transport.connectedDeviceKey;
       final peerName = transport.connectedDeviceName;
       if (kDebugMode) {
@@ -362,7 +362,7 @@ abstract class ChatScreenControllerBase extends GetxController {
         );
       }
       // Assign the session BEFORE the first await: the first frame builds
-      // while onInit is still suspended on the Hive lookup, and widgets
+      // while onInit is still suspended on the session lookup, and widgets
       // (ChatAppBar reads `chatSession.name`) would hit the uninitialized
       // `late` field with a LateInitializationError — seen when a chat
       // opens through the scan/connect flow (no Get.arguments). The lookup
@@ -383,7 +383,7 @@ abstract class ChatScreenControllerBase extends GetxController {
             transport: transport.transportType,
           );
       messages.value = chatSession.messages;
-      var session = await HiveService.to.loadChatSession(key);
+      var session = await SessionRepository.instance.loadChatSession(key);
       session ??= await _findExistingSessionForPeer();
       if (kDebugMode) {
         debugPrint(
@@ -414,8 +414,8 @@ abstract class ChatScreenControllerBase extends GetxController {
         );
         messages.value = chatSession.messages;
         try {
-          await HiveService.to.saveChatSession(chatSession);
-          await HiveService.to.deleteChatSession(session.id);
+          await SessionRepository.instance.saveChatSession(chatSession);
+          await SessionRepository.instance.deleteChatSession(session.id);
         } catch (e) {
           if (kDebugMode) {
             debugPrint('Session re-key failed: $e');
@@ -425,7 +425,7 @@ abstract class ChatScreenControllerBase extends GetxController {
       } else if (session == null) {
         // BRAND-NEW session: persist it right away. Saves are otherwise
         // triggered only by dirty events (message, rename, sync) — a chat
-        // opened and closed without any of those would never touch Hive and
+        // opened and closed without any of those would never touch the store and
         // silently vanish on restart. The identity frame may still be in
         // flight (or the MAC rotated): flag the open so a late identity
         // frame re-checks for a stored session of the same peer and merges
@@ -445,7 +445,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     }
 
     setupCallbacks();
-    // Backfill ids for messages persisted by the old Hive schema (which
+    // Backfill ids for messages persisted by the legacy Hive-era schema (which
     // never wrote `id`): deletion and progress bookkeeping key on ids, so
     // legacy history needs one before it can be deleted.
     var backfilled = false;
@@ -518,7 +518,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     // state (the flush is debounced 250 ms and may still be in flight
     // when the screen closes).
     unawaited(flush.whenComplete(() {
-      // Home list refresh is handled by the box.watch() stream in
+      // Home list refresh is handled by the drift stream in
       // home_providers.dart — no manual refresh needed after a chat closes.
     }));
     super.onClose();
@@ -1229,7 +1229,7 @@ abstract class ChatScreenControllerBase extends GetxController {
   Future<void> saveChatSession() async {
     chatSession.messages = messages.toList();
     chatSession.updatedAt = DateTime.now();
-    await HiveService.to.saveChatSession(chatSession);
+    await SessionRepository.instance.saveChatSession(chatSession);
   }
 
   /// Debounced persistence: bursts of events (message storms, transfer

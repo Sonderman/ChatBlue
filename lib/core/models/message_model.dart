@@ -1,48 +1,32 @@
 // Message data class for Bluetooth chat application.
 // This class represents a single chat message with its content, sender status, and timestamp.
 
-import 'package:hive_ce/hive.dart';
-
-/// Field indexes are part of the persisted schema — keep them stable.
-/// The AdapterSpec generator assigns indexes from `hive_adapters.g.yaml`
-/// while that schema file exists; the annotations below mirror the
-/// persisted indexes anyway, so a from-scratch regeneration (schema file
-/// lost) keeps the same layout. `id` persisted at index 9 — older records
-/// lack it (read back as null and backfilled on chat open); message-level
-/// additions keep appending: `remoteMediaSize` is index 10.
-class MessageModel extends HiveObject {
-  @HiveField(0)
+/// Plain message record (was `HiveObject` until the drift migration, P1).
+/// Legacy Hive records may lack `id` (read back null) — the chat-open
+/// backfill repairs those and persists them; drift rows carry every field 1:1.
+class MessageModel {
   final String text;
 
-  @HiveField(1)
   final bool isSentByMe;
 
-  @HiveField(2)
   final DateTime timestamp;
 
-  @HiveField(9)
   final String? id;
 
-  @HiveField(4)
   final bool isTransferring;
 
-  @HiveField(5)
   final int? transferCurrent;
 
-  @HiveField(6)
   final int? transferTotal;
 
-  @HiveField(7)
   final String? transferKind; // 'bytes' | 'text' | 'audio'
 
-  @HiveField(8)
   final String? imagePath;
 
   /// Byte size of the media file when it is deliberately NOT stored locally
   /// yet: the file lives on the peer (deferred sync of large media), the
   /// bubble renders a download placeholder and fetches it on tap. Null for
   /// ordinary messages and once the file has been downloaded.
-  @HiveField(10)
   final int? remoteMediaSize;
 
   MessageModel({

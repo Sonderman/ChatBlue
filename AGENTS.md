@@ -30,26 +30,29 @@ ChatBlue: Flutter P2P mesajlaşma uygulaması; state katmanı GetX'ten Riverpod'
 
 - Flutter SDK: `/Volumes/eXSSD/Sdks/flutter/bin` — PATH'te **yok**, tam yol kullanılmalı.
 - Bağımlılık güncelleme akışı: `flutter pub outdated` → major bump'larda changelog/migration kontrolü → pubspec constraint patch → `flutter pub upgrade` → analyze.
-- Hive CE codegen: `lib/core/hive/hive_adapters.dart` içindeki `@GenerateAdapters` + `build_runner` (`flutter pub run build_runner build` gerekirse).
+- Drift codegen: şema değişikliğinde `lib/data/db/` (tables + app_database) → `dart run build_runner build` (`app_database.g.dart` üretilir; commit kapsamına dahildir). (Hive CE codegen'i P3'te söküldü.)
 
 ## Mimari Özet
 
 ```
 lib/
-  main.dart               → ProviderContainer + UncontrolledProviderScope; Sizer + GetMaterialApp (locale/themeMode provider'lardan), HiveService init, HomeScreen açılır
+  main.dart               → ProviderContainer + UncontrolledProviderScope; Sizer + GetMaterialApp (locale/themeMode provider'lardan), drift açılışı + settings cache, HomeScreen açılır
   config.dart             → appName, appVersion, showDebugLogs
   core/
-    models/               → ChatSessionModel, MessageModel (HiveObject)
+    models/               → ChatSessionModel, MessageModel (plain data class'lar)
     platform/             → BtPlatformChannel, WdPlatformChannel (Method/Event Channel tanımları)
-    services/             → HiveService, BtClassicService, WifiDirectService
+    services/             → BtClassicService, WifiDirectService, DeviceIdService
     theme/                → AppTheme (light/dark ThemeData, cyan seed + navy canvas)
-    hive/                 → hive_adapters.dart + generated (.g.dart)
+  data/
+    db/                   → tables.dart + app_database.dart (+ generated .g.dart)
+    session_repository.dart  → drift CRUD (sessions/messages) + reactive watchSessions()
+    settings_repository.dart → cache'li key/value deposu (themeMode/locale/device_id)
   controllers/
     transport_adapter.dart → GetX↔Riverpod köprüsü (Bt/WdTransportAdapter; Rx ChatTransport yüzeyi)
     chat_transport.dart   → chat tarafı için ortak arayüz (connectToPeer, onChatOpened/Closed)
   providers/
     app_providers.dart    → themeMode/locale notifier'ları, navigatorKey/scaffoldMessengerKey, rootProviderContainer
-    home_providers.dart   → homeSessionsProvider (Hive box.watch stream), deleteChatSessionProvider
+    home_providers.dart   → homeSessionsProvider (drift watchSessions stream), deleteChatSessionProvider
     transport_providers.dart → Bt/WdTransportNotifier (scan/socket/handshake — eski GetX controller'ların Riverpod portu)
   screens/
     chat_screen_controller_base.dart → B/W sohbet mantığının TEK implementasyonu (mesaj, transfer, senkronizasyon, gönderim kuyruğu)
@@ -60,7 +63,7 @@ lib/
     w_chatscreen/         → WChatScreen + WChatScreenController (WFD sohbet)
     bluetooth_scan_screen.dart
     wifid_scan_screen.dart
-test/                     → model/TransferState/Hive + Riverpod provider/i18n unit testleri (flutter test ile çalışır)
+test/                     → model/TransferState + drift repo/şema + Riverpod provider/i18n unit testleri (flutter test ile çalışır)
 
 android/app/src/main/kotlin/com/sondermium/chatblue/
   MainActivity.kt                  → kanal kurulumu, handler yönlendirme, runtime istekleri

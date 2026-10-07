@@ -1,7 +1,9 @@
 import 'package:chatblue/core/models/message_model.dart';
-import 'package:hive_ce/hive.dart';
 
-class ChatSessionModel extends HiveObject {
+/// Plain data model (was `HiveObject` until the drift migration, P1):
+/// sessions/messages persist through `SessionRepository`, which mirrors these
+/// fields 1:1 in the drift `sessions`/`messages` tables.
+class ChatSessionModel {
   /// Transport ids persisted in [transport].
   static const String transportBluetooth = 'bt';
   static const String transportWifiDirect = 'wfd';

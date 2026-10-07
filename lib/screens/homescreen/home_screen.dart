@@ -146,8 +146,8 @@ class _ChatsTab extends ConsumerWidget {
             // Reopen through the chat's own transport: Wi‑Fi Direct
             // sessions in the WFD screen, everything else (Bluetooth and
             // legacy untagged sessions) in the Bluetooth screen.
-            // The home list follows via the box.watch() stream — no
-            // manual refresh needed after the chat closes.
+            // The home list follows via the drift stream — no manual
+            // refresh needed after the chat closes.
             if (isWifi) {
               navigatorKey.currentState!.push(
                 MaterialPageRoute(

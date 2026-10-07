@@ -1,12 +1,12 @@
 # Project Overview: ChatBlue
 
 ## Project Description
-ChatBlue is a Flutter-based peer-to-peer chat application supporting **two transports**: Bluetooth Classic (RFCOMM) and Wi‑Fi Direct (P2P over framed TCP sockets). Both transports are implemented natively in Kotlin and exposed via Platform Channels. State management is mid-migration from GetX to Riverpod (app state — locale, theme, session list, both transports — runs on Riverpod providers; the chat screens still run on GetX controllers bridged to them); chat sessions and messages are persisted locally with Hive (CE), including image message transfer with progress tracking. The UI follows a modern navy/cyan design language with full light/dark theming.
+ChatBlue is a Flutter-based peer-to-peer chat application supporting **two transports**: Bluetooth Classic (RFCOMM) and Wi‑Fi Direct (P2P over framed TCP sockets). Both transports are implemented natively in Kotlin and exposed via Platform Channels. State management is mid-migration from GetX to Riverpod (app state — locale, theme, session list, both transports — runs on Riverpod providers; the chat screens still run on GetX controllers bridged to them); chat sessions, messages and app settings are persisted locally with drift (SQLite) — Hive (CE) was removed after a device-verified migration — including image message transfer with progress tracking. The UI follows a modern navy/cyan design language with full light/dark theming.
 
 ## Architecture
 - **Framework**: Flutter
 - **State Management**: Riverpod 3 for app-level state (locale, theme, session list, transports — notifiers + immutable state) with the GetX chat side bridged over `lib/controllers/transport_adapter.dart` (the chat screens themselves are still GetX during the migration)
-- **Local Storage**: Hive (CE) with codegen (`hive_ce_generator`) — chat sessions + theme mode (`settings` box)
+- **Local Storage**: drift (SQLite) with codegen (`drift_dev`) — chat sessions + messages + app settings (theme mode, locale, device id) in `chatblue.sqlite`; legacy Hive (CE) boxes remain on old devices as inert files (data was carried over by one-time importers during the migration)
 - **Bluetooth (Classic)**: Custom Android native implementation via Platform Channels
 - **Wi‑Fi Direct (P2P)**: Custom Android native implementation via Platform Channels
 - **Platform Channels**:
@@ -16,10 +16,10 @@ ChatBlue is a Flutter-based peer-to-peer chat application supporting **two trans
   - Wi‑Fi Direct
     - MethodChannel: `com.sondermium.chatblue/wd` (isWifiP2pSupported, requestWifiDirectPermissions, startDiscovery, stopDiscovery, getDiscoveredPeers, requestPeers, clearDiscoveredPeers, createGroup, removeGroup, connect, disconnect, isConnected, sendString, sendBytes)
     - EventChannels: `com.sondermium.chatblue/wd_scan` (started/peer/finished), `com.sondermium.chatblue/wd_socket` (connected/disconnected/data/progress)
-- **Data Models**: `ChatSessionModel` and `MessageModel` (HiveObject) in `lib/core/models` — sessions carry a persisted `transport` tag (`'bt'`/`'wfd'`; adapter index 6, null on old records)
+- **Data Models**: `ChatSessionModel` and `MessageModel` (plain data classes since the drift migration) in `lib/core/models` — sessions carry a persisted `transport` tag (`'bt'`/`'wfd'`; null on old records)
 - **Services**:
-  - `HiveService` — Hive init + CRUD on `chat_sessions` box (`lib/core/services/hive_service.dart`); `to` prefers a static `instance` over the GetX registry (migration-decoupled) and `chatSessionsBox` feeds the home stream
-  - `themeModeProvider` / `localeProvider` — persistent theme mode + app language (en/tr) in the same `settings` box as Riverpod notifiers (`lib/providers/app_providers.dart`); first launch follows the device language (TR device → Turkish, else English); the locale setter also mirrors into `Get.updateLocale` so the legacy `.tr` chat strings follow the selection
+  - `SessionRepository` — drift CRUD for sessions/messages (`lib/data/session_repository.dart`); `instance` bridges legacy GetX call sites and `watchSessions()` feeds the home list; `SettingsRepository` — drift key/value store with a startup cache (`lib/data/settings_repository.dart`; theme mode/locale/device id)
+  - `themeModeProvider` / `localeProvider` — persistent theme mode + app language (en/tr) in the drift settings store as Riverpod notifiers (`lib/providers/app_providers.dart`); first launch follows the device language (TR device → Turkish, else English); the locale setter also mirrors into `Get.updateLocale` so the legacy `.tr` chat strings follow the selection
   - `BtClassicService` — Bluetooth ops with typed event streams + callbacks (`lib/core/services/bt_classic_service.dart`) over `BtPlatformChannel`
   - `WifiDirectService` — Wi‑Fi Direct ops, same pattern (`lib/core/services/wd_service.dart`) over `WdPlatformChannel`
 - **Theming**: `AppTheme` (light/dark, cyan seed, navy canvas) in `lib/core/theme/app_theme.dart`; chat screens use a theme-aware `ChatPalette` (dark = navy glass, light = bright variant)
@@ -27,7 +27,7 @@ ChatBlue is a Flutter-based peer-to-peer chat application supporting **two trans
   - `BtTransportNotifier` / `WdTransportNotifier` — Riverpod ports of the former GetX transport controllers (scan/socket lifecycle, two-stage handshake, connect + awaiting-acceptance, WFD discovery-based reconnect; immutable state + a key-based `translate` hook so the notifiers stay GetX-free) in `lib/providers/transport_providers.dart`; exposed app-wide via `btTransportProvider`/`wdTransportProvider`
   - `BtTransportAdapter` / `WdTransportAdapter` — the GetX↔Riverpod bridge (`lib/controllers/transport_adapter.dart`): implement the Rx `ChatTransport` surface over the notifiers for the GetX chat side (state mirrored via `container.listen(…, fireImmediately: true)`)
   - `ChatTransport` — shared interface over both transports (`lib/controllers/chat_transport.dart`): connection state, send/message APIs, `connectToPeer(address)`, `connectToSessionPeer(address, name)` (session reconnect — BT dials the stored MAC, WFD discovers the peer first), `lastConnectError`, `onChatOpened()`/`onChatClosed()`, `transportType` (`'bt'`/`'wfd'` — tags chat sessions)
-  - `homeSessionsProvider` — chat session list (live `box.watch()` stream + delete, replacing HomeController's load/refresh flows) (`lib/providers/home_providers.dart`)
+  - `homeSessionsProvider` — chat session list (live drift `watchSessions()` stream + delete, replacing HomeController's load/refresh flows) (`lib/providers/home_providers.dart`)
   - `ChatScreenControllerBase` — single implementation of the conversation logic (messages, image transfers, persistence, history sync, send queue) shared by both transports (`lib/screens/chat_screen_controller_base.dart`); stamps the `transport` tag on sessions; history sync re-arms on every disconnect (per-connection)
   - `BChatScreenController` / `WChatScreenController` — thin subclasses binding the transport adapter (`ensureRegistered<BtTransportAdapter>(BtTransportAdapter())` / `WdTransportAdapter`)
 - **Screens**:
@@ -37,13 +37,13 @@ ChatBlue is a Flutter-based peer-to-peer chat application supporting **two trans
   - `WifiDirectScanScreen` — WFD discovery/server (group) mode/connect
   - `BChatScreen` / `WChatScreen` — per-transport conversation UI built from the shared `chat_ui` kit (ChatAppBar, ChatMessageList, ChatMessageBubble, ChatInputBar, ChatSyncBanner, Connect bar, image preview)
 - **UI Kit**: `lib/screens/chat_ui/chat_ui.dart` — shared modern chat widgets (navy/cyan, gradient bubbles, glass surfaces, theme-aware `ChatPalette`)
-- **Entry Point**: `main.dart` — plain `main()` builds the `ProviderContainer` (HiveService override + `rootProviderContainer`) inside `UncontrolledProviderScope`; `MyApp` is a `ConsumerWidget`: Sizer + GetMaterialApp (`theme`/`darkTheme` from `AppTheme`, `themeMode`/`locale` watched from providers, gen-l10n `localizationsDelegates`/`supportedLocales`), async `HiveService` init (fail-open), `HomeScreen` as home
+- **Entry Point**: `main.dart` — plain `main()` builds the `ProviderContainer` (drift database override + `rootProviderContainer`) inside `UncontrolledProviderScope`; `MyApp` is a `ConsumerWidget`: Sizer + GetMaterialApp (`theme`/`darkTheme` from `AppTheme`, `themeMode`/`locale` watched from providers, gen-l10n `localizationsDelegates`/`supportedLocales`), async drift init + settings-cache load (fail-open), `HomeScreen` as home
 
 ## Key Dependencies
 - get, sizer, auto_size_text
 - flutter_riverpod, riverpod (state management — migration target)
 - flutter_localizations, intl (gen-l10n)
-- hive_ce, hive_ce_generator, build_runner
+- drift, sqlite3_flutter_libs, drift_dev, build_runner
 - path_provider, uuid
 - image_picker, flutter_image_compress, image_gallery_saver_plus, device_info_plus
 - permission_handler, cupertino_icons
@@ -55,15 +55,15 @@ ChatBlue is a Flutter-based peer-to-peer chat application supporting **two trans
   - `core/`
     - `models/`: `chatsession_model.dart`, `message_model.dart`
     - `platform/`: `bt_platform_channel.dart`, `wd_platform_channel.dart`
-    - `services/`: `bt_classic_service.dart`, `wd_service.dart`, `hive_service.dart`
+    - `services/`: `bt_classic_service.dart`, `wd_service.dart`, `device_id_service.dart`
     - `translations/`: `app_translations.dart` (GetX Translations — en_US/tr_TR UI strings; still consumed by the GetX chat screens)
     - `l10n/`: `app_en.arb` + `app_tr.arb` + generated `app_localizations*.dart` (gen-l10n; `l10n.yaml` at the repo root; consumed by the ported screens)
     - `theme/`: `app_theme.dart` (light/dark ThemeData)
-    - `hive/`: `hive_adapters.dart` (`@GenerateAdapters`) + generated `.g.dart` files
+  - `data/`: `db/` (`tables.dart`, `app_database.dart` + generated), `session_repository.dart`, `settings_repository.dart`
   - `controllers/`: `transport_adapter.dart` (GetX↔Riverpod bridge), `chat_transport.dart` (interface)
   - `providers/`: `app_providers.dart`, `home_providers.dart`, `transport_providers.dart`
   - `screens/`: `chat_screen_controller_base.dart`, `chat_ui/` (chat_ui.dart — shared chat widget kit), `homescreen/` (home_screen.dart — Riverpod Consumer), `settings/` (settings_screen.dart), `b_chatscreen/` (b_chat_screen + b_chatscreen_controller), `w_chatscreen/` (w_chat_screen + w_chatscreen_controller), `bluetooth_scan_screen.dart`, `wifid_scan_screen.dart`
-- `test/`: unit tests — model serialization, `TransferState`, Hive persistence contract, Riverpod providers (app/home/transport), gen-l10n i18n
+- `test/`: unit tests — model serialization, `TransferState`, drift repositories + schema rebuild, Riverpod providers (app/home/transport), gen-l10n i18n
 - `android/`: Gradle config + native Kotlin
   - `app/src/main/kotlin/com/sondermium/chatblue/`: `MainActivity.kt`, `BluetoothClassicManager.kt`, `WifiDirectManager.kt`
 - `ios/`: scaffolding removed; iOS target not configured on this branch
@@ -72,14 +72,14 @@ ChatBlue is a Flutter-based peer-to-peer chat application supporting **two trans
 - Android Bluetooth Classic (`BluetoothClassicManager`): discovery with RSSI, bonded devices, discoverable request, RFCOMM SPP server/client (accept + connect threads), framed byte-stream protocol, string/byte transfer with progress callbacks, known-address persistence via SharedPreferences. The accept loop stays alive after a connection (peers can reconnect to an already-started server; a new peer replaces the current socket with "replaced").
 - Android Wi‑Fi Direct (`WifiDirectManager`): peer discovery, group creation/removal (GO negotiation), client connection via WifiP2pInfo, TCP server/client socket threads with the same framed protocol and progress events; server thread also keeps accepting (same reconnect semantics); permission feature checks.
 - Framed protocol: message frames carry a type flag ('text' vs 'bytes') and a 4-byte length; both managers emit `onTransferProgress(direction, current, total, kind)` and `onSocketData(bytes, text, kind)` on separate reader threads; writes run on a single-thread executor (atomic frames, FIFO order).
-- `HiveService` persists sessions in the `chat_sessions` box; sessions keyed by id, sorted by `updatedAt`; `MessageModel` stores `imagePath` (not in-memory bytes) plus optional transfer state fields.
+- `SessionRepository` persists sessions/messages in drift (sessions keyed by id, sorted by `updatedAt`; full-state writes in one transaction); `MessageModel` stores `imagePath` (not in-memory bytes) plus optional transfer state fields.
 - **History sync** (`ChatScreenControllerBase`, SHA-256 based): on (re)connection each side sends a tiny **manifest** — digests of its last 10 messages (text: `sha256(text)`, images/voice: `sha256(file bytes)` + occurrence count). The peer compares against its local set and **requests only what it actually misses**; requested messages travel as `message` packets, each media file in its own packet (base64, ≤ 3 MB). When both sides match, no payload is transferred at all. Dedup uses (text + direction + ±10 s) with the SHA content-hash as fallback. Sync runs once per chat screen, outside the user send queue; a thin "Syncing history…" banner shows frame progress.
 - **Send queue**: user text/image sends are serialized in a FIFO queue — an in-flight image transfer never interleaves with other sends; bubbles appear immediately, writes are ordered.
 - Image messages: outgoing images are compressed pre-send; both directions use progress bubbles that finalize to image bubbles once transfer completes; incoming bytes saved under application documents directory (background isolate).
 - Chat UX: connection status in the header (glowing dot), composer hidden when disconnected and replaced by a **Connect** button that reconnects to the session's device — Bluetooth dials the stored MAC; Wi‑Fi Direct runs peer discovery and connects on an address/name match (`connectToSessionPeer`), surfacing the native failure reason (`lastConnectError`) when nothing is found; clearing conversation and full-screen image preview with save-to-gallery (Android 13+ `Permission.photos`/`READ_MEDIA_IMAGES`, older `Permission.storage`; iOS `photosAddOnly`/`photos`).
-- **Voice messages**: tap-to-record (mic button in the composer, runtime `RECORD_AUDIO`), live "Recording 0:12 · Cancel" banner, automatic cut-off & send at 120 s. Files are AAC-LC (.m4a) written to app documents; a short announcement frame (`@@CHATBLUE_AUDIO@@{"duration":…}`) precedes the bytes; transfers reuse the image byte channel (progress bubbles). Voice bubbles offer play/pause, a draggable seek slider and ±10 s jumps (single `just_audio` player); messages persist as `transferKind: 'audio'` + file path (no new Hive fields) and sync as `type: "audio"` packets.
+- **Voice messages**: tap-to-record (mic button in the composer, runtime `RECORD_AUDIO`), live "Recording 0:12 · Cancel" banner, automatic cut-off & send at 120 s. Files are AAC-LC (.m4a) written to app documents; a short announcement frame (`@@CHATBLUE_AUDIO@@{"duration":…}`) precedes the bytes; transfers reuse the image byte channel (progress bubbles). Voice bubbles offer play/pause, a draggable seek slider and ±10 s jumps (single `just_audio` player); messages persist as `transferKind: 'audio'` + file path (no new model fields) and sync as `type: "audio"` packets.
 - Dialog/snackbar hygiene: loading dialogs are closed via the root navigator (GetX snackbars are overlay entries, not routes), never via `Get.back()` while a snackbar is open; socket errors are logged only (no snackbar spam); scan errors still surface.
-- Progress bubbles are tracked by message id (bubble UUID); Hive writes are debounced (250 ms) and flushed on close; outgoing images are compressed exactly once.
+- Progress bubbles are tracked by message id (bubble UUID); session writes are debounced (250 ms) and flushed on close; outgoing images are compressed exactly once.
 - Chat screens use `PopScope` to warn before leaving while a transfer is in flight; theme-aware dialogs (`ChatPalette` via `Get.context`).
 - `analysis_options.yaml` excludes `build/**` and `android/**` from analysis.
 
@@ -92,6 +92,7 @@ ChatBlue is a Flutter-based peer-to-peer chat application supporting **two trans
 - Manifest: `WRITE_EXTERNAL_STORAGE maxSdkVersion=29` overrides `image_gallery_saver_plus`'s 28 via `tools:replace`; `requestLegacyExternalStorage="true"`
 
 ## Recent Changes (This Branch)
+- **Persistence migration: Hive (CE) → drift (SQLite) — phases P1–P3 complete**: chat sessions/messages (P1) and app settings — `themeMode`, `locale`, `device_id` (P2) — moved to `chatblue.sqlite`; legacy data was carried over by one-time, idempotent importers (single transaction + done-flag; `device_id` copied byte-for-byte — peers key WFD sessions on it) and Hive was then fully removed (P3: `hive_ce`/`hive_ce_generator` dependencies, `HiveService`, `lib/core/hive/`, both importers, Hive-annotated models). New: `lib/data/session_repository.dart` (drift CRUD + reactive `watchSessions()`), `lib/data/settings_repository.dart` (startup-cached key/value store), drift schema `v3` with rebuild-on-mismatch (foreign pre-release files — the abandoned experiment's v1/v2 — are rebuilt on open, clearing `app_settings`). Device-verified on Redmi + J7 Prime: import rendered, BT connect + two-stage accept, history sync, live message both ways, message + list survive restarts on both ends, theme/language change → restart → persists, `device_id` byte-identical (no WFD duplicate risk). Tests: `session_repository_test`, `home_providers_test` (rewritten), `app_providers_test` (rewritten), `schema_rebuild_test`; Hive tests removed. `flutter analyze lib` → 0.
 - **GetX→Riverpod state migration — app state + transports ported, chat side bridged**: app-level state moved to Riverpod 3.4.3 while the GetX chat screens run unchanged behind an adapter:
   - new `lib/providers/`: `app_providers.dart` (`themeModeProvider`/`localeProvider` notifiers persisted in the shared `settings` box — replacing ThemeService/LocaleService — plus global `navigatorKey`/`scaffoldMessengerKey` and the `rootProviderContainer` bridge hook), `home_providers.dart` (`homeSessionsProvider` — live session list off the Hive `box.watch()` stream, replacing HomeController's load/refresh flows — plus `deleteChatSessionProvider`), `transport_providers.dart` (full Riverpod ports of the former GetX controllers: scan/socket lifecycle, two-stage handshake, `connectToPeer` with awaiting-acceptance, discovery-based WFD session reconnect; immutable state + a key-based `translate` hook so the notifiers stay GetX-free — chat opens route through `navigatorKey`, snackbars through `scaffoldMessengerKey`)
   - new `lib/controllers/transport_adapter.dart`: GetX↔Riverpod bridge — `BtTransportAdapter`/`WdTransportAdapter` implement the Rx `ChatTransport` surface over the notifiers; `container.listen(…, fireImmediately: true)` mirrors the CURRENT state at creation (without it, a chat opened after the link was up rendered "not connected" — Connect button, no composer; verified live on device)

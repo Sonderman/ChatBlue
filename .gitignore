@@ -12,6 +12,7 @@
 .swiftpm/
 .cursor/
 .hermes/
+.flutter_mcp/
 migrate_working_dir/
 
 # gen-l10n generated localizations (regenerated on build)
