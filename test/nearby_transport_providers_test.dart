@@ -167,6 +167,33 @@ void main() {
       expect(notifier.transportType, 'nearby');
     });
 
+    test('connect keeps discovery running (request needs an active scan)',
+        () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final notifier = c.read(nearbyTransportProvider.notifier);
+      await pumpEventQueue();
+
+      await notifier.startScan();
+      service.onScanStarted?.call();
+      expect(c.read(nearbyTransportProvider).isScanning, isTrue);
+
+      final connectFuture = notifier.connectToPeer('ep-1');
+      await pumpEventQueue();
+
+      // The dial must not tear the scan down before requesting.
+      expect(service.stopScanCalls, 0);
+      expect(service.connectCalls, ['ep-1']);
+
+      service.onSocketConnected?.call(
+        NearbyPeerInfo(endpointId: 'ep-1', endpointName: 'Redmi', uid: 'uid-1'),
+      );
+      expect(await connectFuture, isTrue);
+      final state = c.read(nearbyTransportProvider);
+      expect(state.isConnected, isTrue);
+      expect(state.isScanning, isFalse); // the success path clears it
+    });
+
     test('rejected resolves the dial false with the declined message', () async {
       final c = container();
       addTearDown(c.dispose);
@@ -376,8 +403,12 @@ class FakeNearbyService extends NearbyService {
     startScanCalls.add(uid);
   }
 
+  int stopScanCalls = 0;
+
   @override
-  Future<void> stopScan() async {}
+  Future<void> stopScan() async {
+    stopScanCalls++;
+  }
 
   @override
   Future<void> connect(String endpointId, {required String uid, required String name}) async {

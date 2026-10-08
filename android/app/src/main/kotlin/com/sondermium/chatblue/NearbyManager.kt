@@ -204,6 +204,9 @@ class NearbyManager(private val context: Context) {
         val c = client ?: return onScanError?.invoke("Nearby service unavailable") ?: Unit
         endpointNames.clear()
         endpointUids.clear()
+        // A fresh scan starts a fresh session: a marker left behind by a
+        // dead attempt would suppress the next incoming request's banner.
+        outgoingEndpointId = null
         advStarted.set(false)
         discStarted.set(false)
         startedEmitted.set(false)
@@ -331,6 +334,12 @@ class NearbyManager(private val context: Context) {
             val uiIncoming = remoteInitiated && !isOurTarget
             if (!uiIncoming) {
                 runCatching { client?.acceptConnection(endpointId, payloadCallback) }
+                if (isOurTarget) {
+                    // The marker's job (suppressing this endpoint's redundant
+                    // initiation) is done — keeping it would silently suppress
+                    // FUTURE banners, e.g. after a dead attempt left it stale.
+                    outgoingEndpointId = null
+                }
             }
 
             this@NearbyManager.onConnectionInitiated?.invoke(

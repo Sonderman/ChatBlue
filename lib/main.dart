@@ -67,6 +67,7 @@ class MyApp extends ConsumerWidget {
         title: appName,
         debugShowCheckedModeBanner: false,
         navigatorKey: navigatorKey,
+        scaffoldMessengerKey: scaffoldMessengerKey,
         translations: AppTranslations(),
         locale: ref.watch(localeProvider),
         fallbackLocale: const Locale('en', 'US'),

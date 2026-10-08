@@ -143,10 +143,20 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   BtDeviceInfo? _pendingRemote;
   bool _pendingAccept = false;
   Timer? _serverAutoStopTimer;
+  Timer? _scanSessionTimer;
+  Timer? _scanRearmTimer;
   void Function(Uint8List bytes, String text, {required String kind})?
       _chatDataCallback;
 
   static const String _connectReadyFrame = '@@CHATBLUE_CONNECT@@';
+
+  /// Scan session length: Android discovery runs in ~12 s windows, so they
+  /// are re-armed back-to-back for this long before the scan auto-stops.
+  static const Duration _scanSessionDuration = Duration(minutes: 1);
+
+  /// Pause between discovery windows — give the stack a beat to tear the
+  /// finished cycle down before the next `startDiscovery`.
+  static const Duration _scanRearmDelay = Duration(seconds: 1);
 
   @override
   BtTransportState build() {
@@ -155,6 +165,8 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     unawaited(_init());
     ref.onDispose(() {
       _serverAutoStopTimer?.cancel();
+      _scanSessionTimer?.cancel();
+      _scanRearmTimer?.cancel();
       _service.stopServer();
       _service.stopScan();
       _service.dispose();
@@ -174,10 +186,15 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
 
   void _wireCallbacks() {
     _service.onScanStarted = () {
-      state = state.copyWith(isScanning: true, scanResults: const []);
+      // No list reset here: re-armed windows would blank the live list
+      // mid-session — `startScan()` clears once, at session start.
+      state = state.copyWith(isScanning: true);
     };
 
     _service.onDeviceFound = (d) {
+      // Stale late events (SDP replies landing after a window died) must
+      // not repopulate the list while no scan is on.
+      if (_scanSessionTimer == null && !state.isScanning) return;
       final results = [...state.scanResults];
       final idx = results.indexWhere((e) => e.address == d.address);
       if (idx == -1) {
@@ -188,8 +205,18 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
       state = state.copyWith(scanResults: results);
     };
 
+    // Live-view semantics: the Nearby Devices list reflects the scan
+    // session — empty while no scan runs; kept while the session's
+    // discovery windows are re-armed.
     _service.onScanFinished = () {
-      state = state.copyWith(isScanning: false);
+      if (_scanSessionTimer != null) {
+        // A ~12 s window ended mid-session: keep the mode and the list,
+        // queue the next window.
+        if (kDebugMode) debugPrint('Scan window finished; re-arming');
+        _scheduleScanRearm();
+        return;
+      }
+      state = state.copyWith(isScanning: false, scanResults: const []);
       if (kDebugMode) debugPrint('Scan finished');
     };
 
@@ -197,7 +224,8 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
       if (kDebugMode && showDebugLogs) {
         debugPrint('Scan error: $message');
       }
-      state = state.copyWith(isScanning: false);
+      _clearScanTimers();
+      state = state.copyWith(isScanning: false, scanResults: const []);
       _showSnackbar('scanErrorTitle', message);
     };
 
@@ -252,14 +280,16 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     _service.onSocketData = _dispatchSocketData;
   }
 
-  /// Snackbar with a translated message.
+  /// Snackbar with a translated message. [messageKeyOrRaw] may be a
+  /// translation key or raw text (native errors): keys translate, raw
+  /// text passes through the translator unchanged.
   void _showSnackbar(String titleKey, String messageKeyOrRaw) {
     final messenger = scaffoldMessengerKey.currentState;
     if (messenger == null) return;
     messenger.showSnackBar(
       SnackBar(
         content: Text(
-          '${translate(titleKey)}: $messageKeyOrRaw',
+          '${translate(titleKey)}: ${translate(messageKeyOrRaw)}',
         ),
       ),
     );
@@ -306,13 +336,44 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   }
 
   Future<void> startScan() async {
+    _clearScanTimers();
     state = state.copyWith(scanResults: const []);
-    await _service.startScan(autoStopAfter: const Duration(seconds: 60));
+    // The session deadline lives here, not in the service: every re-arm
+    // would cancel a service-side auto-stop timer.
+    _scanSessionTimer = Timer(_scanSessionDuration, stopScan);
+    await _service.startScan();
   }
 
   Future<void> stopScan() async {
+    _clearScanTimers();
     await _service.stopScan();
-    state = state.copyWith(isScanning: false);
+    // Live-view semantics: stopping the scan empties the nearby list.
+    state = state.copyWith(isScanning: false, scanResults: const []);
+  }
+
+  /// Cancels the session deadline and any pending window re-arm.
+  void _clearScanTimers() {
+    _scanSessionTimer?.cancel();
+    _scanSessionTimer = null;
+    _scanRearmTimer?.cancel();
+    _scanRearmTimer = null;
+  }
+
+  /// Queues the next discovery window while the session is still running.
+  void _scheduleScanRearm() {
+    _scanRearmTimer?.cancel();
+    _scanRearmTimer = Timer(_scanRearmDelay, _rearmScan);
+  }
+
+  Future<void> _rearmScan() async {
+    _scanRearmTimer = null;
+    if (_scanSessionTimer == null) return; // session ended meanwhile
+    if (kDebugMode) debugPrint('Re-arming scan');
+    try {
+      await _service.startScan();
+    } catch (e) {
+      if (kDebugMode) debugPrint('Scan re-arm failed: $e');
+    }
   }
 
   void onChatOpened() => _chatOpen = true;
@@ -366,6 +427,23 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
         _openChat();
       },
       onDecline: () {
+        if (!_pendingAccept) {
+          state = state.copyWith(
+            connectedDevice: null,
+            isConnected: false,
+            clearConnectedDevice: true,
+          );
+          _service.disconnect();
+          // Feedback for the DECLINING side (same as the Nearby flow):
+          // without it the banner just vanishes without confirmation.
+          _showSnackbar(
+            'connectionDeclinedTitle',
+            'connectionDeclinedByYouMessage',
+          );
+        }
+      },
+      onTimeout: () {
+        // Expiry is not a user decision: disconnect silently.
         if (!_pendingAccept) {
           state = state.copyWith(
             connectedDevice: null,
@@ -1086,6 +1164,28 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
         _openChat();
       },
       onDecline: () {
+        if (!_pendingAccept) {
+          state = state.copyWith(
+            connectedDevice: null,
+            isConnected: false,
+            clearConnectedDevice: true,
+          );
+          _service.disconnect();
+          // Feedback for the DECLINING side (same as the BT/Nearby flows):
+          // without it the banner just vanishes without confirmation.
+          final messenger = scaffoldMessengerKey.currentState;
+          messenger?.showSnackBar(
+            SnackBar(
+              content: Text(
+                '${translate('connectionDeclinedTitle')}: '
+                '${translate('connectionDeclinedByYouMessage')}',
+              ),
+            ),
+          );
+        }
+      },
+      onTimeout: () {
+        // Expiry is not a user decision: disconnect silently.
         if (!_pendingAccept) {
           state = state.copyWith(
             connectedDevice: null,

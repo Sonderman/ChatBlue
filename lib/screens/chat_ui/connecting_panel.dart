@@ -7,6 +7,7 @@
 import 'dart:async';
 
 import 'package:chatblue/l10n/app_localizations.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 /// How the connecting panel closed.
@@ -76,15 +77,24 @@ class _ConnectingSheetState extends State<_ConnectingSheet> {
   @override
   void initState() {
     super.initState();
-    unawaited(_run());
+    // Run the dial AFTER the build phase. Invoking connect() from
+    // initState runs it inside the widget-build stack, and any Riverpod
+    // state write in its synchronous part throws ("Tried to modify a
+    // provider while the widget tree was building") — the throw used to be
+    // swallowed below, so the panel closed instantly and the connection
+    // request was never sent (Nearby hit exactly this).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_run());
+    });
   }
 
   Future<void> _run() async {
     try {
       await widget.connect();
-    } catch (_) {
-      // The screen's logic judges outcomes from state; never leave the
-      // panel hanging on an unexpected throw.
+    } catch (e) {
+      // Never leave the panel hanging on an unexpected throw — and keep the
+      // error visible: a swallowed one hides real bugs.
+      if (kDebugMode) debugPrint('[connect panel] connect threw: $e');
     }
     _close(ConnectingOutcome.done);
   }

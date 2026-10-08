@@ -50,6 +50,52 @@ void main() {
 
       service.onScanFinished?.call();
       expect(c.read(btTransportProvider).isScanning, isFalse);
+      // Live-view semantics: leaving scan mode empties the nearby list.
+      expect(c.read(btTransportProvider).scanResults, isEmpty);
+    });
+
+    test('stopScan empties the nearby list (live-view semantics)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      c.read(btTransportProvider); // trigger build (wires service callbacks)
+
+      service.onScanStarted?.call();
+      service.onDeviceFound?.call(
+        BtDeviceInfo(address: 'AA:BB:CC', name: 'PeerOne'),
+      );
+      expect(c.read(btTransportProvider).scanResults, isNotEmpty);
+
+      await c.read(btTransportProvider.notifier).stopScan();
+      final state = c.read(btTransportProvider);
+      expect(state.isScanning, isFalse);
+      expect(state.scanResults, isEmpty);
+    });
+
+    test('scan session re-arms windows and keeps the live list', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final notifier = c.read(btTransportProvider.notifier);
+
+      await notifier.startScan(); // starts the 1-minute session
+      service.onScanStarted?.call();
+      service.onDeviceFound?.call(
+        BtDeviceInfo(address: 'AA:BB:CC', name: 'PeerOne'),
+      );
+      expect(c.read(btTransportProvider).scanResults, isNotEmpty);
+
+      // Window end mid-session: the scan stays on, the live list keeps its
+      // results, and the next discovery window is re-armed.
+      service.onScanFinished?.call();
+      expect(c.read(btTransportProvider).isScanning, isTrue);
+      expect(c.read(btTransportProvider).scanResults, isNotEmpty);
+
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+      expect(service.startScanCalls, 2); // initial + one re-arm
+
+      await notifier.stopScan();
+      final state = c.read(btTransportProvider);
+      expect(state.isScanning, isFalse);
+      expect(state.scanResults, isEmpty);
     });
 
     test('connectToPeer resolves true on socket up; READY frame connects',
@@ -244,8 +290,12 @@ class FakeBtService extends BtClassicService {
   @override
   Future<List<BtDeviceInfo>> getPairedDevices() async => [];
 
+  int startScanCalls = 0;
+
   @override
-  Future<void> startScan({Duration? autoStopAfter}) async {}
+  Future<void> startScan({Duration? autoStopAfter}) async {
+    startScanCalls++;
+  }
 
   @override
   Future<void> stopScan() async {}

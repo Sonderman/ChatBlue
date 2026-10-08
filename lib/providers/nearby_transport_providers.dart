@@ -220,12 +220,14 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
     _cancelledEndpointId = null;
     _dialSettle = Completer<void>();
     state = state.copyWith(lastConnectError: null);
-    if (kDebugMode) debugPrint('Nearby connecting to endpoint: $endpointId');
+    if (kDebugMode) debugPrint('[nearby] connect start: $endpointId');
 
-    if (state.isScanning) {
-      await stopScan();
-    }
-
+    // Deliberately NO stopScan() here: the request must go out while
+    // discovery is still active (Google's own sample requests from inside
+    // onEndpointFound). Stopping it first races stopDiscovery and the
+    // request can fail as unknown-endpoint on some OEM stacks. The success
+    // path stops the scan natively (onConnectionResult); a failed attempt
+    // keeps the list live for an immediate retry.
     final prevConnected = _service.onSocketConnected;
     final prevDisconnected = _service.onSocketDisconnected;
     final prevRejected = _service.onConnectionRejected;
@@ -249,6 +251,9 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
     _service.onSocketDisconnected = (reason) {
       prevDisconnected?.call(reason);
       if (!completer.isCompleted) {
+        // A teardown mid-dial — surface why instead of the generic message.
+        if (kDebugMode) debugPrint('[nearby] connect dropped: $reason');
+        state = state.copyWith(lastConnectError: 'Dropped: $reason');
         completer.complete(false);
       }
     };
@@ -256,14 +261,20 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
     _service.onConnectionRejected = (rejectedEndpointId) {
       prevRejected?.call(rejectedEndpointId);
       if (rejectedEndpointId == endpointId && !completer.isCompleted) {
+        // Give the screen's failure snackbar an accurate reason instead of
+        // the generic "make sure the device is discoverable" message.
+        if (kDebugMode) {
+          debugPrint('[nearby] connect rejected: $rejectedEndpointId');
+        }
+        state = state.copyWith(
+          lastConnectError: translate('connectionDeclinedMessage'),
+        );
         completer.complete(false);
       }
     };
 
     _service.onSocketError = (message) {
-      if (kDebugMode && showDebugLogs) {
-        debugPrint('Nearby socket error during connect: $message');
-      }
+      if (kDebugMode) debugPrint('[nearby] connect socket error: $message');
       state = state.copyWith(lastConnectError: message);
       if (!completer.isCompleted) {
         ConnectionRequestBanner.dismiss();
@@ -277,9 +288,10 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       final uid = _ownUid ??= await DeviceIdService.get();
       await _service.connect(endpointId, uid: uid, name: name);
     } catch (e) {
-      if (kDebugMode && showDebugLogs) {
-        debugPrint('Nearby error initiating connection: $e');
-      }
+      if (kDebugMode) debugPrint('Nearby error initiating connection: $e');
+      // Surface the reason: a throw here (e.g. a native-side error) used to
+      // fail silently with the generic "could not connect" snackbar.
+      state = state.copyWith(lastConnectError: 'Connect error: $e');
       restore();
       return false;
     }
@@ -291,6 +303,9 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
           final bool connected = await _service.isConnected();
           if (connected) return true;
           _pendingAccept = true;
+          if (kDebugMode) {
+            debugPrint('[nearby] connect timeout; awaiting acceptance');
+          }
           return completer.future.timeout(
             connectTimeout,
             onTimeout: () => _service.isConnected(),
@@ -301,8 +316,11 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       if (!result) {
         ConnectionRequestBanner.dismiss();
       }
+      if (kDebugMode) debugPrint('[nearby] connect result: $result');
       return result;
-    } catch (_) {
+    } catch (e) {
+      if (kDebugMode) debugPrint('Nearby connect wait failed: $e');
+      state = state.copyWith(lastConnectError: 'Connect wait error: $e');
       restore();
       return false;
     }

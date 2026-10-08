@@ -23,65 +23,34 @@ class BluetoothScanScreen extends ConsumerWidget {
       appBar: AppBar(title: Text(l10n.discoverConnectTitle), centerTitle: true),
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor:
-                            state.isServerModeActive ? Colors.green : null,
-                        foregroundColor:
-                            state.isServerModeActive ? Colors.white : null,
-                      ),
-                      onPressed: state.isServerModeActive
-                          ? notifier.stopServer
-                          : () async {
-                              notifier.startServer();
-                            },
-                      child: Text(
-                        state.isServerModeActive
-                            ? l10n.stopDiscoverable
-                            : l10n.makeDiscoverable,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: state.isScanning ? Colors.green : null,
-                        foregroundColor: state.isScanning ? Colors.white : null,
-                      ),
-                      onPressed: state.isScanning
-                          ? notifier.stopScan
-                          : () async {
-                              notifier.startScan();
-                            },
-                      child: Text(
-                        state.isScanning ? l10n.stopScanning : l10n.scanForDevices,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
           Expanded(
             child: DefaultTabController(
               length: 2,
               child: Column(
                 children: [
                   TabBar(
+                    // Long TR labels (plus the system's larger font scale on
+                    // MIUI) clipped inside the half-width tabs — tighter
+                    // label padding + scale-down keeps both fully visible.
+                    labelPadding:
+                        const EdgeInsets.symmetric(horizontal: 8),
                     tabs: [
-                      Tab(text: l10n.nearbyDevices('${state.scanResults.length}')),
-                      Tab(text: l10n.pairedDevices('${state.pairedDevices.length}')),
+                      Tab(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            l10n.nearbyDevices('${state.scanResults.length}'),
+                          ),
+                        ),
+                      ),
+                      Tab(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            l10n.pairedDevices('${state.pairedDevices.length}'),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
                   Expanded(
@@ -138,6 +107,79 @@ class BluetoothScanScreen extends ConsumerWidget {
                   ),
                 ],
               ),
+            ),
+          ),
+          // Primary actions at the bottom (same layout as the WFD/Nearby
+          // scan screens): full-width buttons, green while active.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: FilledButton.icon(
+                    style: state.isServerModeActive
+                        ? FilledButton.styleFrom(
+                            backgroundColor: Colors.green,
+                            foregroundColor: Colors.white,
+                          )
+                        : null,
+                    onPressed: state.isServerModeActive
+                        ? notifier.stopServer
+                        : () async {
+                            notifier.startServer();
+                          },
+                    icon: Icon(
+                      state.isServerModeActive
+                          ? Icons.visibility_off
+                          : Icons.visibility,
+                    ),
+                    label: Text(
+                      state.isServerModeActive
+                          ? l10n.stopDiscoverable
+                          : l10n.makeDiscoverable,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: FilledButton.icon(
+                    style: state.isScanning
+                        ? FilledButton.styleFrom(
+                            backgroundColor: Colors.green,
+                            foregroundColor: Colors.white,
+                          )
+                        : null,
+                    onPressed: state.isScanning
+                        ? notifier.stopScan
+                        : () async {
+                            notifier.startScan();
+                          },
+                    icon: Icon(
+                      state.isScanning
+                          ? Icons.stop
+                          : Icons.bluetooth_searching,
+                    ),
+                    label: Text(
+                      state.isScanning
+                          ? l10n.stopScanning
+                          : l10n.scanForDevices,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
