@@ -83,5 +83,21 @@ void main() {
       expect(restored.messages.single.isSentByMe, true);
       expect(restored.device['address'], 'addr-1');
     });
+
+    test('transport tag survives the round-trip (nearby)', () {
+      final session = ChatSessionModel(
+        id: 'uid-1',
+        name: 'POCO X7',
+        createdAt: DateTime(2026, 10, 8, 0, 0),
+        updatedAt: DateTime(2026, 10, 8, 0, 5),
+        messages: const [],
+        device: {'name': 'POCO X7', 'address': 'uid-1'},
+        transport: ChatSessionModel.transportNearby,
+      );
+
+      final restored = ChatSessionModel.fromJson(session.toJson());
+      expect(restored.transport, ChatSessionModel.transportNearby);
+      expect(restored.transportKind, ChatSessionModel.transportNearby);
+    });
   });
 }

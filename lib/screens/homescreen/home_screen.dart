@@ -5,6 +5,8 @@ import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/providers/home_providers.dart';
 import 'package:chatblue/screens/bluetooth_scan_screen.dart';
 import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
+import 'package:chatblue/screens/n_chatscreen/n_chat_screen.dart';
+import 'package:chatblue/screens/nearby_scan_screen.dart';
 import 'package:chatblue/screens/settings/settings_screen.dart';
 import 'package:chatblue/screens/w_chatscreen/w_chat_screen.dart';
 import 'package:chatblue/screens/wifid_scan_screen.dart';
@@ -51,6 +53,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _ChatsTab(),
           BluetoothScanScreen(),
           WifiDirectScanScreen(),
+          NearbyScanScreen(),
         ],
       ),
       bottomNavigationBar: NavigationBar(
@@ -71,6 +74,10 @@ class _HomeScreenState extends State<HomeScreen> {
           NavigationDestination(
             icon: const Icon(Icons.wifi_tethering),
             label: l10n.wifiTab,
+          ),
+          NavigationDestination(
+            icon: const Icon(Icons.sensors),
+            label: l10n.nearbyTab,
           ),
         ],
       ),
@@ -114,12 +121,18 @@ class _ChatsTab extends ConsumerWidget {
       separatorBuilder: (_, _) => const Divider(height: 1),
       itemBuilder: (context, index) {
         final s = sessions[index];
+        // Which channel this chat runs over — also drives the badge and tap.
+        final String kind = s.transportKind;
+        final bool isNearby = kind == ChatSessionModel.transportNearby;
+        final bool isWifi = kind == ChatSessionModel.transportWifiDirect;
+        // Nearby sessions store the peer uid as the address — a uuid reads
+        // as noise, so the channel label is shown instead.
+        final String addressText =
+            isNearby ? l10n.nearbyTab : (s.device['address'] ?? '');
         final subtitle = StringBuffer()
-          ..write(s.device['address'] ?? '')
+          ..write(addressText)
           ..write('  •  ')
           ..write(_formatDateTime(s.updatedAt));
-        // Which channel this chat runs over — also drives the tap below.
-        final bool isWifi = s.transportKind == ChatSessionModel.transportWifiDirect;
 
         return ListTile(
           leading: CircleAvatar(
@@ -135,20 +148,31 @@ class _ChatsTab extends ConsumerWidget {
           // right edge, so the channel of every chat is visible at a
           // glance.
           trailing: Tooltip(
-            message: isWifi ? l10n.wifiTab : l10n.bluetoothTab,
+            message: isNearby
+                ? l10n.nearbyTab
+                : (isWifi ? l10n.wifiTab : l10n.bluetoothTab),
             child: Icon(
-              isWifi ? Icons.wifi_tethering : Icons.bluetooth,
+              isNearby
+                  ? Icons.sensors
+                  : (isWifi ? Icons.wifi_tethering : Icons.bluetooth),
               size: 20,
               color: scheme.primary,
             ),
           ),
           onTap: () {
-            // Reopen through the chat's own transport: Wi‑Fi Direct
-            // sessions in the WFD screen, everything else (Bluetooth and
-            // legacy untagged sessions) in the Bluetooth screen.
+            // Reopen through the chat's own transport: Nearby → N screen,
+            // Wi‑Fi Direct → W screen, everything else (Bluetooth and
+            // legacy untagged sessions) → Bluetooth screen.
             // The home list follows via the drift stream — no manual
             // refresh needed after the chat closes.
-            if (isWifi) {
+            if (isNearby) {
+              navigatorKey.currentState!.push(
+                MaterialPageRoute(
+                  builder: (_) => const NChatScreen(),
+                  settings: RouteSettings(arguments: s),
+                ),
+              );
+            } else if (isWifi) {
               navigatorKey.currentState!.push(
                 MaterialPageRoute(
                   builder: (_) => const WChatScreen(),

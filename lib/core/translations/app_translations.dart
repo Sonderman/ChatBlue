@@ -139,6 +139,7 @@ class AppTranslations extends Translations {
     'connectionDeclinedTitle': 'Connection declined',
     'connectionDeclinedMessage':
         'The peer declined the request or the link was lost.',
+    'connectionDeclinedByYouMessage': 'You declined the request.',
   };
 
   static const Map<String, String> _tr = {
@@ -269,5 +270,6 @@ class AppTranslations extends Translations {
     'connectionDeclinedTitle': 'Bağlantı reddedildi',
     'connectionDeclinedMessage':
         'Karşı taraf isteği reddetti veya bağlantı koptu.',
+    'connectionDeclinedByYouMessage': 'İsteği siz reddettiniz.',
   };
 }

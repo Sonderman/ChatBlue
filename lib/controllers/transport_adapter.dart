@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:chatblue/controllers/chat_transport.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/providers/app_providers.dart';
+import 'package:chatblue/providers/nearby_transport_providers.dart';
 import 'package:chatblue/providers/transport_providers.dart';
 import 'package:chatblue/screens/w_chatscreen/w_chatscreen_controller.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -150,6 +151,82 @@ class WdTransportAdapter
 
   @override
   void _sync(WdTransportState s) {
+    isConnected.value = s.isConnected;
+    lastDisconnectReason.value = s.lastDisconnectReason;
+    lastConnectError.value = s.lastConnectError;
+  }
+
+  @override
+  String? get connectedDeviceKey => notifier.connectedDeviceKey;
+
+  @override
+  String? get connectedDeviceId => notifier.connectedDeviceId;
+
+  @override
+  String? get connectedDeviceName => notifier.connectedDeviceName;
+
+  @override
+  String get transportType => notifier.transportType;
+
+  @override
+  bool get isAwaitingAcceptance => notifier.isAwaitingAcceptance;
+
+  @override
+  Future<bool> connectToSessionPeer({required String? address, String? name}) =>
+      notifier.connectToSessionPeer(address: address, name: name);
+
+  @override
+  Future<bool> connectToPeer(String address) => notifier.connectToPeer(address);
+
+  @override
+  Future<void> disconnectFromDevice() => notifier.disconnectFromDevice();
+
+  @override
+  Future<void> sendMessage(String message) => notifier.sendMessage(message);
+
+  @override
+  Future<void> sendBytes(Uint8List bytes) => notifier.sendBytes(bytes);
+
+  @override
+  void onChatOpened() => notifier.onChatOpened();
+
+  @override
+  void onChatClosed() => notifier.onChatClosed();
+
+  @override
+  void onSocketData(
+    void Function(Uint8List bytes, String text, {required String kind}) callback,
+  ) =>
+      notifier.onSocketData(callback);
+
+  @override
+  void onTransferProgress(
+    void Function({
+      required String direction,
+      required int current,
+      required int total,
+      required String kind,
+    }) callback,
+  ) =>
+      notifier.onTransferProgress(callback);
+}
+
+/// Nearby Connections chat transport bridge (GetX side). Requires the root
+/// ProviderContainer (attached in `main()`).
+class NearbyTransportAdapter
+    extends _TransportAdapterBase<NearbyTransportNotifier, NearbyTransportState> {
+  NearbyTransportAdapter()
+      : super(
+          nearbyTransportProvider,
+          rootProviderContainer!.read(nearbyTransportProvider.notifier),
+        ) {
+    // GetX çevirileri notifier'ın key-based köprüsüne bağlanır (notifier
+    // GetX'sizdir; ported ekranlar gen_l10n eşlemesini kurar).
+    notifier.translate = (key, {params}) => key.trParams(params ?? const {});
+  }
+
+  @override
+  void _sync(NearbyTransportState s) {
     isConnected.value = s.isConnected;
     lastDisconnectReason.value = s.lastDisconnectReason;
     lastConnectError.value = s.lastConnectError;

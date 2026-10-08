@@ -4,6 +4,7 @@ import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
 import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/providers/transport_providers.dart';
+import 'package:chatblue/screens/chat_ui/connecting_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -97,12 +98,14 @@ class BluetoothScanScreen extends ConsumerWidget {
                                 children: [Text(device.address)],
                               ),
                               leading: const Icon(Icons.bluetooth),
-                              trailing: _buildSignalIndicator(device.rssi),
+                              trailing: _buildSignalIndicator(context, device.rssi),
                               onTap: () => _connect(
                                 context,
                                 ref,
                                 l10n,
                                 () => notifier.connectToDevice(device),
+                                deviceName: device.name,
+                                rssi: device.rssi,
                               ),
                             );
                           },
@@ -124,6 +127,8 @@ class BluetoothScanScreen extends ConsumerWidget {
                                 ref,
                                 l10n,
                                 () => notifier.connectToDevice(device),
+                                deviceName: device.name,
+                                rssi: device.rssi,
                               ),
                             );
                           },
@@ -147,26 +152,36 @@ class BluetoothScanScreen extends ConsumerWidget {
     BuildContext context,
     WidgetRef ref,
     AppLocalizations l10n,
-    Future<bool> Function() attempt,
-  ) async {
-    var loading = true;
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    ).then((_) => loading = false);
-
+    Future<bool> Function() attempt, {
+    String? deviceName,
+    int? rssi,
+  }) async {
+    // Cancellable connecting panel (bottom sheet, closed by route reference
+    // — the chat push may land while it is still up).
     bool? connected;
     Object? error;
-    try {
-      connected = await attempt();
-    } catch (e) {
-      error = e;
-    }
-
-    if (loading && context.mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
-    }
+    final outcome = await showConnectingPanel(
+      context: context,
+      deviceName: deviceName,
+      qualityLabel: rssi == null ? null : _signalQualityLabel(l10n, rssi),
+      connect: () async {
+        try {
+          connected = await attempt();
+        } catch (e) {
+          error = e;
+          return;
+        }
+        // Keep the panel up until the peer accepts (or the dial dies):
+        // a socket-connect alone is not an accepted link yet.
+        if (connected == false &&
+            !ref.read(btTransportProvider.notifier).isAwaitingAcceptance) {
+          return;
+        }
+        await ref.read(btTransportProvider.notifier).dialSettled;
+      },
+      onCancel: ref.read(btTransportProvider.notifier).cancelPendingConnect,
+    );
+    if (outcome == ConnectingOutcome.cancelled) return;
     final messenger = scaffoldMessengerKey.currentState;
     if (error != null) {
       messenger?.showSnackBar(
@@ -200,25 +215,43 @@ class BluetoothScanScreen extends ConsumerWidget {
     // On success the notifier navigates to the chat screen itself.
   }
 
+  /// RSSI → 0-4 quality level (shared by the list indicator and the
+  /// connecting panel's quality line).
+  int _signalLevel(int rssi) {
+    if (rssi >= -50) return 4;
+    if (rssi >= -60) return 3;
+    if (rssi >= -70) return 2;
+    if (rssi >= -80) return 1;
+    return 0;
+  }
+
+  /// Human-readable quality line for the connecting panel (BT is the only
+  /// transport with a caller-available signal metric — the scan RSSI).
+  String _signalQualityLabel(AppLocalizations l10n, int rssi) {
+    String word;
+    switch (_signalLevel(rssi)) {
+      case 4:
+        word = l10n.signalStrong;
+        break;
+      case 3:
+        word = l10n.signalGood;
+        break;
+      case 2:
+        word = l10n.signalFair;
+        break;
+      default:
+        word = l10n.signalWeak;
+    }
+    return '${l10n.signalLabel}: $word ($rssi dBm)';
+  }
+
   // Builds a signal strength indicator based on RSSI (in dBm).
   // Higher (closer to 0) values indicate stronger signal.
-  Widget _buildSignalIndicator(int? rssi) {
+  Widget _buildSignalIndicator(BuildContext context, int? rssi) {
     if (rssi == null) return const SizedBox.shrink();
-    int level;
-    if (rssi >= -50) {
-      level = 4;
-    } else if (rssi >= -60) {
-      level = 3;
-    } else if (rssi >= -70) {
-      level = 2;
-    } else if (rssi >= -80) {
-      level = 1;
-    } else {
-      level = 0;
-    }
 
     IconData icon;
-    switch (level) {
+    switch (_signalLevel(rssi)) {
       case 4:
         icon = Icons.signal_cellular_4_bar;
         break;
@@ -241,7 +274,15 @@ class BluetoothScanScreen extends ConsumerWidget {
       children: [
         Icon(icon, color: Colors.green),
         const SizedBox(height: 2),
-        Text('$rssi dBm', style: const TextStyle(fontSize: 10, color: Colors.black54)),
+        Text(
+          '$rssi dBm',
+          style: TextStyle(
+            fontSize: 10,
+            // Theme-aware: the old hardcoded dark color vanished on dark
+            // themes.
+            color: Theme.of(context).textTheme.bodySmall?.color,
+          ),
+        ),
       ],
     );
   }

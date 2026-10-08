@@ -98,5 +98,20 @@
   "recordingStartFailedMessage": "Kayıt başlatılamadı.",
   "scanErrorTitle": "Tarama hatası",
   "connectionDeclinedTitle": "Bağlantı reddedildi",
-  "connectionDeclinedMessage": "Karşı taraf isteği reddetti veya bağlantı koptu."
+  "connectionDeclinedMessage": "Karşı taraf isteği reddetti veya bağlantı koptu.",
+  "connectionDeclinedByYouMessage": "İsteği siz reddettiniz.",
+  "nearbyTab": "Nearby",
+  "discoverConnectNearbyTitle": "Nearby ile Keşfet ve Bağlan",
+  "btOffForNearby": "Bluetooth kapalı. Yakındaki cihazları bulmak için açın.",
+  "enableBluetooth": "Bluetooth'u Aç",
+  "playServicesRequired": "Nearby için Google Play Services gerekli.",
+  "nearbyNoDevicesFound": "Yakında cihaz bulunamadı — Bluetooth açık ve diğer cihazda uygulama açık mı?",
+  "nearbyTargetNotFound": "Hedef cihaz bulunamadı (yakında {count} cihaz görüldü) — diğer cihazda uygulama açık mı?",
+  "nearbyAdvertisingUnavailable": "Bu cihazın Bluetooth yığını BLE yayınını (advertising) desteklemiyor. Bağlantıyı bu cihazdan başlatabilirsiniz; ancak diğer cihazlar bu cihazı listelerinde göremez.",
+  "connectingTitle": "Bağlanıyor…",
+  "signalLabel": "Sinyal",
+  "signalWeak": "Zayıf",
+  "signalFair": "Orta",
+  "signalGood": "İyi",
+  "signalStrong": "Güçlü"
 }

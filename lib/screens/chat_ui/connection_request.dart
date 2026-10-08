@@ -20,33 +20,44 @@ class ConnectionRequestBanner {
   static Timer? _timer;
 
   /// Shows the request card. [onAccept] fires on Accept (or auto-accept
-  /// never — only manual), [onDecline] on Decline or timeout expiry.
+  /// never — only manual), [onDecline] on a manual Decline tap, and
+  /// [onTimeout] (falling back to [onDecline]) on timeout expiry.
   /// [liveName], when provided, is a listenable that updates the banner
   /// title in place (used when the peer's device name arrives over the
   /// socket right after the request — WFD peers carry no name pre-accept).
+  /// [isChatScreen] positions the card (top over a chat screen, bottom
+  /// elsewhere); callers pass their transport's chat-open flag — the old
+  /// ModalRoute.of(overlay.context) detection is always null (the overlay
+  /// sits above every route scope).
   static void show({
     required String deviceName,
     ValueListenable<String>? liveName,
     required VoidCallback onAccept,
     required VoidCallback onDecline,
+    bool isChatScreen = false,
+    VoidCallback? onTimeout,
     Duration timeout = const Duration(seconds: 15),
   }) {
     _insert(
       deviceName: deviceName,
       liveName: liveName,
+      isChatScreen: isChatScreen,
       onAccept: onAccept,
       onDecline: onDecline,
     );
-    // Auto-decline if the user does not answer in time.
+    // Auto-decline if the user does not answer in time. [onTimeout] (when
+    // given) runs instead of [onDecline] so the expiry path can stay silent
+    // while a manual decline still notifies.
     _timer = Timer(timeout, () {
       dismiss();
-      onDecline();
+      (onTimeout ?? onDecline)();
     });
   }
 
   static void _insert({
     required String deviceName,
     ValueListenable<String>? liveName,
+    required bool isChatScreen,
     required VoidCallback onAccept,
     required VoidCallback onDecline,
   }) {
@@ -66,11 +77,6 @@ class ConnectionRequestBanner {
       onDecline();
       return;
     }
-    // Chat screens are pushed with a route name ending in "ChatScreen"
-    // (BChatScreen / WChatScreen).
-    final bool isChatScreen = (ModalRoute.of(overlay.context)?.settings.name ??
-            '')
-        .contains('ChatScreen');
     final topInset = MediaQuery.paddingOf(ctx).top;
     final bottomInset = MediaQuery.paddingOf(ctx).bottom;
     final l10n = AppLocalizations.of(ctx)!;

@@ -37,6 +37,8 @@ String transportKeyToL10n(
       return l10n.connectionDeclinedTitle;
     case 'connectionDeclinedMessage':
       return l10n.connectionDeclinedMessage;
+    case 'connectionDeclinedByYouMessage':
+      return l10n.connectionDeclinedByYouMessage;
     case 'noDeviceAddressMessage':
       return l10n.noDeviceAddressMessage;
     case 'wifiOffTitle':
@@ -51,6 +53,14 @@ String transportKeyToL10n(
       return l10n.wfdPickDeviceHint;
     case 'unknownDevice':
       return l10n.unknownDevice;
+    case 'playServicesRequired':
+      return l10n.playServicesRequired;
+    case 'btOffForNearby':
+      return l10n.btOffForNearby;
+    case 'nearbyNoDevicesFound':
+      return l10n.nearbyNoDevicesFound;
+    case 'nearbyTargetNotFound':
+      return l10n.nearbyTargetNotFound(params?['count'] ?? '');
   }
   return key;
 }
@@ -127,6 +137,8 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   late BtClassicService _service;
   bool _chatOpen = false;
   bool _outgoingConnect = false;
+  Completer<bool>? _pendingConnectCompleter;
+  Completer<void>? _dialSettle;
   DateTime? _connectInitiatedAt;
   BtDeviceInfo? _pendingRemote;
   bool _pendingAccept = false;
@@ -206,6 +218,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     };
 
     _service.onSocketDisconnected = (reason) {
+      _settleDial();
       final bool wasConnected = state.isConnected;
       state = state.copyWith(isConnected: false);
       ConnectionRequestBanner.dismiss();
@@ -328,16 +341,10 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     _chatOpen = true;
     final nav = navigatorKey.currentState;
     if (nav == null) return; // no UI mounted (tests / cold start)
-    // The scan screen's loading dialog may still be on top: dismiss it
-    // BEFORE pushing the chat screen, so no later pop (which removes the
-    // top route) can ever close the chat screen by mistake. Only a real
-    // DialogRoute counts (ported screens use showDialog) — a pushed route
-    // (e.g. Settings) on top is never dismissed.
-    final overlayCtx = nav.overlay?.context;
-    final topRoute = overlayCtx != null ? ModalRoute.of(overlayCtx) : null;
-    if (topRoute is DialogRoute) {
-      nav.pop();
-    }
+    // No dialog dismissal here: ModalRoute.of(nav.overlay.context) is
+    // ALWAYS null (the overlay element sits above every route scope), so
+    // the old DialogRoute check was a silent no-op. The scan screens close
+    // their own loading dialog by route reference after connect completes.
     nav.push(
       MaterialPageRoute(
         builder: (_) => const BChatScreen(),
@@ -349,6 +356,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   void _showIncomingRequest(String deviceName) {
     ConnectionRequestBanner.show(
       deviceName: deviceName,
+      isChatScreen: _chatOpen,
       onAccept: () {
         if (_chatOpen) return;
         state = state.copyWith(isConnected: true);
@@ -380,6 +388,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     required String kind,
   }) {
     if (text == _connectReadyFrame) {
+      _settleDial();
       _pendingAccept = false;
       _connectInitiatedAt = null;
       ConnectionRequestBanner.dismiss();
@@ -398,6 +407,8 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
 
   Future<bool> connectToPeer(String address) async {
     final Completer<bool> completer = Completer<bool>();
+    _pendingConnectCompleter = completer;
+    _dialSettle = Completer<void>();
     _outgoingConnect = true;
     _connectInitiatedAt = DateTime.now();
 
@@ -417,6 +428,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
       _service.onSocketDisconnected = prevDisconnected;
       _service.onSocketError = prevError;
       _outgoingConnect = false;
+      _pendingConnectCompleter = null;
     }
 
     _service.onSocketConnected = (remote) {
@@ -427,6 +439,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     };
 
     _service.onSocketDisconnected = (reason) {
+      _settleDial();
       prevDisconnected?.call(reason);
       if (!completer.isCompleted) {
         completer.complete(false);
@@ -486,6 +499,31 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
       await _service.disconnect();
       state = state.copyWith(isConnected: false);
     }
+  }
+
+  /// Completes when the current dial reaches a terminal state (accepted
+  /// link, peer rejection, drop or cancel) — the connecting panel stays up
+  /// until then; the cap prevents a stuck panel if no event arrives.
+  Future<void> get dialSettled async {
+    final s = _dialSettle;
+    if (s == null) return;
+    await s.future.timeout(const Duration(seconds: 30), onTimeout: () {});
+  }
+
+  void _settleDial() {
+    final s = _dialSettle;
+    if (s != null && !s.isCompleted) s.complete();
+  }
+
+  /// UI "İptal" on the connecting panel: abandons the pending dial (its
+  /// wait resolves as a cancellation — screens skip the failure snackbar)
+  /// and closes the attempt so a late accept cannot land a link.
+  Future<void> cancelPendingConnect() async {
+    _settleDial();
+    final c = _pendingConnectCompleter;
+    _pendingConnectCompleter = null;
+    await _service.disconnect();
+    if (c != null && !c.isCompleted) c.complete(false);
   }
 
   Future<void> sendMessage(String message) async {
@@ -594,6 +632,8 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   late WifiDirectService _service;
   bool _chatOpen = false;
   bool _outgoingConnect = false;
+  Completer<bool>? _pendingConnectCompleter;
+  Completer<void>? _dialSettle;
   DateTime? _connectInitiatedAt;
   WdPeerInfo? _pendingRemote;
   String? _pendingPeerName;
@@ -903,6 +943,8 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
 
   Future<bool> connectToPeer(String address) async {
     final Completer<bool> completer = Completer<bool>();
+    _pendingConnectCompleter = completer;
+    _dialSettle = Completer<void>();
     _outgoingConnect = true;
     _connectInitiatedAt = DateTime.now();
     _lastConnectAddress = address;
@@ -927,6 +969,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       _service.onSocketDisconnected = prevDisconnected;
       _service.onSocketError = prevError;
       _outgoingConnect = false;
+      _pendingConnectCompleter = null;
     }
 
     _service.onSocketConnected = (remote) {
@@ -937,6 +980,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
     };
 
     _service.onSocketDisconnected = (reason) {
+      _settleDial();
       prevDisconnected?.call(reason);
       if (!completer.isCompleted) {
         completer.complete(false);
@@ -994,16 +1038,10 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
     _chatOpen = true;
     final nav = navigatorKey.currentState;
     if (nav == null) return; // no UI mounted (tests / cold start)
-    // The scan screen's loading dialog may still be on top: dismiss it
-    // BEFORE pushing the chat screen, so no later pop (which removes the
-    // top route) can ever close the chat screen by mistake. Only a real
-    // DialogRoute counts (ported screens use showDialog) — a pushed route
-    // (e.g. Settings) on top is never dismissed.
-    final overlayCtx = nav.overlay?.context;
-    final topRoute = overlayCtx != null ? ModalRoute.of(overlayCtx) : null;
-    if (topRoute is DialogRoute) {
-      nav.pop();
-    }
+    // No dialog dismissal here: ModalRoute.of(nav.overlay.context) is
+    // ALWAYS null (the overlay element sits above every route scope), so
+    // the old DialogRoute check was a silent no-op. The scan screens close
+    // their own loading dialog by route reference after connect completes.
     nav.push(
       MaterialPageRoute(
         builder: (_) => const WChatScreen(),
@@ -1020,6 +1058,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
     pendingRequestName.value = initialName ?? '';
     ConnectionRequestBanner.show(
       deviceName: initialName ?? '',
+      isChatScreen: _chatOpen,
       liveName: pendingRequestName,
       onAccept: () {
         if (_chatOpen) return;
@@ -1069,6 +1108,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
     required String kind,
   }) {
     if (text == _connectReadyFrame) {
+      _settleDial();
       _pendingAccept = false;
       _connectInitiatedAt = null;
       ConnectionRequestBanner.dismiss();
@@ -1225,6 +1265,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       unawaited(_sendOwnName());
     };
     _service.onSocketDisconnected = (reason) {
+      _settleDial();
       final bool wasConnected = state.isConnected;
       state = state.copyWith(isConnected: false);
       ConnectionRequestBanner.dismiss();
@@ -1261,6 +1302,31 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       await _service.disconnect();
       state = state.copyWith(isConnected: false);
     }
+  }
+
+  /// Completes when the current dial reaches a terminal state (accepted
+  /// link, peer rejection, drop or cancel) — the connecting panel stays up
+  /// until then; the cap prevents a stuck panel if no event arrives.
+  Future<void> get dialSettled async {
+    final s = _dialSettle;
+    if (s == null) return;
+    await s.future.timeout(const Duration(seconds: 30), onTimeout: () {});
+  }
+
+  void _settleDial() {
+    final s = _dialSettle;
+    if (s != null && !s.isCompleted) s.complete();
+  }
+
+  /// UI "İptal" on the connecting panel: abandons the pending dial (its
+  /// wait resolves as a cancellation — screens skip the failure snackbar)
+  /// and closes the attempt so a late accept cannot land a link.
+  Future<void> cancelPendingConnect() async {
+    _settleDial();
+    final c = _pendingConnectCompleter;
+    _pendingConnectCompleter = null;
+    await _service.disconnect();
+    if (c != null && !c.isCompleted) c.complete(false);
   }
 
   void onChatOpened() => _chatOpen = true;

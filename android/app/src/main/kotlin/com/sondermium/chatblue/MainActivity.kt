@@ -27,16 +27,29 @@ class MainActivity : FlutterActivity() {
     private lateinit var wdScanEventChannel: EventChannel
     private lateinit var wdSocketEventChannel: EventChannel
 
+    // Nearby Connections transport (third channel): manager + channels
+    // mirror the BT/WD wiring one-to-one.
+    private lateinit var nearbyManager: NearbyManager
+    private lateinit var njMethodChannel: MethodChannel
+    private lateinit var njScanEventChannel: EventChannel
+    private lateinit var njSocketEventChannel: EventChannel
+
     private var scanEventSink: EventChannel.EventSink? = null
     private var socketEventSink: EventChannel.EventSink? = null
+    private var njScanEventSink: EventChannel.EventSink? = null
+    private var njSocketEventSink: EventChannel.EventSink? = null
 
     private var pendingPermissionResult: MethodChannel.Result? = null
     private var pendingEnableBtResult: MethodChannel.Result? = null
     private var pendingDiscoverableResult: MethodChannel.Result? = null
+    private var pendingNjPermissionResult: MethodChannel.Result? = null
+    private var pendingNjEnableBtResult: MethodChannel.Result? = null
 
     private val REQUEST_ENABLE_BT = 1001
     private val REQUEST_DISCOVERABLE = 1002
     private val REQUEST_PERMISSIONS = 1003
+    private val REQUEST_NEARBY_PERMISSIONS = 3001
+    private val REQUEST_NJ_ENABLE_BT = 3002
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,6 +58,9 @@ class MainActivity : FlutterActivity() {
         }
         if (!::wifiDirectManager.isInitialized) {
             wifiDirectManager = WifiDirectManager(this)
+        }
+        if (!::nearbyManager.isInitialized) {
+            nearbyManager = NearbyManager(this)
         }
     }
 
@@ -72,6 +88,19 @@ class MainActivity : FlutterActivity() {
                     "durationSec" to duration
                 ))
                 pendingDiscoverableResult = null
+            }
+            REQUEST_NJ_ENABLE_BT -> {
+                val granted = resultCode == Activity.RESULT_OK
+                if (granted) {
+                    // Same consent pref the BT channel writes: future
+                    // launches enable Bluetooth silently.
+                    getSharedPreferences("chatblue_prefs", Context.MODE_PRIVATE)
+                        .edit()
+                        .putBoolean("bt_enable_consent_granted", true)
+                        .apply()
+                }
+                pendingNjEnableBtResult?.success(granted)
+                pendingNjEnableBtResult = null
             }
         }
     }
@@ -108,6 +137,17 @@ class MainActivity : FlutterActivity() {
                 pendingWdPermissionResult?.success(mapOf("granted" to allGranted, "details" to resultMap))
                 pendingWdPermissionResult = null
             }
+            REQUEST_NEARBY_PERMISSIONS -> {
+                val resultMap = mutableMapOf<String, Boolean>()
+                for (i in permissions.indices) {
+                    val perm = permissions[i]
+                    val granted = grantResults.getOrNull(i) == PackageManager.PERMISSION_GRANTED
+                    resultMap[perm] = granted
+                }
+                val allGranted = resultMap.values.all { it }
+                pendingNjPermissionResult?.success(mapOf("granted" to allGranted, "details" to resultMap))
+                pendingNjPermissionResult = null
+            }
         }
     }
 
@@ -118,6 +158,9 @@ class MainActivity : FlutterActivity() {
         if (!::wifiDirectManager.isInitialized) {
             wifiDirectManager = WifiDirectManager(this)
         }
+        if (!::nearbyManager.isInitialized) {
+            nearbyManager = NearbyManager(this)
+        }
         super.configureFlutterEngine(flutterEngine)
 
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/bt")
@@ -126,6 +169,9 @@ class MainActivity : FlutterActivity() {
         wdMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/wd")
         wdScanEventChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/wd_scan")
         wdSocketEventChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/wd_socket")
+        njMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/nearby")
+        njScanEventChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/nearby_scan")
+        njSocketEventChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/nearby_socket")
 
         bluetoothManager.setScanCallbacks(
             onStarted = {
@@ -197,6 +243,10 @@ class MainActivity : FlutterActivity() {
         setupWdCallbacks()
         setupWdMethodChannelHandlers()
         setupWdEventChannels()
+
+        setupNearbyCallbacks()
+        setupNearbyMethodChannelHandlers()
+        setupNearbyEventChannels()
     }
 
     private fun setupMethodChannelHandlers() {
@@ -455,6 +505,223 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun setupNearbyCallbacks() {
+        nearbyManager.setScanCallbacks(
+            onStarted = {
+                runOnUiThread { njScanEventSink?.success(mapOf("event" to "started")) }
+            },
+            onEndpointFound = { data ->
+                runOnUiThread { njScanEventSink?.success(mapOf("event" to "endpoint", "data" to data)) }
+            },
+            onEndpointLost = { endpointId ->
+                runOnUiThread {
+                    njScanEventSink?.success(
+                        mapOf("event" to "endpointLost", "data" to mapOf("endpointId" to endpointId))
+                    )
+                }
+            },
+            onFinished = {
+                runOnUiThread { njScanEventSink?.success(mapOf("event" to "finished")) }
+            },
+            onError = { message ->
+                runOnUiThread { njScanEventSink?.error("NEARBY_SCAN_ERROR", message, null) }
+            }
+        )
+
+        nearbyManager.setConnectionCallbacks(
+            onInitiated = { data ->
+                runOnUiThread { njSocketEventSink?.success(mapOf("event" to "initiated", "data" to data)) }
+            },
+            onConnected = { data ->
+                runOnUiThread { njSocketEventSink?.success(mapOf("event" to "connected", "data" to data)) }
+            },
+            onRejected = { endpointId ->
+                runOnUiThread {
+                    njSocketEventSink?.success(
+                        mapOf("event" to "rejected", "data" to mapOf("endpointId" to endpointId))
+                    )
+                }
+            },
+            onDisconnected = { reason ->
+                runOnUiThread { njSocketEventSink?.success(mapOf("event" to "disconnected", "reason" to reason)) }
+            }
+        )
+
+        nearbyManager.setPayloadCallbacks(
+            onTextReceived = { text ->
+                runOnUiThread {
+                    njSocketEventSink?.success(
+                        mapOf("event" to "data", "kind" to "text", "bytes" to text.toByteArray(Charsets.UTF_8), "string" to text)
+                    )
+                }
+            },
+            onBytesReceived = { bytes ->
+                runOnUiThread {
+                    njSocketEventSink?.success(mapOf("event" to "data", "kind" to "bytes", "bytes" to bytes, "string" to ""))
+                }
+            },
+            onError = { message ->
+                runOnUiThread { njSocketEventSink?.error("NEARBY_SOCKET_ERROR", message, null) }
+            },
+            onProgress = { direction, current, total, kind ->
+                runOnUiThread {
+                    njSocketEventSink?.success(
+                        mapOf(
+                            "event" to "progress",
+                            "direction" to direction,
+                            "current" to current,
+                            "total" to total,
+                            "kind" to kind
+                        )
+                    )
+                }
+            }
+        )
+    }
+
+    private fun setupNearbyEventChannels() {
+        njScanEventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                njScanEventSink = events
+            }
+
+            override fun onCancel(arguments: Any?) {
+                njScanEventSink = null
+            }
+        })
+        njSocketEventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                njSocketEventSink = events
+            }
+
+            override fun onCancel(arguments: Any?) {
+                njSocketEventSink = null
+            }
+        })
+    }
+
+    private fun setupNearbyMethodChannelHandlers() {
+        njMethodChannel.setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
+            when (call.method) {
+                "getNearbyStatus" -> {
+                    result.success(nearbyManager.getStatus())
+                }
+                "getDeviceName" -> {
+                    result.success(nearbyManager.getDeviceName())
+                }
+                "cancelConnect" -> {
+                    nearbyManager.cancelConnect()
+                    result.success(true)
+                }
+                "requestNearbyPermissions" -> {
+                    val needed = requiredNearbyRuntimePermissions()
+                        .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+                        .toTypedArray()
+                    if (needed.isEmpty()) {
+                        result.success(mapOf("granted" to true, "details" to emptyMap<String, Boolean>()))
+                    } else {
+                        pendingNjPermissionResult = result
+                        ActivityCompat.requestPermissions(this, needed, REQUEST_NEARBY_PERMISSIONS)
+                    }
+                }
+                "requestEnableBluetooth" -> {
+                    val prefs = getSharedPreferences("chatblue_prefs", Context.MODE_PRIVATE)
+                    if (prefs.getBoolean("bt_enable_consent_granted", false)) {
+                        @Suppress("MissingPermission")
+                        runCatching { BluetoothAdapter.getDefaultAdapter()?.enable() }
+                        result.success(BluetoothAdapter.getDefaultAdapter()?.isEnabled == true)
+                    } else {
+                        val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                        pendingNjEnableBtResult = result
+                        @Suppress("DEPRECATION")
+                        startActivityForResult(intent, REQUEST_NJ_ENABLE_BT)
+                    }
+                }
+                "startScan" -> {
+                    val uid: String = call.argument<String>("uid") ?: ""
+                    val name: String = call.argument<String>("name") ?: ""
+                    nearbyManager.startScan(name, uid)
+                    result.success(true)
+                }
+                "stopScan" -> {
+                    nearbyManager.stopScan()
+                    result.success(true)
+                }
+                "connect" -> {
+                    val endpointId: String? = call.argument("endpointId")
+                    if (endpointId.isNullOrBlank()) {
+                        result.error("ARG_ERROR", "'endpointId' is required", null)
+                    } else {
+                        val uid: String = call.argument<String>("uid") ?: ""
+                        val name: String = call.argument<String>("name") ?: ""
+                        nearbyManager.connect(endpointId, uid, name)
+                        result.success(true)
+                    }
+                }
+                "accept" -> {
+                    val endpointId: String? = call.argument("endpointId")
+                    if (endpointId.isNullOrBlank()) {
+                        result.error("ARG_ERROR", "'endpointId' is required", null)
+                    } else {
+                        nearbyManager.accept(endpointId)
+                        result.success(true)
+                    }
+                }
+                "reject" -> {
+                    val endpointId: String? = call.argument("endpointId")
+                    if (endpointId.isNullOrBlank()) {
+                        result.error("ARG_ERROR", "'endpointId' is required", null)
+                    } else {
+                        nearbyManager.reject(endpointId)
+                        result.success(true)
+                    }
+                }
+                "disconnect" -> {
+                    nearbyManager.disconnect()
+                    result.success(true)
+                }
+                "isConnected" -> {
+                    result.success(nearbyManager.isConnected())
+                }
+                "sendString" -> {
+                    val text: String? = call.argument("text")
+                    if (text == null) result.error("ARG_ERROR", "'text' is required", null)
+                    else { nearbyManager.sendText(text); result.success(true) }
+                }
+                "sendBytes" -> {
+                    val data: ByteArray? = call.argument("bytes")
+                    if (data == null) result.error("ARG_ERROR", "'bytes' is required", null)
+                    else { nearbyManager.sendRawBytes(data); result.success(true) }
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun requiredNearbyRuntimePermissions(): List<String> {
+        return if (Build.VERSION.SDK_INT >= 33) {
+            // Android 13+: Nearby's WiFi mediums (WiFi LAN / hotspot used by
+            // discovery and connections) need NEARBY_WIFI_DEVICES; without a
+            // runtime grant the WiFi side cannot engage on 13+ devices.
+            listOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.NEARBY_WIFI_DEVICES
+            )
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            listOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE
+            )
+        } else {
+            listOf(
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+        }
+    }
+
     private fun requiredRuntimePermissions(): List<String> {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             listOf(
@@ -473,5 +740,6 @@ class MainActivity : FlutterActivity() {
         super.onDestroy()
         bluetoothManager.dispose()
         wifiDirectManager.dispose()
+        nearbyManager.dispose()
     }
 }

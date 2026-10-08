@@ -98,5 +98,20 @@
   "recordingStartFailedMessage": "Could not start recording.",
   "scanErrorTitle": "Scan error",
   "connectionDeclinedTitle": "Connection declined",
-  "connectionDeclinedMessage": "The peer declined the request or the link was lost."
+  "connectionDeclinedMessage": "The peer declined the request or the link was lost.",
+  "connectionDeclinedByYouMessage": "You declined the request.",
+  "nearbyTab": "Nearby",
+  "discoverConnectNearbyTitle": "Discover & Connect via Nearby",
+  "btOffForNearby": "Bluetooth is off. Turn it on to discover nearby devices.",
+  "enableBluetooth": "Turn on Bluetooth",
+  "playServicesRequired": "Google Play Services is required for Nearby.",
+  "nearbyNoDevicesFound": "No devices found nearby — check that Bluetooth is on and the other device has the app open.",
+  "nearbyTargetNotFound": "Target device not found ({count} nearby device(s) seen) — check that the other device has the app open.",
+  "nearbyAdvertisingUnavailable": "This device's Bluetooth stack does not support BLE advertising. You can start connections from this device, but other devices cannot discover it in their lists.",
+  "connectingTitle": "Connecting…",
+  "signalLabel": "Signal",
+  "signalWeak": "Weak",
+  "signalFair": "Fair",
+  "signalGood": "Good",
+  "signalStrong": "Strong"
 }

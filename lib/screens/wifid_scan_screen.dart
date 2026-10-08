@@ -4,6 +4,7 @@ import 'package:chatblue/core/services/wd_service.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
 import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/providers/transport_providers.dart';
+import 'package:chatblue/screens/chat_ui/connecting_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -109,23 +110,29 @@ class WifiDirectScanScreen extends ConsumerWidget {
                             ),
                             leading: const Icon(Icons.wifi_tethering),
                             onTap: () async {
-                              var loading = true;
-                              showDialog<void>(
+                              // Cancellable connecting panel (bottom sheet,
+                              // closed by route reference — the chat push
+                              // may land while it is still up).
+                              final outcome = await showConnectingPanel(
                                 context: context,
-                                barrierDismissible: false,
-                                builder: (_) => const Center(
-                                  child: CircularProgressIndicator(),
-                                ),
-                              ).then((_) => loading = false);
-
-                              await notifier.connectToDevice(device);
-                              // NOTE: the awaited result is intentionally
-                              // unused — outcomes are judged by state
-                              // (isConnected / isAwaitingAcceptance),
-                              // matching the GetX flow.
-
-                              if (loading && context.mounted) {
-                                Navigator.of(context, rootNavigator: true).pop();
+                                deviceName:
+                                    (device.deviceName?.trim().isEmpty ??
+                                            true)
+                                        ? null
+                                        : device.deviceName!.trim(),
+                                connect: () async {
+                                  final ok =
+                                      await notifier.connectToDevice(device);
+                                  if (!ok &&
+                                      !notifier.isAwaitingAcceptance) {
+                                    return;
+                                  }
+                                  await notifier.dialSettled;
+                                },
+                                onCancel: notifier.cancelPendingConnect,
+                              );
+                              if (outcome == ConnectingOutcome.cancelled) {
+                                return;
                               }
                               final messenger =
                                   scaffoldMessengerKey.currentState;

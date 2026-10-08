@@ -7,6 +7,7 @@ class ChatSessionModel {
   /// Transport ids persisted in [transport].
   static const String transportBluetooth = 'bt';
   static const String transportWifiDirect = 'wfd';
+  static const String transportNearby = 'nearby';
 
   final String id;
   final String name;
@@ -16,7 +17,7 @@ class ChatSessionModel {
   final Map<String, dynamic> device;
 
   /// Channel this chat was created over ([transportBluetooth] /
-  /// [transportWifiDirect]); null on sessions persisted before the field
+  /// [transportWifiDirect] / [transportNearby]); null on sessions persisted before the field
   /// existed (backfilled with the transport in use when the chat opens).
   String? transport;
 
