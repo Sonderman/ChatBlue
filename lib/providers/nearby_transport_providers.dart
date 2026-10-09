@@ -5,6 +5,7 @@ import 'package:chatblue/core/services/device_id_service.dart';
 import 'package:chatblue/core/services/nearby_service.dart';
 import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/providers/transport_providers.dart';
+import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:chatblue/screens/chat_ui/connection_request.dart';
 import 'package:chatblue/screens/n_chatscreen/n_chat_screen.dart';
 import 'package:device_info_plus/device_info_plus.dart';
@@ -167,6 +168,16 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
   String? get connectedDeviceName => state.connectedPeer?.endpointName;
   String get transportType => 'nearby';
 
+  /// Styled decline notification (dialer or declining side) — a themed
+  /// notice card instead of a plain snackbar; mirrors the request banner.
+  void _showDeclinedNotice(String messageKey) {
+    ConnectionNotice.show(
+      title: translate('connectionDeclinedTitle'),
+      message: translate(messageKey),
+      isChatScreen: _chatOpen,
+    );
+  }
+
   Future<void> refreshStatus() async {
     try {
       final status = await _service.getStatus();
@@ -269,6 +280,8 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
         state = state.copyWith(
           lastConnectError: translate('connectionDeclinedMessage'),
         );
+        // Styled notice instead of a plain snackbar (dialer side).
+        _showDeclinedNotice('connectionDeclinedMessage');
         completer.complete(false);
       }
     };
@@ -540,17 +553,10 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       },
       onDecline: () {
         unawaited(_service.reject(peer.endpointId));
-        // Feedback for the DECLINING side — until now only the dialer saw a
-        // "declined" snackbar (from the rejected event); the receiver's
-        // banner just vanished without confirmation.
-        scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(
-            content: Text(
-              '${translate('connectionDeclinedTitle')}: '
-              '${translate('connectionDeclinedByYouMessage')}',
-            ),
-          ),
-        );
+        // Feedback for the DECLINING side — without it the receiver's
+        // banner just vanished without confirmation (the dialer side gets
+        // the mirrored notice from its transport).
+        _showDeclinedNotice('connectionDeclinedByYouMessage');
       },
       onTimeout: () {
         // Expiry is not a user decision: reject silently (no snackbar).

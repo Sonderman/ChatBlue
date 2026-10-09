@@ -171,7 +171,15 @@ class BluetoothClassicManager(private val context: Context) {
             onSocketError?.invoke("Missing BLUETOOTH_CONNECT permission")
             return
         }
-        val device = adapter.getRemoteDevice(address)
+        val device = try {
+            adapter.getRemoteDevice(address)
+        } catch (_: IllegalArgumentException) {
+            // A malformed address (e.g. a uuid that leaked into the stored
+            // session address) must surface as a socket error event, not as
+            // an unhandled method-call exception across the platform channel.
+            onSocketError?.invoke("Invalid Bluetooth address: $address")
+            return
+        }
         val uuid = parseUuidOrDefault(uuidString)
         connectThread = ConnectThread(device, uuid).also { it.start() }
     }

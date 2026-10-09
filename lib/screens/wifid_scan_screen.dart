@@ -144,6 +144,15 @@ class WifiDirectScanScreen extends ConsumerWidget {
                                   ref.read(wdTransportProvider).isConnected;
                               final awaiting = notifier.isAwaitingAcceptance;
                               if (!isConnected && !awaiting) {
+                                // A declined request is announced by the
+                                // transport's notice card — don't stack a
+                                // second, plain snackbar on top of it.
+                                if (ref
+                                        .read(wdTransportProvider)
+                                        .lastConnectError ==
+                                    l10n.connectionDeclinedMessage) {
+                                  return;
+                                }
                                 messenger?.showSnackBar(
                                   SnackBar(
                                     content: Text(

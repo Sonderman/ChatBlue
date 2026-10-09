@@ -36,7 +36,7 @@ class _BChatScreenState extends State<BChatScreen> {
         if (current.hasActiveTransfer) {
           // Warn before leaving mid-transfer: leaving closes the connection
           // and cancels the image transfer.
-          final leave = await showChatTransferDialog();
+          final leave = await showChatTransferDialog(context);
           if (leave != true) return;
           if (!context.mounted) return;
         }

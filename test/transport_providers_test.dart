@@ -106,11 +106,13 @@ void main() {
 
       final connectFuture = c
           .read(btTransportProvider.notifier)
-          .connectToPeer('AA:BB:CC');
+          .connectToPeer('AA:BB:CC:DD:EE:FF');
       service.onSocketConnected?.call(
-        BtDeviceInfo(address: 'AA:BB:CC', name: 'PeerOne'),
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
       );
       expect(await connectFuture, isTrue);
+      // A valid MAC passes the address guard through to the native dial.
+      expect(service.connectCalled, isTrue);
 
       // Socket up ≠ connected: only the READY frame binds the session.
       expect(c.read(btTransportProvider).isConnected, isFalse);
@@ -135,9 +137,9 @@ void main() {
       c.read(btTransportProvider.notifier).onChatOpened();
       final connectFuture = c
           .read(btTransportProvider.notifier)
-          .connectToPeer('AA:BB:CC');
+          .connectToPeer('AA:BB:CC:DD:EE:FF');
       service.onSocketConnected?.call(
-        BtDeviceInfo(address: 'AA:BB:CC', name: 'PeerOne'),
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
       );
       await connectFuture;
       service.onSocketData!(Uint8List(0), '@@CHATBLUE_CONNECT@@', kind: 'text');
@@ -158,7 +160,7 @@ void main() {
       await pumpEventQueue();
 
       final notifier = c.read(btTransportProvider.notifier);
-      final connectFuture = notifier.connectToPeer('AA:BB:CC');
+      final connectFuture = notifier.connectToPeer('AA:BB:CC:DD:EE:FF');
       // The native layer used to emit a spurious disconnect (cancelling the
       // previous, dead socket) as the new dial started; it completed the
       // attempt as a failure AND wiped the initiation window.
@@ -168,9 +170,59 @@ void main() {
       // The real socket lands moments later — it is OUR dial's result, so
       // the notifier must wait for acceptance, never show a request banner.
       service.onSocketConnected?.call(
-        BtDeviceInfo(address: 'AA:BB:CC', name: 'PeerOne'),
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
       );
       expect(notifier.isAwaitingAcceptance, isTrue);
+    });
+
+    test(
+        'connectToPeer rejects a non-MAC (uuid) stored address without '
+        'dialing native', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      // The poisoned session address that produced the native "is not a
+      // valid Bluetooth address" IllegalArgumentException: the peer's
+      // Nearby-era uid left behind by a cross-transport session merge.
+      final ok = await c
+          .read(btTransportProvider.notifier)
+          .connectToPeer('65eab5b0-4d42-493f-acfa-74c315e46cc6');
+
+      expect(ok, isFalse);
+      expect(service.connectCalled, isFalse);
+      expect(
+        c.read(btTransportProvider).lastConnectError,
+        'invalidBtAddressMessage',
+      );
+    });
+
+    test(
+        'decline while awaiting acceptance records the declined reason',
+        () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(btTransportProvider.notifier);
+      final connectFuture = notifier.connectToPeer('AA:BB:CC:DD:EE:FF');
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      );
+      expect(await connectFuture, isTrue);
+      expect(notifier.isAwaitingAcceptance, isTrue);
+
+      // The peer declines: the socket drops while acceptance is pending.
+      // The dialer-side notice card is a no-op headless; the STATE must
+      // carry the declined reason so the screens/chat can skip their own
+      // snackbar instead of stacking on top of the notice.
+      service.onSocketDisconnected?.call('remote closed');
+      expect(notifier.isAwaitingAcceptance, isFalse);
+      expect(
+        c.read(btTransportProvider).lastConnectError,
+        'connectionDeclinedMessage',
+      );
+      expect(c.read(btTransportProvider).isConnected, isFalse);
     });
   });
 
@@ -306,8 +358,14 @@ class FakeBtService extends BtClassicService {
   @override
   Future<void> stopServer() async {}
 
+  /// True once the native dial was invoked — lets tests assert that the
+  /// address guard did (or did not) reach the service.
+  bool connectCalled = false;
+
   @override
-  Future<void> connect(String address, {String? uuid}) async {}
+  Future<void> connect(String address, {String? uuid}) async {
+    connectCalled = true;
+  }
 
   @override
   Future<void> disconnect() async {}

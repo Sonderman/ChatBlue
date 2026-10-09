@@ -127,6 +127,8 @@ class AppTranslations extends Translations {
     // Chat controller
     'cannotConnectTitle': 'Cannot connect',
     'noDeviceAddressMessage': 'No device address stored for this chat.',
+    'invalidBtAddressMessage':
+        'The stored Bluetooth address is invalid. Reconnect from the Bluetooth tab.',
     'disconnectedTitle': 'Disconnected',
     'peerClosedConnectionMessage': 'Other device closed the connection',
     'micPermissionTitle': 'Microphone permission',
@@ -258,6 +260,8 @@ class AppTranslations extends Translations {
     // Chat controller
     'cannotConnectTitle': 'Bağlanılamıyor',
     'noDeviceAddressMessage': 'Bu sohbet için kayıtlı bir cihaz adresi yok.',
+    'invalidBtAddressMessage':
+        'Kayıtlı Bluetooth adresi geçersiz. Bluetooth sekmesinden yeniden bağlanın.',
     'disconnectedTitle': 'Bağlantı kesildi',
     'peerClosedConnectionMessage': 'Diğer cihaz bağlantıyı kapattı',
     'micPermissionTitle': 'Mikrofon izni',

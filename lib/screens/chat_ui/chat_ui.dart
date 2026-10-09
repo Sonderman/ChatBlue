@@ -205,9 +205,13 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
       }),
       actions: [
         IconButton(
-          icon: Icon(Icons.delete_sweep_outlined, color: p.muted),
+          // Action icons follow the palette accent (like the composer's and
+          // the status indicators) — `muted` rendered as a washed-out gray
+          // against the crisp bar foreground in both themes and read as
+          // disabled / off-theme.
+          icon: Icon(Icons.delete_sweep_outlined, color: p.accent),
           tooltip: 'clearChatTooltip'.tr,
-          onPressed: () => showChatClearDialog(controller),
+          onPressed: () => showChatClearDialog(context, controller),
         ),
       ],
     );
@@ -281,14 +285,15 @@ class _StatusDot extends StatelessWidget {
   }
 }
 
-/// Palette for GetX dialogs, which have no local BuildContext.
-ChatPalette _dialogPalette() => ChatPalette.of(Get.context!);
-
 /// Theme-aware confirmation dialog for clearing the conversation.
-Future<void> showChatClearDialog(ChatScreenControllerBase controller) async {
-  final p = _dialogPalette();
-  final clear = await Get.dialog<bool>(
-    AlertDialog(
+Future<void> showChatClearDialog(
+  BuildContext context,
+  ChatScreenControllerBase controller,
+) async {
+  final p = ChatPalette.of(context);
+  final clear = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
       backgroundColor: p.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(20),
@@ -301,7 +306,7 @@ Future<void> showChatClearDialog(ChatScreenControllerBase controller) async {
       ),
       actions: [
         TextButton(
-          onPressed: () => Get.back(result: false),
+          onPressed: () => Navigator.of(dialogContext).pop(false),
           child: Text('cancel'.tr, style: TextStyle(color: p.muted)),
         ),
         FilledButton(
@@ -309,7 +314,7 @@ Future<void> showChatClearDialog(ChatScreenControllerBase controller) async {
             backgroundColor: const Color(0xFFC62828),
             foregroundColor: Colors.white,
           ),
-          onPressed: () => Get.back(result: true),
+          onPressed: () => Navigator.of(dialogContext).pop(true),
           child: Text('clearAction'.tr),
         ),
       ],
@@ -324,12 +329,14 @@ Future<void> showChatClearDialog(ChatScreenControllerBase controller) async {
 /// Theme-aware confirmation dialog for removing one of the user's own
 /// messages (local only — the peer's copy is untouched).
 Future<void> showDeleteMessageDialog(
+  BuildContext context,
   ChatScreenControllerBase controller,
   MessageModel message,
 ) async {
-  final p = _dialogPalette();
-  final delete = await Get.dialog<bool>(
-    AlertDialog(
+  final p = ChatPalette.of(context);
+  final delete = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
       backgroundColor: p.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(20),
@@ -342,7 +349,7 @@ Future<void> showDeleteMessageDialog(
       ),
       actions: [
         TextButton(
-          onPressed: () => Get.back(result: false),
+          onPressed: () => Navigator.of(dialogContext).pop(false),
           child: Text('cancel'.tr, style: TextStyle(color: p.muted)),
         ),
         FilledButton(
@@ -350,7 +357,7 @@ Future<void> showDeleteMessageDialog(
             backgroundColor: const Color(0xFFC62828),
             foregroundColor: Colors.white,
           ),
-          onPressed: () => Get.back(result: true),
+          onPressed: () => Navigator.of(dialogContext).pop(true),
           child: Text('delete'.tr),
         ),
       ],
@@ -362,10 +369,11 @@ Future<void> showDeleteMessageDialog(
 }
 
 /// Theme-aware dialog shown before leaving mid-transfer.
-Future<bool?> showChatTransferDialog() {
-  final p = _dialogPalette();
-  return Get.dialog<bool>(
-    AlertDialog(
+Future<bool?> showChatTransferDialog(BuildContext context) {
+  final p = ChatPalette.of(context);
+  return showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
       backgroundColor: p.surface,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(20),
@@ -378,7 +386,7 @@ Future<bool?> showChatTransferDialog() {
       ),
       actions: [
         TextButton(
-          onPressed: () => Get.back(result: false),
+          onPressed: () => Navigator.of(dialogContext).pop(false),
           child: Text('stayAction'.tr, style: TextStyle(color: p.accent)),
         ),
         FilledButton(
@@ -386,7 +394,7 @@ Future<bool?> showChatTransferDialog() {
             backgroundColor: p.accentDeep,
             foregroundColor: Colors.white,
           ),
-          onPressed: () => Get.back(result: true),
+          onPressed: () => Navigator.of(dialogContext).pop(true),
           child: Text('leaveAction'.tr),
         ),
       ],
@@ -517,7 +525,7 @@ class ChatMessageBubble extends StatelessWidget {
     } else if (message.isAudio && message.imagePath != null) {
       content = _audioBubble(p, mine);
     } else if (message.imagePath != null) {
-      content = _imageBubble(p, mine, showProgress);
+      content = _imageBubble(context, p, mine, showProgress);
     } else if (showProgress) {
       content = _progressBubble(p, mine);
     } else {
@@ -555,7 +563,7 @@ class ChatMessageBubble extends StatelessWidget {
                     label: 'delete'.tr,
                     onPressed: () {
                       editableTextState.hideToolbar();
-                      showDeleteMessageDialog(controller!, message);
+                      showDeleteMessageDialog(context, controller!, message);
                     },
                   ),
                 );
@@ -591,7 +599,7 @@ class ChatMessageBubble extends StatelessWidget {
     return GestureDetector(
       onLongPress:
           (mine && !message.isTransferring && controller != null)
-          ? () => showDeleteMessageDialog(controller!, message)
+          ? () => showDeleteMessageDialog(context, controller!, message)
           : null,
       child: Align(
         alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
@@ -709,11 +717,21 @@ class ChatMessageBubble extends StatelessWidget {
   }
 
   /// Image thumbnail bubble with progress bar while transferring.
-  Widget _imageBubble(ChatPalette p, bool mine, bool showProgress) {
+  Widget _imageBubble(
+    BuildContext context,
+    ChatPalette p,
+    bool mine,
+    bool showProgress,
+  ) {
     return GestureDetector(
       onTap: showProgress
           ? null
-          : () => Get.to(() => ChatImagePreviewScreen(path: message.imagePath!)),
+          : () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) =>
+                      ChatImagePreviewScreen(path: message.imagePath!),
+                ),
+              ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         mainAxisSize: MainAxisSize.min,
@@ -1002,7 +1020,7 @@ class ChatInputBar extends StatelessWidget {
                 IconButton(
                   icon: Icon(Icons.image_outlined, color: p.accent),
                   tooltip: 'sendImageTooltip'.tr,
-                  onPressed: () => controller.showImageSourceSheet(),
+                  onPressed: () => controller.showImageSourceSheet(context),
                 ),
             Expanded(
               child: TextField(

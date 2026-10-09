@@ -8,6 +8,7 @@ import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/data/session_repository.dart';
+import 'package:chatblue/providers/app_providers.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -112,6 +113,14 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// finalize its bubble as an audio message.
   String? _pendingOutgoingAudioText;
 
+  /// Get-free toast surface: the same global scaffold messenger the ported
+  /// screens use, so the chat side no longer depends on GetX UI APIs.
+  void _showToast(String title, String message) {
+    scaffoldMessengerKey.currentState?.showSnackBar(
+      SnackBar(content: Text('$title: $message')),
+    );
+  }
+
   /// Reconnects to the device this chat session belongs to. Used by the
   /// Connect button shown when the chat is opened without a connection.
   Future<void> connectToCurrentSession() async {
@@ -135,13 +144,18 @@ abstract class ChatScreenControllerBase extends GetxController {
     // waiting message required `ok == false`, so a fast socket-up produced
     // no feedback at all on the initiating side.
     final bool connected = transport.isConnected.value;
-    if (!connected && !ok && !transport.isAwaitingAcceptance) {
-      Get.snackbar(
+    // A declined request is announced by the transport's notice card (and
+    // lastConnectError now carries its reason), so don't stack a second,
+    // plain notification on top of it.
+    final bool declined =
+        transport.lastConnectError.value == 'connectionDeclinedMessage'.tr;
+    if (!connected && !ok && !transport.isAwaitingAcceptance && !declined) {
+      _showToast(
         'couldNotConnectTitle'.tr,
         transport.lastConnectError.value ?? 'couldNotConnectMessage'.tr,
       );
-    } else if (!connected) {
-      Get.snackbar(
+    } else if (!connected && !declined) {
+      _showToast(
         'waitingAcceptanceTitle'.tr,
         'waitingAcceptanceMessage'.tr,
       );
@@ -395,22 +409,41 @@ abstract class ChatScreenControllerBase extends GetxController {
         // DIRECT key hit: load the existing session's messages. (The
         // sync-created shell above is replaced; this branch was missing —
         // every connect to an existing session opened an empty shell.)
-        chatSession = session;
-        messages.value = session.messages;
+        // Re-bind the stored identity to the live connection: a stale
+        // address left behind by an earlier cross-transport merge (e.g. a
+        // Nearby-era uid under a Bluetooth MAC key) would otherwise make
+        // every later reconnect fail — Bluetooth dials `device['address']`
+        // verbatim. This also heals such rows on their next connection
+        // open, so installs already carrying a poisoned address recover
+        // without a migration.
+        final rebound = session.reboundTo(
+          address: macUsable ? mac : null,
+          peerName: transport.connectedDeviceName,
+          transport: transport.transportType,
+        );
+        final bool identityChanged =
+            rebound.device['address'] != session.device['address'] ||
+                rebound.transport != session.transport;
+        chatSession = rebound;
+        if (identityChanged) {
+          _scheduleSave();
+        }
+        messages.value = rebound.messages;
       } else if (session != null && session.id != key) {
         // Re-key + adopt: move the matched session under the computed key so
         // future opens hit it directly (no repeated merge search), and use
         // the re-keyed instance — `chatSession.id` is final, so the session
         // is re-created with the new id; the nested message objects are
-        // reused as-is.
-        chatSession = ChatSessionModel(
-          id: key,
-          name: session.name,
-          createdAt: session.createdAt,
-          updatedAt: session.updatedAt,
-          messages: session.messages,
-          device: session.device,
-          transport: session.transport,
+        // reused as-is. The stored identity is re-bound to the CURRENT
+        // connection (device address + transport tag): a cross-transport
+        // merge (same peer reached over another transport) otherwise keeps
+        // the OLD scheme's address — a Nearby-era uid under a Bluetooth MAC
+        // key made every later Bluetooth dial fail natively ("not a valid
+        // Bluetooth address").
+        chatSession = session.reboundTo(
+          address: macUsable ? mac : null,
+          peerName: transport.connectedDeviceName,
+          transport: transport.transportType,
         );
         messages.value = chatSession.messages;
         try {
@@ -463,7 +496,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     transport.onChatOpened();
     _disconnectSubscription = transport.lastDisconnectReason.listen((reason) {
       if (reason != null && reason.isNotEmpty) {
-        Get.snackbar('disconnectedTitle'.tr, 'peerClosedConnectionMessage'.tr);
+        _showToast('disconnectedTitle'.tr, 'peerClosedConnectionMessage'.tr);
       }
     });
 
@@ -691,7 +724,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     final id = message.id;
     if (id == null || !message.hasRemoteMedia) return;
     if (!transport.isConnected.value) {
-      Get.snackbar('downloadFailedTitle'.tr, 'downloadNeedConnection'.tr);
+      _showToast('downloadFailedTitle'.tr, 'downloadNeedConnection'.tr);
       return;
     }
     _setMediaFetchBusy(id, true);
@@ -699,7 +732,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     _fetchWatchdogs[id] = Timer(const Duration(seconds: 90), () {
       _fetchWatchdogs.remove(id);
       _setMediaFetchBusy(id, false);
-      Get.snackbar('downloadFailedTitle'.tr, 'downloadTimeoutMessage'.tr);
+      _showToast('downloadFailedTitle'.tr, 'downloadTimeoutMessage'.tr);
     });
     transport.sendMessage(
       _syncPrefix + jsonEncode({'type': 'fetch', 'id': id}),
@@ -845,7 +878,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     if (id == null) return;
     _settleFetch(id);
     _setMediaFetchBusy(id, false);
-    Get.snackbar('downloadFailedTitle'.tr, 'downloadUnavailableMessage'.tr);
+    _showToast('downloadFailedTitle'.tr, 'downloadUnavailableMessage'.tr);
   }
 
   /// Builds the wire entry for one message. Media is embedded as base64 only
@@ -1285,14 +1318,21 @@ abstract class ChatScreenControllerBase extends GetxController {
 
   Future<void> pickAndSendImage() => _pickAndSend(ImageSource.gallery);
 
-  Future<void> showImageSourceSheet() async {
+  /// Image-source chooser. Pure Flutter (`showModalBottomSheet` via the
+  /// caller's context) — no GetX sheet API; the sheet is dismissed through
+  /// its own route before the picker opens.
+  Future<void> showImageSourceSheet(BuildContext context) async {
     if (!isConnected.value) return;
-    Get.bottomSheet(
-      SafeArea(
+    final Color cardColor = Theme.of(context).cardColor;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      useSafeArea: false,
+      builder: (sheetContext) => SafeArea(
         child: Material(
           // Material instead of Container(decoration): a DecoratedBox between
           // the sheet and the ListTiles would hide their ink splashes.
-          color: Get.theme.cardColor,
+          color: cardColor,
           shape: const RoundedRectangleBorder(
             borderRadius: BorderRadius.only(
               topLeft: Radius.circular(12),
@@ -1306,7 +1346,7 @@ abstract class ChatScreenControllerBase extends GetxController {
                 leading: const Icon(Icons.photo_library),
                 title: Text('gallerySource'.tr),
                 onTap: () async {
-                  Get.back();
+                  Navigator.of(sheetContext).pop();
                   await _pickAndSend(ImageSource.gallery);
                 },
               ),
@@ -1314,7 +1354,7 @@ abstract class ChatScreenControllerBase extends GetxController {
                 leading: const Icon(Icons.photo_camera),
                 title: Text('cameraSource'.tr),
                 onTap: () async {
-                  Get.back();
+                  Navigator.of(sheetContext).pop();
                   await _pickAndSend(ImageSource.camera);
                 },
               ),
@@ -1322,9 +1362,6 @@ abstract class ChatScreenControllerBase extends GetxController {
           ),
         ),
       ),
-      isScrollControlled: false,
-      ignoreSafeArea: false,
-      backgroundColor: Colors.transparent,
     );
   }
 
@@ -1424,7 +1461,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     if (isRecording.value || !transport.isConnected.value) return;
     final status = await Permission.microphone.request();
     if (!status.isGranted) {
-      Get.snackbar('micPermissionTitle'.tr, 'recordingUnavailableMessage'.tr);
+      _showToast('micPermissionTitle'.tr, 'recordingUnavailableMessage'.tr);
       return;
     }
     final dir = await getApplicationDocumentsDirectory();
@@ -1442,7 +1479,7 @@ abstract class ChatScreenControllerBase extends GetxController {
       }
       _recorder = null;
       _recordingPath = null;
-      Get.snackbar('recordingErrorTitle'.tr, 'recordingStartFailedMessage'.tr);
+      _showToast('recordingErrorTitle'.tr, 'recordingStartFailedMessage'.tr);
       return;
     }
     recordSeconds.value = 0;

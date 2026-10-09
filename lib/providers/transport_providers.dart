@@ -6,6 +6,7 @@ import 'package:chatblue/core/services/device_id_service.dart';
 import 'package:chatblue/core/services/wd_service.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
 import 'package:chatblue/providers/app_providers.dart';
+import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:chatblue/screens/chat_ui/connection_request.dart';
 import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
 import 'package:chatblue/screens/w_chatscreen/w_chat_screen.dart';
@@ -41,6 +42,8 @@ String transportKeyToL10n(
       return l10n.connectionDeclinedByYouMessage;
     case 'noDeviceAddressMessage':
       return l10n.noDeviceAddressMessage;
+    case 'invalidBtAddressMessage':
+      return l10n.invalidBtAddressMessage;
     case 'wifiOffTitle':
       return l10n.wifiOffTitle;
     case 'wfdNoDevicesFound':
@@ -260,7 +263,10 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
       if (_pendingAccept) {
         _pendingAccept = false;
         _pendingRemote = null;
-        _showSnackbar('connectionDeclinedTitle', 'connectionDeclinedMessage');
+        state = state.copyWith(
+          lastConnectError: translate('connectionDeclinedMessage'),
+        );
+        _showDeclinedNotice('connectionDeclinedMessage');
       }
       if (kDebugMode) debugPrint('Socket disconnected: $reason');
       refreshPairedDevices();
@@ -302,6 +308,16 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   String? get connectedDeviceKey => state.connectedDevice?.address;
   String? get connectedDeviceName => state.connectedDevice?.name;
   String get transportType => 'bt';
+
+  /// Styled decline notification (dialer or declining side) — a themed
+  /// notice card instead of a plain snackbar; mirrors the request banner.
+  void _showDeclinedNotice(String messageKey) {
+    ConnectionNotice.show(
+      title: translate('connectionDeclinedTitle'),
+      message: translate(messageKey),
+      isChatScreen: _chatOpen,
+    );
+  }
 
   Future<void> refreshPairedDevices() async {
     try {
@@ -436,10 +452,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
           _service.disconnect();
           // Feedback for the DECLINING side (same as the Nearby flow):
           // without it the banner just vanishes without confirmation.
-          _showSnackbar(
-            'connectionDeclinedTitle',
-            'connectionDeclinedByYouMessage',
-          );
+          _showDeclinedNotice('connectionDeclinedByYouMessage');
         }
       },
       onTimeout: () {
@@ -483,7 +496,29 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   Future<bool> connectToDevice(BtDeviceInfo device) =>
       connectToPeer(device.address);
 
+  /// Bluetooth addresses are `XX:XX:XX:XX:XX:XX`. Anything else must never
+  /// reach the native layer: `BluetoothAdapter.getRemoteDevice` throws
+  /// `IllegalArgumentException` ("… is not a valid Bluetooth address") for
+  /// it — seen in the wild when a stored session address carried the peer's
+  /// Nearby-era uid after a cross-transport merge. Guarding here turns that
+  /// into a clear, localized failure instead of a platform exception.
+  static final RegExp _btAddressPattern =
+      RegExp(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$');
+
   Future<bool> connectToPeer(String address) async {
+    address = address.trim();
+    if (!_btAddressPattern.hasMatch(address)) {
+      if (kDebugMode) {
+        debugPrint('BT connect rejected: invalid address "$address"');
+      }
+      state = state.copyWith(
+        lastConnectError: translate('invalidBtAddressMessage'),
+      );
+      return false;
+    }
+    // Fresh attempt: drop the previous failure reason so a stale reason
+    // (e.g. a previous decline) can never masquerade as this dial's result.
+    state = state.copyWith(lastConnectError: null);
     final Completer<bool> completer = Completer<bool>();
     _pendingConnectCompleter = completer;
     _dialSettle = Completer<void>();
@@ -758,6 +793,16 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   String? get connectedDeviceId => state.connectedDevice?.peerId;
   String? get connectedDeviceName => state.connectedDevice?.deviceName;
   String get transportType => 'wfd';
+
+  /// Styled decline notification (dialer or declining side) — a themed
+  /// notice card instead of a plain snackbar; mirrors the request banner.
+  void _showDeclinedNotice(String messageKey) {
+    ConnectionNotice.show(
+      title: translate('connectionDeclinedTitle'),
+      message: translate(messageKey),
+      isChatScreen: _chatOpen,
+    );
+  }
 
   Future<void> startServer() async {
     await _service.startServer();
@@ -1173,15 +1218,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
           _service.disconnect();
           // Feedback for the DECLINING side (same as the BT/Nearby flows):
           // without it the banner just vanishes without confirmation.
-          final messenger = scaffoldMessengerKey.currentState;
-          messenger?.showSnackBar(
-            SnackBar(
-              content: Text(
-                '${translate('connectionDeclinedTitle')}: '
-                '${translate('connectionDeclinedByYouMessage')}',
-              ),
-            ),
-          );
+          _showDeclinedNotice('connectionDeclinedByYouMessage');
         }
       },
       onTimeout: () {
@@ -1378,15 +1415,10 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       if (_pendingAccept) {
         _pendingAccept = false;
         _pendingRemote = null;
-        final messenger = scaffoldMessengerKey.currentState;
-        messenger?.showSnackBar(
-          SnackBar(
-            content: Text(
-              '${translate('connectionDeclinedTitle')}: '
-              '${translate('connectionDeclinedMessage')}',
-            ),
-          ),
+        state = state.copyWith(
+          lastConnectError: translate('connectionDeclinedMessage'),
         );
+        _showDeclinedNotice('connectionDeclinedMessage');
       }
       if (kDebugMode && showDebugLogs) {
         debugPrint('Socket disconnected: $reason');

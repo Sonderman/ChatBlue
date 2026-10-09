@@ -99,5 +99,55 @@ void main() {
       expect(restored.transport, ChatSessionModel.transportNearby);
       expect(restored.transportKind, ChatSessionModel.transportNearby);
     });
+
+    test('reboundTo refreshes the address and re-tags the transport', () {
+      final session = ChatSessionModel(
+        id: 'DC:6A:E7:41:74:E6',
+        name: 'Redmi Note 10 Pro',
+        createdAt: DateTime(2026, 10, 8, 0, 0),
+        updatedAt: DateTime(2026, 10, 8, 0, 5),
+        messages: const [],
+        device: {
+          'name': 'Redmi Note 10 Pro',
+          'address': '65eab5b0-4d42-493f-acfa-74c315e46cc6',
+        },
+        transport: ChatSessionModel.transportNearby,
+      );
+
+      final rebound = session.reboundTo(
+        address: 'DC:6A:E7:41:74:E6',
+        peerName: 'Redmi Note 10 Pro',
+        transport: ChatSessionModel.transportBluetooth,
+      );
+
+      expect(rebound.device['address'], 'DC:6A:E7:41:74:E6');
+      expect(rebound.transport, ChatSessionModel.transportBluetooth);
+      expect(rebound.transportKind, ChatSessionModel.transportBluetooth);
+      // The re-keyed id stays: only the stored address was stale.
+      expect(rebound.id, 'DC:6A:E7:41:74:E6');
+      expect(rebound.device['name'], 'Redmi Note 10 Pro');
+      expect(rebound.messages, isEmpty);
+    });
+
+    test('reboundTo keeps the old address when no live one is available', () {
+      final session = ChatSessionModel(
+        id: 'addr-2',
+        name: 'Peer Phone',
+        createdAt: DateTime(2026, 10, 8, 0, 0),
+        updatedAt: DateTime(2026, 10, 8, 0, 5),
+        messages: const [],
+        device: {'name': null, 'address': 'DC:6A:E7:41:74:E6'},
+        transport: ChatSessionModel.transportBluetooth,
+      );
+
+      final rebound = session.reboundTo(
+        peerName: 'Peer Phone',
+        transport: ChatSessionModel.transportBluetooth,
+      );
+
+      expect(rebound.device['address'], 'DC:6A:E7:41:74:E6');
+      // A missing device name is filled from the live connection.
+      expect(rebound.device['name'], 'Peer Phone');
+    });
   });
 }

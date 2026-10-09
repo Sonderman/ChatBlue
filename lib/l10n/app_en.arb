@@ -90,6 +90,7 @@
   "imageSendFailed": "[Failed to send image]",
   "cannotConnectTitle": "Cannot connect",
   "noDeviceAddressMessage": "No device address stored for this chat.",
+  "invalidBtAddressMessage": "The stored Bluetooth address is invalid. Reconnect from the Bluetooth tab.",
   "disconnectedTitle": "Disconnected",
   "peerClosedConnectionMessage": "Other device closed the connection",
   "micPermissionTitle": "Microphone permission",

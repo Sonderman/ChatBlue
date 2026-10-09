@@ -57,6 +57,43 @@ class ChatSessionModel {
     return firstOctet != null && (firstOctet & 0x02) != 0;
   }
 
+  /// Returns a copy of this session bound to the CURRENT connection's
+  /// identity: the stored device address and the transport tag are refreshed
+  /// so the persisted identity always matches the channel the chat is
+  /// actually running on.
+  ///
+  /// Needed after cross-transport merges (the same peer reached over another
+  /// transport): those keep the OLD session's device map, so e.g. a
+  /// Nearby-era session carries the peer's uid in `device['address']` while
+  /// re-keyed under a Bluetooth MAC — a later Bluetooth reconnect would then
+  /// dial the uid and the native side rejects it ("not a valid Bluetooth
+  /// address"). With this, the address always belongs to the scheme of the
+  /// transport the session is tagged with.
+  ///
+  /// [address] overrides the stored one only when non-null and non-empty
+  /// (pass null to keep the old value); [peerName] fills the device name
+  /// only when the session has none; [transport] is the channel in use now.
+  ChatSessionModel reboundTo({
+    String? address,
+    String? peerName,
+    required String transport,
+  }) {
+    return ChatSessionModel(
+      id: id,
+      name: name,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      messages: messages,
+      device: {
+        'name': device['name'] ?? peerName,
+        'address': (address != null && address.isNotEmpty)
+            ? address
+            : device['address'],
+      },
+      transport: transport,
+    );
+  }
+
   Map<String, dynamic> toJson() {
     return {
       'id': id,
