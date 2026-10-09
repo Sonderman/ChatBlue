@@ -13,9 +13,9 @@ import 'package:drift/drift.dart';
 class SettingsRepository {
   SettingsRepository(this._db);
 
-  /// Migration bridge, same pattern as `SessionRepository.instance`:
-  /// `main()` assigns this once after opening the database; legacy static
-  /// callers (DeviceIdService, the notifiers) read it directly.
+  /// Startup singleton: `main()` assigns this once after opening the
+  /// database; callers without a provider scope (DeviceIdService, the
+  /// notifiers) read it directly.
   static SettingsRepository? instance;
 
   final AppDatabase _db;

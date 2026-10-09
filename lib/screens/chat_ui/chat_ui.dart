@@ -1,19 +1,26 @@
-// Shared modern chat UI kit for the Bluetooth and Wi‑Fi Direct chat screens.
+// Shared modern chat UI kit for the Bluetooth, Wi‑Fi Direct and Nearby
+// Connections chat screens.
 //
 // Design language: navy/cyan identity with theme-aware palettes — dark mode
-// keeps the deep navy canvas, light mode uses a bright variant. Both chat
-// screens (B/W) build from these widgets so the two transports share one
-// visual identity.
+// keeps the deep navy canvas, light mode uses a bright variant. All chat
+// screens build from these widgets so the transports share one visual
+// identity.
+//
+// State comes in as immutable [ChatState] values (watched by the screens via
+// Riverpod); the widgets stay stateless. Playback ticks flow through the
+// controller's dedicated [AudioPlaybackState] notifier so position updates
+// never rebuild the message list.
 
 import 'dart:io';
 
 import 'package:auto_size_text/auto_size_text.dart';
 import 'package:chatblue/core/models/message_model.dart';
-import 'package:chatblue/screens/chat_screen_controller_base.dart';
+import 'package:chatblue/l10n/app_localizations.dart';
+import 'package:chatblue/providers/chat_controller.dart';
+import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:get/get.dart';
 import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sizer/sizer.dart';
@@ -128,9 +135,10 @@ String formatChatTimestamp(DateTime t) {
 
 /// Header with device avatar, live connection status and the clear action.
 class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
-  const ChatAppBar({super.key, required this.controller});
+  const ChatAppBar({super.key, required this.state, required this.controller});
 
-  final ChatScreenControllerBase controller;
+  final ChatState state;
+  final ChatController controller;
 
   @override
   Size get preferredSize => const Size.fromHeight(64);
@@ -138,6 +146,11 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) {
     final p = ChatPalette.of(context);
+    final l10n = AppLocalizations.of(context)!;
+    // Fallback order matters (BT carries a transport name immediately, WFD
+    // only after READY): transport name → peer-reported name → stored name.
+    final name = controller.connectedDeviceName ??
+        (state.peerName.isNotEmpty ? state.peerName : state.chatSession.name);
     return AppBar(
       // Status bar icons follow the chat palette, not the app theme: the
       // chat bar stays dark navy on the light theme too.
@@ -151,17 +164,9 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
       iconTheme: IconThemeData(color: p.barForeground),
       toolbarHeight: 64,
       titleSpacing: 4,
-      title: Obx(() {
-        // The observable must be read UNCONDITIONALLY: GetX throws at
-        // runtime when a build registers no Rx dependency — the old
-        // short-circuit below skipped peerName whenever the transport
-        // name was already set (BT always, WFD after READY).
-        final peerName = controller.peerName.value;
-        final name = controller.transport.connectedDeviceName ??
-            (peerName.isNotEmpty ? peerName : controller.chatSession.name);
-        return Row(
-          children: [
-            _DeviceAvatar(name: name, palette: p),
+      title: Row(
+        children: [
+          _DeviceAvatar(name: name, palette: p),
           const SizedBox(width: 10),
           Expanded(
             child: Column(
@@ -177,32 +182,27 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
                   ),
                 ),
                 const SizedBox(height: 2),
-                Obx(
-                  () => Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _StatusDot(connected: controller.isConnected.value, palette: p),
-                      const SizedBox(width: 6),
-                      Text(
-                        controller.isConnected.value
-                            ? 'connectedStatus'.tr
-                            : 'notConnectedStatus'.tr,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: controller.isConnected.value
-                              ? p.accent
-                              : Colors.redAccent,
-                        ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _StatusDot(connected: state.isConnected, palette: p),
+                    const SizedBox(width: 6),
+                    Text(
+                      state.isConnected
+                          ? l10n.connectedStatus
+                          : l10n.notConnectedStatus,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: state.isConnected ? p.accent : Colors.redAccent,
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
         ],
-        );
-      }),
+      ),
       actions: [
         IconButton(
           // Action icons follow the palette accent (like the composer's and
@@ -210,7 +210,7 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
           // against the crisp bar foreground in both themes and read as
           // disabled / off-theme.
           icon: Icon(Icons.delete_sweep_outlined, color: p.accent),
-          tooltip: 'clearChatTooltip'.tr,
+          tooltip: l10n.clearChatTooltip,
           onPressed: () => showChatClearDialog(context, controller),
         ),
       ],
@@ -288,9 +288,10 @@ class _StatusDot extends StatelessWidget {
 /// Theme-aware confirmation dialog for clearing the conversation.
 Future<void> showChatClearDialog(
   BuildContext context,
-  ChatScreenControllerBase controller,
+  ChatController controller,
 ) async {
   final p = ChatPalette.of(context);
+  final l10n = AppLocalizations.of(context)!;
   final clear = await showDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
@@ -299,15 +300,15 @@ Future<void> showChatClearDialog(
         borderRadius: BorderRadius.circular(20),
         side: BorderSide(color: p.border),
       ),
-      title: Text('clearConversationTitle'.tr, style: TextStyle(color: p.messageText)),
+      title: Text(l10n.clearConversationTitle, style: TextStyle(color: p.messageText)),
       content: Text(
-        'clearConversationMessage'.tr,
+        l10n.clearConversationMessage,
         style: TextStyle(color: p.muted),
       ),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(dialogContext).pop(false),
-          child: Text('cancel'.tr, style: TextStyle(color: p.muted)),
+          child: Text(l10n.cancel, style: TextStyle(color: p.muted)),
         ),
         FilledButton(
           style: FilledButton.styleFrom(
@@ -315,14 +316,13 @@ Future<void> showChatClearDialog(
             foregroundColor: Colors.white,
           ),
           onPressed: () => Navigator.of(dialogContext).pop(true),
-          child: Text('clearAction'.tr),
+          child: Text(l10n.clearAction),
         ),
       ],
     ),
   );
   if (clear == true) {
-    controller.messages.clear();
-    controller.saveChatSession();
+    await controller.clearConversation();
   }
 }
 
@@ -330,10 +330,11 @@ Future<void> showChatClearDialog(
 /// messages (local only — the peer's copy is untouched).
 Future<void> showDeleteMessageDialog(
   BuildContext context,
-  ChatScreenControllerBase controller,
+  ChatController controller,
   MessageModel message,
 ) async {
   final p = ChatPalette.of(context);
+  final l10n = AppLocalizations.of(context)!;
   final delete = await showDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
@@ -342,15 +343,15 @@ Future<void> showDeleteMessageDialog(
         borderRadius: BorderRadius.circular(20),
         side: BorderSide(color: p.border),
       ),
-      title: Text('deleteMessageTitle'.tr, style: TextStyle(color: p.messageText)),
+      title: Text(l10n.deleteMessageTitle, style: TextStyle(color: p.messageText)),
       content: Text(
-        'deleteMessageBody'.tr,
+        l10n.deleteMessageBody,
         style: TextStyle(color: p.muted),
       ),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(dialogContext).pop(false),
-          child: Text('cancel'.tr, style: TextStyle(color: p.muted)),
+          child: Text(l10n.cancel, style: TextStyle(color: p.muted)),
         ),
         FilledButton(
           style: FilledButton.styleFrom(
@@ -358,7 +359,7 @@ Future<void> showDeleteMessageDialog(
             foregroundColor: Colors.white,
           ),
           onPressed: () => Navigator.of(dialogContext).pop(true),
-          child: Text('delete'.tr),
+          child: Text(l10n.delete),
         ),
       ],
     ),
@@ -371,6 +372,7 @@ Future<void> showDeleteMessageDialog(
 /// Theme-aware dialog shown before leaving mid-transfer.
 Future<bool?> showChatTransferDialog(BuildContext context) {
   final p = ChatPalette.of(context);
+  final l10n = AppLocalizations.of(context)!;
   return showDialog<bool>(
     context: context,
     builder: (dialogContext) => AlertDialog(
@@ -379,15 +381,15 @@ Future<bool?> showChatTransferDialog(BuildContext context) {
         borderRadius: BorderRadius.circular(20),
         side: BorderSide(color: p.border),
       ),
-      title: Text('transferInProgressTitle'.tr, style: TextStyle(color: p.messageText)),
+      title: Text(l10n.transferInProgressTitle, style: TextStyle(color: p.messageText)),
       content: Text(
-        'transferInProgressMessage'.tr,
+        l10n.transferInProgressMessage,
         style: TextStyle(color: p.muted),
       ),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(dialogContext).pop(false),
-          child: Text('stayAction'.tr, style: TextStyle(color: p.accent)),
+          child: Text(l10n.stayAction, style: TextStyle(color: p.accent)),
         ),
         FilledButton(
           style: FilledButton.styleFrom(
@@ -395,7 +397,7 @@ Future<bool?> showChatTransferDialog(BuildContext context) {
             foregroundColor: Colors.white,
           ),
           onPressed: () => Navigator.of(dialogContext).pop(true),
-          child: Text('leaveAction'.tr),
+          child: Text(l10n.leaveAction),
         ),
       ],
     ),
@@ -408,70 +410,70 @@ Future<bool?> showChatTransferDialog(BuildContext context) {
 /// being received (large text frame progress) or applied (images rehydrated
 /// to disk).
 class ChatSyncBanner extends StatelessWidget {
-  const ChatSyncBanner({super.key, required this.controller});
+  const ChatSyncBanner({super.key, required this.state});
 
-  final ChatScreenControllerBase controller;
+  final ChatState state;
 
   @override
   Widget build(BuildContext context) {
     final p = ChatPalette.of(context);
-    return Obx(() {
-      if (!controller.isSyncing.value) return const SizedBox.shrink();
-      // The app bar floats above the canvas (extendBodyBehindAppBar). The
-      // body sits inside a SafeArea that already consumes the status bar
-      // inset, so the banner only needs the app bar's 64 px toolbar height
-      // to sit flush against its bottom edge.
-      return Container(
-        margin: const EdgeInsets.only(top: 66, left: 10, right: 10),
-        padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-        decoration: BoxDecoration(
-          color: p.bar,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: p.border),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SizedBox(
-                  width: 10,
-                  height: 10,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 1.6,
-                    color: p.accent,
-                  ),
+    final l10n = AppLocalizations.of(context)!;
+    if (!state.isSyncing) return const SizedBox.shrink();
+    // The app bar floats above the canvas (extendBodyBehindAppBar). The
+    // body sits inside a SafeArea that already consumes the status bar
+    // inset, so the banner only needs the app bar's 64 px toolbar height
+    // to sit flush against its bottom edge.
+    return Container(
+      margin: const EdgeInsets.only(top: 66, left: 10, right: 10),
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+      decoration: BoxDecoration(
+        color: p.bar,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: p.border),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 10,
+                height: 10,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.6,
+                  color: p.accent,
                 ),
-                const SizedBox(width: 8),
-                Text(
-                  'syncingHistory'.tr,
-                  style: TextStyle(fontSize: 11, color: p.muted),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(2),
-              child: LinearProgressIndicator(
-                value: controller.syncProgress.value,
-                minHeight: 2,
-                backgroundColor: p.progressTrack,
-                valueColor: AlwaysStoppedAnimation<Color>(p.accent),
               ),
+              const SizedBox(width: 8),
+              Text(
+                l10n.syncingHistory,
+                style: TextStyle(fontSize: 11, color: p.muted),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(2),
+            child: LinearProgressIndicator(
+              value: state.syncProgress,
+              minHeight: 2,
+              backgroundColor: p.progressTrack,
+              valueColor: AlwaysStoppedAnimation<Color>(p.accent),
             ),
-          ],
-        ),
-      );
-    });
+          ),
+        ],
+      ),
+    );
   }
 }
 
 /// Reverse chronological message list driving the shared controller state.
 class ChatMessageList extends StatelessWidget {
-  const ChatMessageList({super.key, required this.controller});
+  const ChatMessageList({super.key, required this.state, required this.controller});
 
-  final ChatScreenControllerBase controller;
+  final ChatState state;
+  final ChatController controller;
 
   @override
   Widget build(BuildContext context) {
@@ -480,14 +482,12 @@ class ChatMessageList extends StatelessWidget {
     // inset, so the list only needs the app bar's 64 px toolbar height plus
     // a small breathing gap to start below it.
     const topInset = 72.0;
-    return Obx(
-      () => ListView.builder(
-        reverse: true,
-        padding: EdgeInsets.fromLTRB(10, topInset, 10, 8),
-        itemCount: controller.messages.length,
-        itemBuilder: (context, index) =>
-            ChatMessageBubble(message: controller.messages[index], controller: controller),
-      ),
+    return ListView.builder(
+      reverse: true,
+      padding: EdgeInsets.fromLTRB(10, topInset, 10, 8),
+      itemCount: state.messages.length,
+      itemBuilder: (context, index) =>
+          ChatMessageBubble(message: state.messages[index], controller: controller),
     );
   }
 }
@@ -502,11 +502,12 @@ class ChatMessageBubble extends StatelessWidget {
 
   /// Optional controller: needed only when the message is a voice note
   /// (playback controls).
-  final ChatScreenControllerBase? controller;
+  final ChatController? controller;
 
   @override
   Widget build(BuildContext context) {
     final p = ChatPalette.of(context);
+    final l10n = AppLocalizations.of(context)!;
     final bool mine = message.isSentByMe;
     final bool showProgress =
         message.isTransferring && message.transferKind == 'bytes';
@@ -521,13 +522,13 @@ class ChatMessageBubble extends StatelessWidget {
     if (message.hasRemoteMedia) {
       // Deferred media from the history sync: the file still lives on the
       // peer — offer a download placeholder instead of the media.
-      content = _downloadBubble(p, mine);
+      content = _downloadBubble(p, mine, l10n);
     } else if (message.isAudio && message.imagePath != null) {
       content = _audioBubble(p, mine);
     } else if (message.imagePath != null) {
       content = _imageBubble(context, p, mine, showProgress);
     } else if (showProgress) {
-      content = _progressBubble(p, mine);
+      content = _progressBubble(p, mine, l10n);
     } else {
       content = Column(
         crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
@@ -543,24 +544,20 @@ class ChatMessageBubble extends StatelessWidget {
               final items = editableTextState.contextMenuButtonItems;
               items.add(
                 ContextMenuButtonItem(
-                  label: 'copyAction'.tr,
+                  label: l10n.copyAction,
                   onPressed: () {
                     Clipboard.setData(ClipboardData(text: message.text));
                     editableTextState.hideToolbar();
-                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text(''),
-                        duration: Duration(milliseconds: 800),
-                      ),
-                    );
+                    // Clear any visible notice card (the old code cleared a
+                    // snackbar here the same way).
+                    ConnectionNotice.dismiss();
                   },
                 ),
               );
               if (mine && controller != null) {
                 items.add(
                   ContextMenuButtonItem(
-                    label: 'delete'.tr,
+                    label: l10n.delete,
                     onPressed: () {
                       editableTextState.hideToolbar();
                       showDeleteMessageDialog(context, controller!, message);
@@ -631,7 +628,7 @@ class ChatMessageBubble extends StatelessWidget {
   /// Placeholder bubble for media that was NOT auto-downloaded during the
   /// history sync (large files live on the peer): shows the kind and size,
   /// fetches the file on tap and spins while the fetch is in flight.
-  Widget _downloadBubble(ChatPalette p, bool mine) {
+  Widget _downloadBubble(ChatPalette p, bool mine, AppLocalizations l10n) {
     final bool audio = message.isAudio;
     final bool busy = message.isTransferring;
     final int size = message.remoteMediaSize ?? 0;
@@ -653,7 +650,7 @@ class ChatMessageBubble extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               Text(
-                audio ? 'audioLabel'.tr : 'photoLabel'.tr,
+                audio ? l10n.audioLabel : l10n.photoLabel,
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
@@ -680,8 +677,8 @@ class ChatMessageBubble extends StatelessWidget {
               const SizedBox(width: 6),
               Text(
                 busy
-                    ? 'downloadingLabel'.tr
-                    : '${_formatMediaSize(size)} • ${'downloadMediaHint'.tr}',
+                    ? l10n.downloadingLabel
+                    : '${_formatMediaSize(size)} • ${l10n.downloadMediaHint}',
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
@@ -768,8 +765,30 @@ class ChatMessageBubble extends StatelessWidget {
   }
 
   /// Voice-note bubble: play/pause button, duration caption and a thin
-  /// playback progress line. The file path lives in `imagePath` (see base).
+  /// playback progress line. The file path lives in `imagePath` (see the
+  /// chat controller). Playback state flows through the controller's
+  /// [AudioPlaybackState] notifier — a dedicated listenable so position
+  /// ticks don't rebuild the message list.
   Widget _audioBubble(ChatPalette p, bool mine) {
+    final c = controller;
+    if (c == null) {
+      return _audioBubbleBody(const AudioPlaybackState(), p, mine);
+    }
+    return ValueListenableBuilder<AudioPlaybackState>(
+      valueListenable: c.audioPlayback,
+      builder: (_, playback, _) => _audioBubbleBody(playback, p, mine),
+    );
+  }
+
+  Widget _audioBubbleBody(
+    AudioPlaybackState playback,
+    ChatPalette p,
+    bool mine,
+  ) {
+    final isThis = playback.playingId == message.id;
+    final playing = isThis && playback.playing;
+    final durationMs = playback.durationMs;
+    final value = isThis ? (playback.progress * durationMs) : 0.0;
     return Column(
       crossAxisAlignment:
           mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
@@ -778,33 +797,29 @@ class ChatMessageBubble extends StatelessWidget {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Obx(() {
-              final isThis = controller?.playingAudioId.value == message.id;
-              final playing = isThis && (controller?.isAudioPlaying.value ?? false);
-              return GestureDetector(
-                onTap: controller == null
-                    ? null
-                    : () => controller!.toggleAudio(message),
-                child: Container(
-                  width: 38,
-                  height: 38,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: LinearGradient(colors: p.sentGradient),
-                    border: Border.all(
-                      color: mine
-                          ? Colors.white.withValues(alpha: 0.45)
-                          : p.border,
-                    ),
-                  ),
-                  child: Icon(
-                    playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                    color: Colors.white,
-                    size: 26,
+            GestureDetector(
+              onTap: controller == null
+                  ? null
+                  : () => controller!.toggleAudio(message),
+              child: Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: LinearGradient(colors: p.sentGradient),
+                  border: Border.all(
+                    color: mine
+                        ? Colors.white.withValues(alpha: 0.45)
+                        : p.border,
                   ),
                 ),
-              );
-            }),
+                child: Icon(
+                  playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  color: Colors.white,
+                  size: 26,
+                ),
+              ),
+            ),
             const SizedBox(width: 10),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -845,39 +860,31 @@ class ChatMessageBubble extends StatelessWidget {
                 // Draggable seek bar (thin slider).
                 SizedBox(
                   width: 170,
-                  child: Obx(() {
-                    final isThis =
-                        controller?.playingAudioId.value == message.id;
-                    final durationMs = controller?.audioDurationMs ?? 0;
-                    final value = isThis
-                        ? (controller!.audioProgress.value * durationMs)
-                        : 0.0;
-                    return SliderTheme(
-                      data: SliderThemeData(
-                        trackHeight: 3,
-                        thumbShape: const RoundSliderThumbShape(
-                          enabledThumbRadius: 6,
-                        ),
-                        overlayShape: const RoundSliderOverlayShape(
-                          overlayRadius: 12,
-                        ),
-                        activeTrackColor: mine ? Colors.white : p.accent,
-                        inactiveTrackColor: mine
-                            ? Colors.white.withValues(alpha: 0.3)
-                            : p.progressTrack,
-                        thumbColor: mine ? Colors.white : p.accent,
-                        overlayColor: (mine ? Colors.white : p.accent)
-                            .withValues(alpha: 0.15),
+                  child: SliderTheme(
+                    data: SliderThemeData(
+                      trackHeight: 3,
+                      thumbShape: const RoundSliderThumbShape(
+                        enabledThumbRadius: 6,
                       ),
-                      child: Slider(
-                        value: value.clamp(0.0, durationMs),
-                        max: durationMs > 0 ? durationMs : 1,
-                        onChanged: controller == null
-                            ? null
-                            : (v) => controller!.seekAudio(message, v),
+                      overlayShape: const RoundSliderOverlayShape(
+                        overlayRadius: 12,
                       ),
-                    );
-                  }),
+                      activeTrackColor: mine ? Colors.white : p.accent,
+                      inactiveTrackColor: mine
+                          ? Colors.white.withValues(alpha: 0.3)
+                          : p.progressTrack,
+                      thumbColor: mine ? Colors.white : p.accent,
+                      overlayColor: (mine ? Colors.white : p.accent)
+                          .withValues(alpha: 0.15),
+                    ),
+                    child: Slider(
+                      value: value.clamp(0.0, durationMs),
+                      max: durationMs > 0 ? durationMs : 1,
+                      onChanged: controller == null
+                          ? null
+                          : (v) => controller!.seekAudio(message, v),
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -897,7 +904,7 @@ class ChatMessageBubble extends StatelessWidget {
   }
 
   /// Bare transfer progress bubble (bubble without a thumbnail yet).
-  Widget _progressBubble(ChatPalette p, bool mine) {
+  Widget _progressBubble(ChatPalette p, bool mine, AppLocalizations l10n) {
     final current = message.transferCurrent ?? 0;
     final total = message.transferTotal ?? 0;
     final pct = total == 0 ? 0 : (current / total * 100).toStringAsFixed(0);
@@ -911,7 +918,7 @@ class ChatMessageBubble extends StatelessWidget {
         ),
         const SizedBox(height: 6),
         Text(
-          '${mine ? 'sendingLabel'.tr : 'receivingLabel'.tr} '
+          '${mine ? l10n.sendingLabel : l10n.receivingLabel} '
           '$current/$total bytes ($pct%)',
           textAlign: TextAlign.right,
           style: TextStyle(
@@ -965,13 +972,14 @@ class _AudioSkipButton extends StatelessWidget {
 
 /// Glassy composer: image picker, rounded field and gradient send.
 class ChatInputBar extends StatelessWidget {
-  const ChatInputBar({super.key, required this.controller});
+  const ChatInputBar({super.key, required this.state, required this.controller});
 
-  final ChatScreenControllerBase controller;
+  final ChatState state;
+  final ChatController controller;
 
   void _send() {
     final text = controller.textController.text.trim();
-    if (controller.isConnected.value && text.isNotEmpty) {
+    if (state.isConnected && text.isNotEmpty) {
       controller.sendTextMessage();
     }
   }
@@ -979,172 +987,173 @@ class ChatInputBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = ChatPalette.of(context);
-    return Obx(() {
-      if (!controller.isConnected.value) {
-        return _ConnectBar(controller: controller, palette: p);
-      }
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (controller.isRecording.value)
-            _RecordingBanner(controller: controller, palette: p),
-          Container(
-            margin: const EdgeInsets.fromLTRB(10, 4, 10, 10),
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-            decoration: BoxDecoration(
-              color: p.bar,
-              borderRadius: BorderRadius.circular(28),
-              border: Border.all(color: p.border),
-            ),
-            child: Row(
-              children: [
-                // Tap-to-record voice message button (tap again to stop & send;
-                // long-press the recording banner to cancel).
-                GestureDetector(
-                  onTap: controller.isRecording.value
-                      ? controller.stopRecordingAndSend
-                      : controller.startRecording,
-                  child: Padding(
-                    padding: const EdgeInsets.all(10),
-                    child: Icon(
-                      controller.isRecording.value
-                          ? Icons.graphic_eq
-                          : Icons.mic_none,
-                      color: controller.isRecording.value
-                          ? Colors.redAccent
-                          : p.accent,
-                      size: 24,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(Icons.image_outlined, color: p.accent),
-                  tooltip: 'sendImageTooltip'.tr,
-                  onPressed: () => controller.showImageSourceSheet(context),
-                ),
-            Expanded(
-              child: TextField(
-                controller: controller.textController,
-                style: TextStyle(color: p.messageText),
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => _send(),
-                decoration: InputDecoration(
-                  hintText: 'typeMessageHint'.tr,
-                  hintStyle: TextStyle(color: p.muted),
-                  isDense: true,
-                  filled: true,
-                  fillColor: p.surface.withValues(alpha: 0.85),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 10,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(24),
-                    borderSide: BorderSide.none,
+    final l10n = AppLocalizations.of(context)!;
+    if (!state.isConnected) {
+      return _ConnectBar(state: state, controller: controller, palette: p);
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (state.isRecording)
+          _RecordingBanner(state: state, controller: controller, palette: p),
+        Container(
+          margin: const EdgeInsets.fromLTRB(10, 4, 10, 10),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+          decoration: BoxDecoration(
+            color: p.bar,
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(color: p.border),
+          ),
+          child: Row(
+            children: [
+              // Tap-to-record voice message button (tap again to stop & send;
+              // long-press the recording banner to cancel).
+              GestureDetector(
+                onTap: state.isRecording
+                    ? controller.stopRecordingAndSend
+                    : controller.startRecording,
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Icon(
+                    state.isRecording ? Icons.graphic_eq : Icons.mic_none,
+                    color: state.isRecording ? Colors.redAccent : p.accent,
+                    size: 24,
                   ),
                 ),
               ),
-            ),
-            const SizedBox(width: 6),
-            _SendButton(palette: p, onPressed: _send),
-          ],
+              IconButton(
+                icon: Icon(Icons.image_outlined, color: p.accent),
+                tooltip: l10n.sendImageTooltip,
+                onPressed: () => controller.showImageSourceSheet(context),
+              ),
+              Expanded(
+                child: TextField(
+                  controller: controller.textController,
+                  style: TextStyle(color: p.messageText),
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) => _send(),
+                  decoration: InputDecoration(
+                    hintText: l10n.typeMessageHint,
+                    hintStyle: TextStyle(color: p.muted),
+                    isDense: true,
+                    filled: true,
+                    fillColor: p.surface.withValues(alpha: 0.85),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 10,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(24),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              _SendButton(palette: p, onPressed: _send),
+            ],
+          ),
         ),
-      ),
       ],
-      );
-    });
+    );
   }
 }
 
 /// Thin strip shown above the composer while a voice recording is active.
 class _RecordingBanner extends StatelessWidget {
-  const _RecordingBanner({required this.controller, required this.palette});
+  const _RecordingBanner({
+    required this.state,
+    required this.controller,
+    required this.palette,
+  });
 
-  final ChatScreenControllerBase controller;
+  final ChatState state;
+  final ChatController controller;
   final ChatPalette palette;
 
   @override
   Widget build(BuildContext context) {
-    // Own Obx: reads must happen inside it for the seconds counter to
-    // rebuild the banner (the parent chair's Obx only tracks isRecording).
-    return Obx(() {
-      final seconds = controller.recordSeconds.value;
-      final label =
-          'recordingLabel'.trParams({
-            'time':
-                '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}',
-          });
+    final l10n = AppLocalizations.of(context)!;
+    final seconds = state.recordSeconds;
+    final label = l10n.recordingLabel(
+      '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}',
+    );
     return GestureDetector(
       // Long-press anywhere on the banner also cancels.
-      onLongPress: controller.cancelRecording,
+      onLongPress: () => controller.cancelRecording(),
       child: Container(
-      margin: const EdgeInsets.fromLTRB(10, 4, 10, 6),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        color: palette.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: palette.border),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.max,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: Colors.redAccent,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.redAccent.withValues(alpha: 0.6),
-                  blurRadius: 6,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          Text(label, style: TextStyle(fontSize: 12, color: palette.muted)),
-          const Spacer(),
-          GestureDetector(
-            onTap: controller.cancelRecording,
-            behavior: HitTestBehavior.opaque,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.close, size: 14, color: palette.muted),
-                  const SizedBox(width: 4),
-                  Text(
-                    'cancel'.tr,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: palette.accent,
-                    ),
+        margin: const EdgeInsets.fromLTRB(10, 4, 10, 6),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: palette.surface,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: palette.border),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.max,
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.redAccent,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.redAccent.withValues(alpha: 0.6),
+                    blurRadius: 6,
                   ),
                 ],
               ),
             ),
-          ),
-        ],
+            const SizedBox(width: 8),
+            Text(label, style: TextStyle(fontSize: 12, color: palette.muted)),
+            const Spacer(),
+            GestureDetector(
+              onTap: () => controller.cancelRecording(),
+              behavior: HitTestBehavior.opaque,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.close, size: 14, color: palette.muted),
+                    const SizedBox(width: 4),
+                    Text(
+                      l10n.cancel,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: palette.accent,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
-    ),
     );
-    });
   }
 }
 
 /// Shown instead of the composer when the chat is opened without a live
 /// connection: a Connect button that tries to reach the session's device.
 class _ConnectBar extends StatelessWidget {
-  const _ConnectBar({required this.controller, required this.palette});
+  const _ConnectBar({
+    required this.state,
+    required this.controller,
+    required this.palette,
+  });
 
-  final ChatScreenControllerBase controller;
+  final ChatState state;
+  final ChatController controller;
   final ChatPalette palette;
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
     return Container(
       margin: const EdgeInsets.fromLTRB(10, 4, 10, 10),
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
@@ -1157,7 +1166,7 @@ class _ConnectBar extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            'notConnectedBar'.tr,
+            l10n.notConnectedBar,
             style: TextStyle(fontSize: 11, color: palette.muted),
           ),
           const SizedBox(height: 8),
@@ -1179,36 +1188,34 @@ class _ConnectBar extends StatelessWidget {
               ),
               child: InkWell(
                 borderRadius: BorderRadius.circular(23),
-                onTap: controller.isConnecting.value
+                onTap: state.isConnecting
                     ? null
                     : controller.connectToCurrentSession,
-                child: Obx(
-                  () => Center(
-                    child: controller.isConnecting.value
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2.4,
-                              color: Colors.white,
-                            ),
-                          )
-                        : Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.link_rounded, color: Colors.white, size: 20),
-                              const SizedBox(width: 8),
-                              Text(
-                                'connectAction'.tr,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 15,
-                                ),
-                              ),
-                            ],
+                child: Center(
+                  child: state.isConnecting
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.4,
+                            color: Colors.white,
                           ),
-                  ),
+                        )
+                      : Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.link_rounded, color: Colors.white, size: 20),
+                            const SizedBox(width: 8),
+                            Text(
+                              l10n.connectAction,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 15,
+                              ),
+                            ),
+                          ],
+                        ),
                 ),
               ),
             ),
@@ -1265,6 +1272,7 @@ class ChatImagePreviewScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = ChatPalette.of(context);
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       backgroundColor: p.canvasTop,
       appBar: AppBar(
@@ -1278,7 +1286,7 @@ class ChatImagePreviewScreen extends StatelessWidget {
         actions: [
           IconButton(
             icon: Icon(Icons.save_alt, color: p.accent),
-            tooltip: 'saveToGalleryTooltip'.tr,
+            tooltip: l10n.saveToGalleryTooltip,
             onPressed: () => _saveToGallery(context),
           ),
         ],
@@ -1290,30 +1298,37 @@ class ChatImagePreviewScreen extends StatelessWidget {
   }
 
   Future<void> _saveToGallery(BuildContext context) async {
+    final l10n = AppLocalizations.of(context)!;
     // Request runtime permissions before saving. On Android 13+
     // WRITE_EXTERNAL_STORAGE is ignored, so READ_MEDIA_IMAGES
     // (Permission.photos) must be used instead of Permission.storage.
-    if (GetPlatform.isAndroid) {
+    if (Platform.isAndroid) {
       final androidInfo = await DeviceInfoPlugin().androidInfo;
       final status = androidInfo.version.sdkInt >= 33
           ? await Permission.photos.request()
           : await Permission.storage.request();
       if (!status.isGranted) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('permissionRequiredMessage'.tr)),
+          ConnectionNotice.show(
+            title: l10n.permissionTitle,
+            message: l10n.permissionRequiredMessage,
+            icon: Icons.lock_outline,
+            accent: Colors.amber,
           );
         }
         return;
       }
-    } else if (GetPlatform.isIOS) {
+    } else if (Platform.isIOS) {
       var status = await Permission.photosAddOnly.request();
       if (!status.isGranted) {
         status = await Permission.photos.request();
         if (!status.isGranted) {
           if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('photosPermissionRequiredMessage'.tr)),
+            ConnectionNotice.show(
+              title: l10n.permissionTitle,
+              message: l10n.photosPermissionRequiredMessage,
+              icon: Icons.lock_outline,
+              accent: Colors.amber,
             );
           }
           return;
@@ -1328,8 +1343,11 @@ class ChatImagePreviewScreen extends StatelessWidget {
     );
     if (context.mounted) {
       final ok = res is Map && (res['isSuccess'] == true || res['filePath'] != null);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ok ? 'savedToGallery'.tr : 'saveFailed'.tr)),
+      ConnectionNotice.show(
+        title: l10n.photoLabel,
+        message: ok ? l10n.savedToGallery : l10n.saveFailed,
+        icon: ok ? Icons.check_circle : Icons.error_outline,
+        accent: ok ? Colors.green : Colors.redAccent,
       );
     }
   }

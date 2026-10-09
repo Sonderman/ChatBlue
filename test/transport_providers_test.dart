@@ -2,9 +2,13 @@ import 'dart:typed_data';
 
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/core/services/wd_service.dart';
+import 'package:chatblue/l10n/app_localizations_en.dart';
+import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/providers/transport_providers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/fake_bt_service.dart';
+import 'support/fake_wd_service.dart';
 
 /// Transport notifier contract: service events drive UI state, the READY
 /// handshake flips the link to connected (never leaking as a message), and
@@ -24,6 +28,7 @@ void main() {
             btTransportProvider.overrideWith(
               () => BtTransportNotifier(service: service),
             ),
+            appLocalizationsProvider.overrideWithValue(AppLocalizationsEn()),
           ],
         );
 
@@ -193,7 +198,7 @@ void main() {
       expect(service.connectCalled, isFalse);
       expect(
         c.read(btTransportProvider).lastConnectError,
-        'invalidBtAddressMessage',
+        AppLocalizationsEn().invalidBtAddressMessage,
       );
     });
 
@@ -220,7 +225,7 @@ void main() {
       expect(notifier.isAwaitingAcceptance, isFalse);
       expect(
         c.read(btTransportProvider).lastConnectError,
-        'connectionDeclinedMessage',
+        AppLocalizationsEn().connectionDeclinedMessage,
       );
       expect(c.read(btTransportProvider).isConnected, isFalse);
     });
@@ -238,8 +243,39 @@ void main() {
             wdTransportProvider.overrideWith(
               () => WdTransportNotifier(service: service),
             ),
+            appLocalizationsProvider.overrideWithValue(AppLocalizationsEn()),
           ],
         );
+
+    test('startDiscovery is blocked while location is off', () async {
+      service.locationEnabled = false;
+      final c = container();
+      addTearDown(c.dispose);
+      // Build the notifier first, THEN pump: `_init`'s state refresh is
+      // unawaited from build() and must land before the expectation.
+      final notifier = c.read(wdTransportProvider.notifier);
+      await pumpEventQueue();
+
+      expect(c.read(wdTransportProvider).isLocationOn, isFalse);
+
+      await notifier.startDiscovery();
+      expect(c.read(wdTransportProvider).isScanning, isFalse);
+      expect(service.startDiscoveryCalls, 0);
+    });
+
+    test('refreshLocationState tracks the system toggle', () async {
+      service.locationEnabled = false;
+      final c = container();
+      addTearDown(c.dispose);
+      final notifier = c.read(wdTransportProvider.notifier);
+      await pumpEventQueue();
+
+      expect(c.read(wdTransportProvider).isLocationOn, isFalse);
+
+      service.locationEnabled = true;
+      await notifier.refreshLocationState();
+      expect(c.read(wdTransportProvider).isLocationOn, isTrue);
+    });
 
     test('peer discovery populates the peers list', () async {
       final c = container();
@@ -255,6 +291,25 @@ void main() {
       );
       expect(c.read(wdTransportProvider).peers.map((p) => p.deviceAddress),
           ['p2p-1']);
+    });
+
+    test('connectToSessionPeer with location off surfaces the location reason',
+        () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(wdTransportProvider.notifier);
+      service.locationEnabled = false;
+      service.enableLocationResult = false;
+
+      final ok = await notifier.connectToSessionPeer(
+        address: 'AA:BB:CC',
+        name: 'Peer',
+      );
+      expect(ok, isFalse);
+      expect(c.read(wdTransportProvider).lastConnectError,
+          AppLocalizationsEn().locationOffTitle);
     });
 
     test('connectToSessionPeer with Wi‑Fi off surfaces the wifiOff reason',
@@ -274,7 +329,7 @@ void main() {
       expect(ok, isFalse);
       expect(
         c.read(wdTransportProvider).lastConnectError,
-        'wifiOffTitle',
+        AppLocalizationsEn().wifiOffTitle,
       );
     });
 
@@ -329,109 +384,4 @@ void main() {
       expect(notifier.isAwaitingAcceptance, isTrue);
     });
   });
-}
-
-class FakeBtService extends BtClassicService {
-  @override
-  Future<void> initialize({bool requestEnableIfDisabled = true}) async {}
-
-  @override
-  Future<Map> requestDiscoverable({int seconds = 120}) async =>
-      {'allowed': true, 'durationSec': 0};
-
-  @override
-  Future<List<BtDeviceInfo>> getPairedDevices() async => [];
-
-  int startScanCalls = 0;
-
-  @override
-  Future<void> startScan({Duration? autoStopAfter}) async {
-    startScanCalls++;
-  }
-
-  @override
-  Future<void> stopScan() async {}
-
-  @override
-  Future<void> startServer({String serviceName = 'ChatBlueSPP', String? uuid}) async {}
-
-  @override
-  Future<void> stopServer() async {}
-
-  /// True once the native dial was invoked — lets tests assert that the
-  /// address guard did (or did not) reach the service.
-  bool connectCalled = false;
-
-  @override
-  Future<void> connect(String address, {String? uuid}) async {
-    connectCalled = true;
-  }
-
-  @override
-  Future<void> disconnect() async {}
-
-  @override
-  Future<bool> isConnected() async => false;
-
-  @override
-  Future<void> sendString(String text) async {}
-
-  @override
-  Future<void> sendBytes(Uint8List bytes) async {}
-
-  @override
-  Future<void> dispose() async {}
-}
-
-class FakeWdService extends WifiDirectService {
-  bool wifiEnabled = true;
-  bool enableWifiResult = true;
-
-  @override
-  Future<void> initialize() async {}
-
-  @override
-  Future<bool> isWifiEnabled() async => wifiEnabled;
-
-  @override
-  Future<bool> requestEnableWifi() async => enableWifiResult;
-
-  @override
-  Future<String?> getThisDeviceAddress() async => null;
-
-  @override
-  Future<void> startDiscovery({Duration? autoStopAfter}) async {}
-
-  @override
-  Future<void> stopDiscovery() async {}
-
-  @override
-  Future<void> requestPeers() async {}
-
-  @override
-  Future<List<WdPeerInfo>> getDiscoveredPeers() async => [];
-
-  @override
-  Future<void> startServer() async {}
-
-  @override
-  Future<void> stopServer() async {}
-
-  @override
-  Future<void> connect(String deviceAddress) async {}
-
-  @override
-  Future<void> disconnect() async {}
-
-  @override
-  Future<bool> isConnected() async => false;
-
-  @override
-  Future<void> sendString(String text) async {}
-
-  @override
-  Future<void> sendBytes(Uint8List bytes) async {}
-
-  @override
-  Future<void> dispose() async {}
 }

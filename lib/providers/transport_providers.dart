@@ -15,17 +15,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Key-based translation hook used by the transport notifiers for their
-/// snackbar/bottom-sheet strings. The GetX adapter installs `.tr`; a ported
-/// screen installs [transportKeyToL10n]. Fallback: the raw key.
-typedef TransportTranslator =
-    String Function(String key, {Map<String, String>? params});
-
-String _noopTranslate(String key, {Map<String, String>? params}) => key;
-
-/// Key→AppLocalizations mapping used by ported screens to install the
-/// transport notifiers' translation hook (the GetX adapter installs `.tr`
-/// instead). F4'te notifier'lar doğrudan AppLocalizations kullanır.
+/// Key→AppLocalizations mapping used by the transport notifiers' `_t`
+/// helper for their snackbar/bottom-sheet strings — single l10n source
+/// (gen-l10n; the caller supplies the AppLocalizations instance).
 String transportKeyToL10n(
   AppLocalizations l10n,
   String key, {
@@ -46,6 +38,8 @@ String transportKeyToL10n(
       return l10n.invalidBtAddressMessage;
     case 'wifiOffTitle':
       return l10n.wifiOffTitle;
+    case 'locationOffTitle':
+      return l10n.locationOffTitle;
     case 'wfdNoDevicesFound':
       return l10n.wfdNoDevicesFound;
     case 'wfdTargetNotFound':
@@ -134,8 +128,9 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
 
   final BtClassicService? _serviceOverride;
 
-  /// Translation hook — installed by the GetX adapter or a ported screen.
-  TransportTranslator translate = _noopTranslate;
+  /// Context'siz çeviri: güncel locale'in l10n kaynağından okur.
+  String _t(String key, {Map<String, String>? params}) =>
+      transportKeyToL10n(ref.read(appLocalizationsProvider), key, params: params);
 
   late BtClassicService _service;
   bool _chatOpen = false;
@@ -229,7 +224,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
       }
       _clearScanTimers();
       state = state.copyWith(isScanning: false, scanResults: const []);
-      _showSnackbar('scanErrorTitle', message);
+      _showNotice('scanErrorTitle', message, icon: Icons.error_outline);
     };
 
     _service.onSocketConnected = (remote) {
@@ -264,7 +259,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
         _pendingAccept = false;
         _pendingRemote = null;
         state = state.copyWith(
-          lastConnectError: translate('connectionDeclinedMessage'),
+          lastConnectError: _t('connectionDeclinedMessage'),
         );
         _showDeclinedNotice('connectionDeclinedMessage');
       }
@@ -286,22 +281,25 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     _service.onSocketData = _dispatchSocketData;
   }
 
-  /// Snackbar with a translated message. [messageKeyOrRaw] may be a
-  /// translation key or raw text (native errors): keys translate, raw
+  /// Themed notice card with a translated message. [messageKeyOrRaw] may
+  /// be a translation key or raw text (native errors): keys translate, raw
   /// text passes through the translator unchanged.
-  void _showSnackbar(String titleKey, String messageKeyOrRaw) {
-    final messenger = scaffoldMessengerKey.currentState;
-    if (messenger == null) return;
-    messenger.showSnackBar(
-      SnackBar(
-        content: Text(
-          '${translate(titleKey)}: ${translate(messageKeyOrRaw)}',
-        ),
-      ),
+  void _showNotice(
+    String titleKey,
+    String messageKeyOrRaw, {
+    IconData icon = Icons.link_off,
+    Color accent = Colors.redAccent,
+  }) {
+    ConnectionNotice.show(
+      title: _t(titleKey),
+      message: _t(messageKeyOrRaw),
+      isChatScreen: _chatOpen,
+      icon: icon,
+      accent: accent,
     );
   }
 
-  // --- ChatTransport surface (consumed by the GetX bridge + ported UI) ---
+  // --- ChatTransport surface (consumed by the chat binding + scan screens) ---
 
   bool get isConnected => state.isConnected;
   bool get isAwaitingAcceptance => _pendingAccept;
@@ -309,12 +307,12 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   String? get connectedDeviceName => state.connectedDevice?.name;
   String get transportType => 'bt';
 
-  /// Styled decline notification (dialer or declining side) — a themed
-  /// notice card instead of a plain snackbar; mirrors the request banner.
+  /// Decline feedback — the themed notice card (dialer or declining side).
+  /// The skip-guards keep this the only surface for the outcome.
   void _showDeclinedNotice(String messageKey) {
     ConnectionNotice.show(
-      title: translate('connectionDeclinedTitle'),
-      message: translate(messageKey),
+      title: _t('connectionDeclinedTitle'),
+      message: _t(messageKey),
       isChatScreen: _chatOpen,
     );
   }
@@ -512,7 +510,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
         debugPrint('BT connect rejected: invalid address "$address"');
       }
       state = state.copyWith(
-        lastConnectError: translate('invalidBtAddressMessage'),
+        lastConnectError: _t('invalidBtAddressMessage'),
       );
       return false;
     }
@@ -599,7 +597,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   Future<bool> connectToSessionPeer({required String? address, String? name}) {
     if (address == null || address.isEmpty) {
       state = state.copyWith(
-        lastConnectError: translate('noDeviceAddressMessage'),
+        lastConnectError: _t('noDeviceAddressMessage'),
         clearLastConnectError: false,
       );
       return Future<bool>.value(false);
@@ -665,6 +663,8 @@ class WdTransportState {
     this.isScanning = false,
     this.isWifiOn = true,
     this.isWifiEnableInFlight = false,
+    this.isLocationOn = true,
+    this.isLocationEnableInFlight = false,
     this.peers = const [],
     this.connectedDevice,
     this.lastDisconnectReason,
@@ -677,6 +677,11 @@ class WdTransportState {
   final bool isScanning;
   final bool isWifiOn;
   final bool isWifiEnableInFlight;
+
+  /// Location master toggle mirror (required for P2P discovery on many
+  /// OEM builds); drives the scan screen's "turn on location" panel.
+  final bool isLocationOn;
+  final bool isLocationEnableInFlight;
   final List<WdPeerInfo> peers;
   final WdPeerInfo? connectedDevice;
   final String? lastDisconnectReason;
@@ -689,6 +694,8 @@ class WdTransportState {
     bool? isScanning,
     bool? isWifiOn,
     bool? isWifiEnableInFlight,
+    bool? isLocationOn,
+    bool? isLocationEnableInFlight,
     List<WdPeerInfo>? peers,
     WdPeerInfo? connectedDevice,
     bool clearConnectedDevice = false,
@@ -705,6 +712,8 @@ class WdTransportState {
       isScanning: isScanning ?? this.isScanning,
       isWifiOn: isWifiOn ?? this.isWifiOn,
       isWifiEnableInFlight: isWifiEnableInFlight ?? this.isWifiEnableInFlight,
+      isLocationOn: isLocationOn ?? this.isLocationOn,
+      isLocationEnableInFlight: isLocationEnableInFlight ?? this.isLocationEnableInFlight,
       peers: peers ?? this.peers,
       connectedDevice: clearConnectedDevice
           ? null
@@ -731,15 +740,16 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
 
   final WifiDirectService? _serviceOverride;
 
-  /// Translation hook — installed by the GetX adapter or a ported screen.
-  TransportTranslator translate = _noopTranslate;
+  /// Context'siz çeviri: güncel locale'in l10n kaynağından okur.
+  String _t(String key, {Map<String, String>? params}) =>
+      transportKeyToL10n(ref.read(appLocalizationsProvider), key, params: params);
 
   /// Live name of the pending incoming request; drives the request banner
   /// title in place (peer name frame can arrive while the banner is up).
   final ValueNotifier<String> pendingRequestName = ValueNotifier<String>('');
 
   /// Called with the peer's self-reported name when a chat screen is open —
-  /// the GetX bridge routes it to WChatScreenController.updateSessionName.
+  /// the chat binding routes it to the open ChatController (session rename).
   void Function(String name)? onPeerNameForChat;
 
   late WifiDirectService _service;
@@ -755,6 +765,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   String? _ownP2pMac;
   bool _pendingAccept = false;
   bool _wifiEnableInFlight = false;
+  bool _locationEnableInFlight = false;
   bool _suppressScanErrors = false;
   void Function(Uint8List bytes, String text, {required String kind})?
       _chatDataCallback;
@@ -780,12 +791,13 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       await _service.initialize();
       if (!ref.mounted) return;
       await _refreshWifiState();
+      await refreshLocationState();
     } catch (e) {
       if (kDebugMode) debugPrint('WD transport init failed: $e');
     }
   }
 
-  // --- ChatTransport surface (consumed by the GetX bridge + ported UI) ---
+  // --- ChatTransport surface (consumed by the chat binding + scan screens) ---
 
   bool get isConnected => state.isConnected;
   bool get isAwaitingAcceptance => _pendingAccept;
@@ -794,12 +806,12 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   String? get connectedDeviceName => state.connectedDevice?.deviceName;
   String get transportType => 'wfd';
 
-  /// Styled decline notification (dialer or declining side) — a themed
-  /// notice card instead of a plain snackbar; mirrors the request banner.
+  /// Decline feedback — the themed notice card (dialer or declining side).
+  /// The skip-guards keep this the only surface for the outcome.
   void _showDeclinedNotice(String messageKey) {
     ConnectionNotice.show(
-      title: translate('connectionDeclinedTitle'),
-      message: translate(messageKey),
+      title: _t('connectionDeclinedTitle'),
+      message: _t(messageKey),
       isChatScreen: _chatOpen,
     );
   }
@@ -817,6 +829,11 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   Future<void> startDiscovery() async {
     await _refreshWifiState();
     if (!state.isWifiOn) return; // screen shows the "turn on Wi‑Fi" state
+    // Pre-flight the location master toggle: many OEM builds (MIUI/
+    // HyperOS) fail P2P discovery silently or with an opaque ERROR while
+    // it is off — block here and let the screen show the location panel.
+    await refreshLocationState();
+    if (!state.isLocationOn) return;
     state = state.copyWith(peers: const []);
     await _service.startDiscovery();
     state = state.copyWith(isScanning: true);
@@ -857,6 +874,38 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
     }
   }
 
+  /// Re-reads the location master toggle. Public: the scan screen refreshes
+  /// it on mount and on app resume so its "location off" panel reflects the
+  /// current system state (the toggle can change outside the app).
+  Future<void> refreshLocationState() async {
+    try {
+      final locationOn = await _service.isLocationEnabled();
+      state = state.copyWith(isLocationOn: locationOn);
+    } catch (_) {
+      // fail-open: keep the last known state
+    }
+  }
+
+  /// Opens the system location settings and polls until the toggle turns
+  /// on (mirrors [enableWifi]: 30 x 500 ms window, auto-continues).
+  Future<void> enableLocation() async {
+    if (_locationEnableInFlight) return;
+    _locationEnableInFlight = true;
+    state = state.copyWith(isLocationEnableInFlight: true);
+    try {
+      final opened = await _service.requestEnableLocation();
+      if (!opened) return;
+      for (var i = 0; i < 30; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        await refreshLocationState();
+        if (state.isLocationOn) return;
+      }
+    } finally {
+      _locationEnableInFlight = false;
+      state = state.copyWith(isLocationEnableInFlight: false);
+    }
+  }
+
   Future<bool> connectToDevice(WdPeerInfo device) {
     _pendingPeerName = device.deviceName;
     return connectToPeer(device.deviceAddress);
@@ -871,7 +920,19 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
     if (!state.isWifiOn) {
       await enableWifi();
       if (!state.isWifiOn) {
-        state = state.copyWith(lastConnectError: translate('wifiOffTitle'));
+        state = state.copyWith(lastConnectError: _t('wifiOffTitle'));
+        return false;
+      }
+    }
+    // Location pre-flight (same as Wi‑Fi): P2P discovery/connect fails on
+    // many OEM builds while the master toggle is off, and the session
+    // search suppresses scan errors — without this the user gets a
+    // misleading "no devices found" instead of a location hint.
+    await refreshLocationState();
+    if (!state.isLocationOn) {
+      await enableLocation();
+      if (!state.isLocationOn) {
+        state = state.copyWith(lastConnectError: _t('locationOffTitle'));
         return false;
       }
     }
@@ -888,7 +949,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
         state = state.copyWith(
           lastConnectError:
               state.lastConnectError ??
-              translate('wfdTargetNotFound', params: {'count': '${search.candidates.length}'}),
+              _t('wfdTargetNotFound', params: {'count': '${search.candidates.length}'}),
         );
         return false;
       }
@@ -963,7 +1024,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       }
       if (state.peers.isEmpty) {
         state = state.copyWith(
-          lastConnectError: state.lastConnectError ?? translate('wfdNoDevicesFound'),
+          lastConnectError: state.lastConnectError ?? _t('wfdNoDevicesFound'),
         );
       }
       return settle();
@@ -1028,14 +1089,14 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
                 child: Text(
-                  translate('wfdPickDeviceTitle'),
+                  _t('wfdPickDeviceTitle'),
                   style: Theme.of(sheetContext).textTheme.titleMedium,
                 ),
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                 child: Text(
-                  translate('wfdPickDeviceHint'),
+                  _t('wfdPickDeviceHint'),
                   style: Theme.of(sheetContext).textTheme.bodySmall,
                 ),
               ),
@@ -1049,7 +1110,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
                     final name = (peer.deviceName ?? '').trim();
                     return ListTile(
                       leading: const Icon(Icons.wifi_tethering),
-                      title: Text(name.isEmpty ? translate('unknownDevice') : name),
+                      title: Text(name.isEmpty ? _t('unknownDevice') : name),
                       subtitle: Text(peer.deviceAddress),
                       onTap: () => Navigator.of(sheetContext).pop(peer),
                     );
@@ -1368,11 +1429,11 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       state = state.copyWith(isScanning: false);
       state = state.copyWith(lastConnectError: message);
       if (_suppressScanErrors) return;
-      final messenger = scaffoldMessengerKey.currentState;
-      messenger?.showSnackBar(
-        SnackBar(
-          content: Text('${translate('scanErrorTitle')}: $message'),
-        ),
+      ConnectionNotice.show(
+        title: _t('scanErrorTitle'),
+        message: message,
+        isChatScreen: _chatOpen,
+        icon: Icons.error_outline,
       );
     };
     _service.onSocketError = (message) {
@@ -1416,7 +1477,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
         _pendingAccept = false;
         _pendingRemote = null;
         state = state.copyWith(
-          lastConnectError: translate('connectionDeclinedMessage'),
+          lastConnectError: _t('connectionDeclinedMessage'),
         );
         _showDeclinedNotice('connectionDeclinedMessage');
       }

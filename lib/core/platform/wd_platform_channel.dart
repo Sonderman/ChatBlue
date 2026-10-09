@@ -37,6 +37,16 @@ class WdPlatformChannel {
     return ok;
   }
 
+  Future<bool> isLocationEnabled() async {
+    final bool ok = await _method.invokeMethod('isLocationEnabled');
+    return ok;
+  }
+
+  Future<bool> requestEnableLocation() async {
+    final bool ok = await _method.invokeMethod('requestEnableLocation');
+    return ok;
+  }
+
   Future<String?> getThisDeviceAddress() async {
     final String? addr = await _method.invokeMethod('getThisDeviceAddress');
     return addr;

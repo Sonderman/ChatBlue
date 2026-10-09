@@ -1,8 +1,12 @@
 // Styled, auto-dismissing in-app notice card — pure Flutter, no GetX.
 //
-// Used for connection-decline feedback (both sides of a request, all
-// transports) instead of plain snackbars: the card mirrors the design of
-// the connection-request banner (glass surface, icon avatar, soft shadow).
+// The app's ONE notification surface (user decision, checkpoint #2): every
+// user-facing notification — connection events (declines, drops, waiting)
+// AND operational feedback (scan errors, connect failures, media/download
+// failures, permissions, gallery saves) — renders as this card instead of a
+// plain snackbar. The card mirrors the design of the connection-request
+// banner (glass surface, icon avatar, soft shadow); [icon] and [accent]
+// vary by notification type while the card style stays uniform.
 // Positioned at the TOP under the chat app bar when a chat screen is
 // visible, at the BOTTOM elsewhere — the same convention as the request
 // banner. Auto-dismisses after [duration]; tapping dismisses early.
@@ -30,6 +34,8 @@ class ConnectionNotice {
     required String message,
     bool isChatScreen = false,
     Duration duration = const Duration(seconds: 4),
+    IconData icon = Icons.link_off,
+    Color accent = Colors.redAccent,
   }) {
     dismiss();
     // Overlay must be taken from the ROOT navigator state itself (same as
@@ -54,6 +60,8 @@ class ConnectionNotice {
           palette: p,
           title: title,
           message: message,
+          icon: icon,
+          accent: accent,
           onDismiss: dismiss,
         ),
       ),
@@ -84,12 +92,16 @@ class _ConnectionNoticeCard extends StatelessWidget {
     required this.palette,
     required this.title,
     required this.message,
+    required this.icon,
+    required this.accent,
     required this.onDismiss,
   });
 
   final ChatPalette palette;
   final String title;
   final String message;
+  final IconData icon;
+  final Color accent;
   final VoidCallback onDismiss;
 
   @override
@@ -126,22 +138,22 @@ class _ConnectionNoticeCard extends StatelessWidget {
             ),
             child: Row(
               children: [
-                // Icon avatar (declined link) — the request card's avatar
-                // geometry, red-tinted for the declined state.
+                // Icon avatar — the request card's avatar geometry, tinted
+                // per notification type via [accent].
                 Container(
                   width: 42,
                   height: 42,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: Colors.redAccent.withValues(alpha: 0.14),
+                    color: accent.withValues(alpha: 0.14),
                     border: Border.all(
-                      color: Colors.redAccent.withValues(alpha: 0.5),
+                      color: accent.withValues(alpha: 0.5),
                       width: 1.5,
                     ),
                   ),
-                  child: const Icon(
-                    Icons.link_off,
-                    color: Colors.redAccent,
+                  child: Icon(
+                    icon,
+                    color: accent,
                     size: 20,
                   ),
                 ),

@@ -1,6 +1,8 @@
 import 'dart:typed_data';
 
 import 'package:chatblue/core/services/nearby_service.dart';
+import 'package:chatblue/l10n/app_localizations_en.dart';
+import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/providers/nearby_transport_providers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -33,6 +35,7 @@ void main() {
             nearbyTransportProvider.overrideWith(
               () => NearbyTransportNotifier(service: service),
             ),
+            appLocalizationsProvider.overrideWithValue(AppLocalizationsEn()),
           ],
         );
 
@@ -81,7 +84,7 @@ void main() {
       await notifier.startScan();
       final state1 = c.read(nearbyTransportProvider);
       expect(state1.isScanning, isFalse);
-      expect(state1.lastConnectError, 'playServicesRequired');
+      expect(state1.lastConnectError, AppLocalizationsEn().playServicesRequired);
       expect(service.startScanCalls, isEmpty);
 
       service.playServices = true;
@@ -293,7 +296,7 @@ void main() {
       expect(ok, isFalse);
       expect(
         c.read(nearbyTransportProvider).lastConnectError,
-        'nearbyNoDevicesFound',
+        AppLocalizationsEn().nearbyNoDevicesFound,
       );
     });
 
@@ -315,7 +318,7 @@ void main() {
       expect(ok, isFalse);
       expect(
         c.read(nearbyTransportProvider).lastConnectError,
-        'nearbyTargetNotFound',
+        AppLocalizationsEn().nearbyTargetNotFound('1'),
       );
     });
 

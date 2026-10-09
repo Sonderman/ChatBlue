@@ -13,8 +13,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-String _noopTranslate(String key, {Map<String, String>? params}) => key;
-
 /// Immutable UI state of the Nearby Connections transport.
 class NearbyTransportState {
   const NearbyTransportState({
@@ -93,8 +91,9 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
 
   final NearbyService? _serviceOverride;
 
-  /// Translation hook — installed by the GetX adapter or a ported screen.
-  TransportTranslator translate = _noopTranslate;
+  /// Context'siz çeviri: güncel locale'in l10n kaynağından okur.
+  String _t(String key, {Map<String, String>? params}) =>
+      transportKeyToL10n(ref.read(appLocalizationsProvider), key, params: params);
 
   /// Dial windows (mutable for tests). On the first timeout a still-pending
   /// attempt holds in "awaiting acceptance" for a second window, mirroring
@@ -154,7 +153,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
     }
   }
 
-  // --- ChatTransport surface (consumed by the GetX bridge) ---
+  // --- ChatTransport surface (consumed by the chat binding + scan screens) ---
 
   bool get isConnected => state.isConnected;
   bool get isAwaitingAcceptance => _pendingAccept;
@@ -168,12 +167,13 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
   String? get connectedDeviceName => state.connectedPeer?.endpointName;
   String get transportType => 'nearby';
 
-  /// Styled decline notification (dialer or declining side) — a themed
-  /// notice card instead of a plain snackbar; mirrors the request banner.
+  /// Decline feedback — the themed notice card. One owner per outcome:
+  /// raised only by the dialer's main rejection handler and the declining
+  /// side; screens skip their own.
   void _showDeclinedNotice(String messageKey) {
     ConnectionNotice.show(
-      title: translate('connectionDeclinedTitle'),
-      message: translate(messageKey),
+      title: _t('connectionDeclinedTitle'),
+      message: _t(messageKey),
       isChatScreen: _chatOpen,
     );
   }
@@ -202,7 +202,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
     state = state.copyWith(lastConnectError: null);
     await refreshStatus();
     if (!state.isPlayServicesAvailable) {
-      state = state.copyWith(lastConnectError: translate('playServicesRequired'));
+      state = state.copyWith(lastConnectError: _t('playServicesRequired'));
       return;
     }
     if (!state.isBluetoothOn) {
@@ -278,10 +278,10 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
           debugPrint('[nearby] connect rejected: $rejectedEndpointId');
         }
         state = state.copyWith(
-          lastConnectError: translate('connectionDeclinedMessage'),
+          lastConnectError: _t('connectionDeclinedMessage'),
         );
-        // Styled notice instead of a plain snackbar (dialer side).
-        _showDeclinedNotice('connectionDeclinedMessage');
+        // The decline feedback itself is raised by the main rejection
+        // handler (chained above via prevRejected) — one surface, not two.
         completer.complete(false);
       }
     };
@@ -341,19 +341,19 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
 
   Future<bool> connectToSessionPeer({required String? address, String? name}) async {
     if (address == null || address.isEmpty) {
-      state = state.copyWith(lastConnectError: translate('noDeviceAddressMessage'));
+      state = state.copyWith(lastConnectError: _t('noDeviceAddressMessage'));
       return false;
     }
     state = state.copyWith(lastConnectError: null);
     await refreshStatus();
     if (!state.isPlayServicesAvailable) {
-      state = state.copyWith(lastConnectError: translate('playServicesRequired'));
+      state = state.copyWith(lastConnectError: _t('playServicesRequired'));
       return false;
     }
     if (!state.isBluetoothOn) {
       await enableBluetooth();
       if (!state.isBluetoothOn) {
-        state = state.copyWith(lastConnectError: translate('btOffForNearby'));
+        state = state.copyWith(lastConnectError: _t('btOffForNearby'));
         return false;
       }
     }
@@ -369,7 +369,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       if (picked == null) {
         state = state.copyWith(
           lastConnectError: state.lastConnectError ??
-              translate('nearbyTargetNotFound',
+              _t('nearbyTargetNotFound',
                   params: {'count': '${search.candidates.length}'}),
         );
         return false;
@@ -407,7 +407,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       }
       if (state.peers.isEmpty) {
         state = state.copyWith(
-          lastConnectError: state.lastConnectError ?? translate('nearbyNoDevicesFound'),
+          lastConnectError: state.lastConnectError ?? _t('nearbyNoDevicesFound'),
         );
       }
       return settle();
@@ -469,14 +469,14 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
                 child: Text(
-                  translate('wfdPickDeviceTitle'),
+                  _t('wfdPickDeviceTitle'),
                   style: Theme.of(sheetContext).textTheme.titleMedium,
                 ),
               ),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                 child: Text(
-                  translate('wfdPickDeviceHint'),
+                  _t('wfdPickDeviceHint'),
                   style: Theme.of(sheetContext).textTheme.bodySmall,
                 ),
               ),
@@ -490,7 +490,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
                     final name = peer.endpointName.trim();
                     return ListTile(
                       leading: const Icon(Icons.sensors),
-                      title: Text(name.isEmpty ? translate('unknownDevice') : name),
+                      title: Text(name.isEmpty ? _t('unknownDevice') : name),
                       subtitle: Text(peer.uid ?? peer.endpointId),
                       onTap: () => Navigator.of(sheetContext).pop(peer),
                     );
@@ -609,9 +609,11 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       }
       state = state.copyWith(isScanning: false);
       state = state.copyWith(lastConnectError: message);
-      final messenger = scaffoldMessengerKey.currentState;
-      messenger?.showSnackBar(
-        SnackBar(content: Text('${translate('scanErrorTitle')}: $message')),
+      ConnectionNotice.show(
+        title: _t('scanErrorTitle'),
+        message: message,
+        isChatScreen: _chatOpen,
+        icon: Icons.error_outline,
       );
     };
 
@@ -655,15 +657,11 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
         return;
       }
       _pendingAccept = false;
-      final messenger = scaffoldMessengerKey.currentState;
-      messenger?.showSnackBar(
-        SnackBar(
-          content: Text(
-            '${translate('connectionDeclinedTitle')}: '
-            '${translate('connectionDeclinedMessage')}',
-          ),
-        ),
-      );
+      // Single decline surface for the dialer: this handler. The dial
+      // attempt's own rejection hook (connectToPeer) stays silent — it
+      // used to raise a second surface for the same rejection and the
+      // two stacked on screen.
+      _showDeclinedNotice('connectionDeclinedMessage');
     };
 
     _service.onSocketDisconnected = (reason) {

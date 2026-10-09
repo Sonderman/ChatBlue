@@ -2,7 +2,7 @@
 // to them. Riverpod transport notifier (ported from the GetX controller).
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
-import 'package:chatblue/providers/app_providers.dart';
+import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:chatblue/providers/transport_providers.dart';
 import 'package:chatblue/screens/chat_ui/connecting_panel.dart';
 import 'package:flutter/material.dart';
@@ -16,8 +16,6 @@ class BluetoothScanScreen extends ConsumerWidget {
     final l10n = AppLocalizations.of(context)!;
     final state = ref.watch(btTransportProvider);
     final notifier = ref.read(btTransportProvider.notifier);
-    notifier.translate = (key, {params}) =>
-        transportKeyToL10n(l10n, key, params: params);
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.discoverConnectTitle), centerTitle: true),
@@ -224,34 +222,28 @@ class BluetoothScanScreen extends ConsumerWidget {
       onCancel: ref.read(btTransportProvider.notifier).cancelPendingConnect,
     );
     if (outcome == ConnectingOutcome.cancelled) return;
-    final messenger = scaffoldMessengerKey.currentState;
     if (error != null) {
-      messenger?.showSnackBar(
-        SnackBar(
-          content: Text(
-            '${l10n.connectionError}: ${l10n.connectErrorDetail('$error')}',
-          ),
-        ),
+      ConnectionNotice.show(
+        title: l10n.connectionError,
+        message: l10n.connectErrorDetail('$error'),
+        icon: Icons.error_outline,
       );
       return;
     }
     final isConnected = ref.read(btTransportProvider).isConnected;
     final awaiting = ref.read(btTransportProvider.notifier).isAwaitingAcceptance;
     if (connected == false && !isConnected && !awaiting) {
-      messenger?.showSnackBar(
-        SnackBar(
-          content: Text(
-            '${l10n.couldNotConnectTitle}: ${l10n.couldNotConnectMessage}',
-          ),
-        ),
+      ConnectionNotice.show(
+        title: l10n.couldNotConnectTitle,
+        message: l10n.couldNotConnectMessage,
+        icon: Icons.error_outline,
       );
     } else if (connected == false && !isConnected) {
-      messenger?.showSnackBar(
-        SnackBar(
-          content: Text(
-            '${l10n.waitingAcceptanceTitle}: ${l10n.waitingAcceptanceMessage}',
-          ),
-        ),
+      ConnectionNotice.show(
+        title: l10n.waitingAcceptanceTitle,
+        message: l10n.waitingAcceptanceMessage,
+        icon: Icons.hourglass_top,
+        accent: Colors.amber,
       );
     }
     // On success the notifier navigates to the chat screen itself.

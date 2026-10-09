@@ -3,17 +3,18 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:chatblue/config.dart';
-import 'package:chatblue/controllers/chat_transport.dart';
+import 'package:chatblue/controllers/chat_transport_binding.dart';
 import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/data/session_repository.dart';
 import 'package:chatblue/providers/app_providers.dart';
+import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
-import 'package:get/get.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
@@ -55,54 +56,166 @@ class _OutgoingJob {
   final String? audioText;
 }
 
-/// Shared implementation for the Bluetooth and Wi‑Fi Direct chat screens.
-///
-/// Both transports expose the same surface through [ChatTransport], so all
-/// conversation logic — message list, image transfers with progress bubbles,
-/// persistence — lives here once instead of being duplicated per transport.
-abstract class ChatScreenControllerBase extends GetxController {
-  ChatScreenControllerBase(this.transport);
+/// Identifies one chat open: the transport plus (for home-list opens) the
+/// stored session. Identity equality — the screen keeps ONE instance in its
+/// State, so every open gets a fresh notifier (matching the old per-open
+/// GetX registration semantics) and autoDispose tears it down on route pop.
+class ChatOpenArg {
+  ChatOpenArg({required this.transport, this.session});
 
-  final ChatTransport transport;
+  /// One of [ChatSessionModel.transportBluetooth] /
+  /// [ChatSessionModel.transportWifiDirect] / [ChatSessionModel.transportNearby].
+  final String transport;
 
-  late ChatSessionModel chatSession;
-  final RxList<MessageModel> messages = <MessageModel>[].obs;
-  final TextEditingController textController = TextEditingController();
+  /// Seeded session for home-list opens; null for scan/incoming opens (the
+  /// session is then reconstructed from the live transport identity).
+  final ChatSessionModel? session;
+}
 
-  RxBool get isConnected => transport.isConnected;
+/// High-frequency playback surface of the single voice player — kept OUT of
+/// [ChatState] so position ticks never rebuild the message list.
+class AudioPlaybackState {
+  const AudioPlaybackState({
+    this.playingId,
+    this.playing = false,
+    this.progress = 0,
+    this.durationMs = 0,
+  });
+
+  /// Id of the audio bubble currently playing (null when idle).
+  final String? playingId;
+
+  /// Mirror of the player's playing state (drives play/pause icons).
+  final bool playing;
+
+  /// 0..1 playback position of the playing bubble.
+  final double progress;
+
+  /// Duration of the loaded track in milliseconds (0 when nothing loaded).
+  final double durationMs;
+}
+
+const Object _sentinel = Object();
+
+/// Immutable chat-session UI state — the Rx fields of the old
+/// `ChatScreenControllerBase` as one value.
+class ChatState {
+  const ChatState({
+    required this.chatSession,
+    required this.messages,
+    this.peerName = '',
+    this.isConnecting = false,
+    this.isSyncing = false,
+    this.syncProgress = 0,
+    this.isRecording = false,
+    this.recordSeconds = 0,
+    this.isConnected = false,
+    this.outgoingTransfer,
+    this.incomingTransfer,
+  });
+
+  final ChatSessionModel chatSession;
+  final List<MessageModel> messages;
 
   /// Peer-reported device name (WFD peers don't carry a name on the socket);
   /// drives the app bar title reactively when the transport has no name.
-  final RxString peerName = RxString('');
+  final String peerName;
 
   /// True while a manual reconnect (Connect button) attempt is in flight.
-  final RxBool isConnecting = false.obs;
+  final bool isConnecting;
 
   /// Visible while a history sync packet is being received/applied.
-  final RxBool isSyncing = false.obs;
+  final bool isSyncing;
 
   /// 0..1 progress of the incoming sync frame (drives the thin header bar).
-  final RxDouble syncProgress = 0.0.obs;
+  final double syncProgress;
+
+  final bool isRecording;
+  final int recordSeconds;
+
+  /// Transport connection mirror (binding signals keep it fresh).
+  final bool isConnected;
+
+  final TransferState? outgoingTransfer;
+  final TransferState? incomingTransfer;
+
+  /// True while either an outgoing or incoming byte transfer is in flight.
+  bool get hasActiveTransfer {
+    bool active(TransferState? s) =>
+        s != null && s.total > 0 && s.current < s.total;
+    return active(outgoingTransfer) || active(incomingTransfer);
+  }
+
+  ChatState copyWith({
+    ChatSessionModel? chatSession,
+    List<MessageModel>? messages,
+    String? peerName,
+    bool? isConnecting,
+    bool? isSyncing,
+    double? syncProgress,
+    bool? isRecording,
+    int? recordSeconds,
+    bool? isConnected,
+    Object? outgoingTransfer = _sentinel,
+    Object? incomingTransfer = _sentinel,
+  }) {
+    return ChatState(
+      chatSession: chatSession ?? this.chatSession,
+      messages: messages ?? this.messages,
+      peerName: peerName ?? this.peerName,
+      isConnecting: isConnecting ?? this.isConnecting,
+      isSyncing: isSyncing ?? this.isSyncing,
+      syncProgress: syncProgress ?? this.syncProgress,
+      isRecording: isRecording ?? this.isRecording,
+      recordSeconds: recordSeconds ?? this.recordSeconds,
+      isConnected: isConnected ?? this.isConnected,
+      outgoingTransfer: identical(outgoingTransfer, _sentinel)
+          ? this.outgoingTransfer
+          : outgoingTransfer as TransferState?,
+      incomingTransfer: identical(incomingTransfer, _sentinel)
+          ? this.incomingTransfer
+          : incomingTransfer as TransferState?,
+    );
+  }
+}
+
+/// Riverpod port of `ChatScreenControllerBase`: the single implementation of
+/// the conversation logic (messages, image/voice transfers, persistence,
+/// history sync, send queue) shared by all three chat screens.
+///
+/// Family + autoDispose: one instance per chat open. `close()` mirrors the
+/// old `onClose` exactly and runs synchronously from the screen's dispose
+/// (the same deterministic ordering the old GetX delete→onClose had),
+/// with `ref.onDispose` as an idempotent backup.
+final chatControllerProvider =
+    NotifierProvider.family<ChatController, ChatState, ChatOpenArg>(
+  ChatController.new,
+  isAutoDispose: true,
+);
+
+class ChatController extends Notifier<ChatState>
+    implements ChatTransportListener {
+  ChatController(this._arg);
+
+  final ChatOpenArg _arg;
+
+  late final ChatTransportBinding _binding;
+
+  /// Captured at build time: `close()` may run inside `ref.onDispose`,
+  /// where using `ref` is forbidden — the repository must not be reached
+  /// through it.
+  late final SessionRepository _repo;
+
+  final TextEditingController textController = TextEditingController();
+
+  /// Playback surface (ValueListenableBuilder in the audio bubble).
+  final ValueNotifier<AudioPlaybackState> audioPlayback =
+      ValueNotifier(const AudioPlaybackState());
 
   // ── Voice messages ──────────────────────────────────────────────────────
-  final RxBool isRecording = false.obs;
-  final RxInt recordSeconds = 0.obs;
   Timer? _recordTimer;
   AudioRecorder? _recorder;
   String? _recordingPath;
-
-  /// Id of the audio bubble currently playing (null when idle).
-  final Rxn<String> playingAudioId = Rxn<String>();
-
-  /// Mirror of the player's playing state (drives play/pause icons).
-  final RxBool isAudioPlaying = false.obs;
-
-  /// 0..1 playback position of the playing bubble.
-  final RxDouble audioProgress = 0.0.obs;
-
-  /// Duration of the loaded track in milliseconds (0 when nothing loaded).
-  double get audioDurationMs =>
-      _audioPlayer.duration?.inMilliseconds.toDouble() ?? 0;
   final AudioPlayer _audioPlayer = AudioPlayer();
 
   /// Duration caption of an incoming voice transfer (announced by the peer
@@ -113,62 +226,6 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// finalize its bubble as an audio message.
   String? _pendingOutgoingAudioText;
 
-  /// Get-free toast surface: the same global scaffold messenger the ported
-  /// screens use, so the chat side no longer depends on GetX UI APIs.
-  void _showToast(String title, String message) {
-    scaffoldMessengerKey.currentState?.showSnackBar(
-      SnackBar(content: Text('$title: $message')),
-    );
-  }
-
-  /// Reconnects to the device this chat session belongs to. Used by the
-  /// Connect button shown when the chat is opened without a connection.
-  Future<void> connectToCurrentSession() async {
-    if (transport.isConnected.value || isConnecting.value) return;
-    final address = chatSession.device['address'] as String?;
-    isConnecting.value = true;
-    // The transport decides how to reach the stored peer: Bluetooth dials
-    // the stored address; Wi‑Fi Direct discovers the device first (P2P
-    // addresses rotate) and connects on a match — hence the name, used as
-    // the fallback match when the stored address went stale.
-    transport.lastConnectError.value = null;
-    final bool ok = await transport.connectToSessionPeer(
-      address: address,
-      name: chatSession.name,
-    );
-    isConnecting.value = false;
-    // Not connected yet, but the link is alive (socket up and/or the peer
-    // is still deciding): that is not a failure — tell the user we are
-    // waiting for the peer's acceptance instead. Only a genuinely dead
-    // attempt (no socket, nothing pending) reports failure. Previously the
-    // waiting message required `ok == false`, so a fast socket-up produced
-    // no feedback at all on the initiating side.
-    final bool connected = transport.isConnected.value;
-    // A declined request is announced by the transport's notice card (and
-    // lastConnectError now carries its reason), so don't stack a second,
-    // plain notification on top of it.
-    final bool declined =
-        transport.lastConnectError.value == 'connectionDeclinedMessage'.tr;
-    if (!connected && !ok && !transport.isAwaitingAcceptance && !declined) {
-      _showToast(
-        'couldNotConnectTitle'.tr,
-        transport.lastConnectError.value ?? 'couldNotConnectMessage'.tr,
-      );
-    } else if (!connected && !declined) {
-      _showToast(
-        'waitingAcceptanceTitle'.tr,
-        'waitingAcceptanceMessage'.tr,
-      );
-    }
-  }
-
-  /// True while either an outgoing or incoming byte transfer is in flight.
-  bool get hasActiveTransfer {
-    bool active(TransferState? s) => s != null && s.total > 0 && s.current < s.total;
-    return active(transport.outgoingTransfer.value) ||
-        active(transport.incomingTransfer.value);
-  }
-
   // Progress bubbles are tracked by message id (bubble UUID) instead of list
   // index, so concurrent in/out transfers can never corrupt each other.
   String? _outgoingProgressId;
@@ -177,10 +234,7 @@ abstract class ChatScreenControllerBase extends GetxController {
   // Holds bytes for the currently sending image to convert the progress
   // bubble into a final image message.
   Uint8List? _pendingOutgoingBytes;
-  String? sendingImagePath;
-
-  StreamSubscription<String?>? _disconnectSubscription;
-  StreamSubscription<bool>? _connectionSubscription;
+  String? _sendingImagePath;
 
   // Debounces session writes during message bursts (text/image/traffic storms).
   Timer? _saveDebounce;
@@ -195,12 +249,10 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// Voice recordings are cut off (and sent) automatically at this length.
   static const int _maxRecordSeconds = 120;
 
-  // A sync packet is sent once per (re)connection; the connection listener
-  // in onInit re-triggers it whenever the socket comes up.
+  // A sync packet is sent once per (re)connection.
   static const int _syncHistoryCount = 10;
 
-  // One history sync per chat screen lifetime: re-connects within the same
-  // session re-send nothing unless a new chat screen is opened.
+  // One history sync per connection: re-armed on every disconnect.
   bool _syncSentForSession = false;
 
   // True when this chat open created a BRAND-NEW session because the peer
@@ -217,22 +269,396 @@ abstract class ChatScreenControllerBase extends GetxController {
   final List<_OutgoingJob> _sendQueue = <_OutgoingJob>[];
   bool _sendJobActive = false;
 
+  /// Media up to this size rides along with the history sync automatically;
+  /// larger payloads sync as a placeholder only (a size marker) and are
+  /// fetched from the peer when the user taps download.
+  static const int _syncInlineMediaBytes = 512 * 1024;
+
+  /// Payloads above this are never offered for download (they keep only
+  /// their caption): a single JSON frame should never carry absurdly large
+  /// files.
+  static const int _syncMaxFetchBytes = 16 * 1024 * 1024;
+
+  /// Image payloads larger than this are not embedded in the history sync
+  /// (they fall back to their text caption; a fresh transfer can always be
+  /// requested manually). Frames are length-prefixed on both transports and
+  /// written in 8 KB chunks, so multi-MB payloads are fine. Also the
+  /// hashing cutoff: bigger media hashes by its caption text.
+  static const int _syncMaxImageBytes = 3 * 1024 * 1024;
+
+  /// Incoming text frames at or above this size are treated as history sync
+  /// packets for the thin progress bar under the app bar (plain messages
+  /// are far smaller).
+  static const int _syncProgressThreshold = 4 * 1024;
+
+  // ── Deferred media download (sync placeholders) ────────────────────────
+  // Large media syncs as a placeholder only (kind + size); the file is
+  // fetched from the peer on tap. One watchdog per requested id keeps a
+  // lost reply from leaving the bubble spinning forever.
+  final Map<String, Timer> _fetchWatchdogs = <String, Timer>{};
+
+  // Seed bookkeeping for transport-reconstructed opens (set in [build]).
+  String? _seedKey;
+  bool _seedMacUsable = false;
+
+  /// True once [close] ran — guards every post-await state write (Riverpod
+  /// throws on a disposed notifier where the old GetX controller silently
+  /// accepted writes).
+  bool _closed = false;
+
+  // ── Lifecycle ───────────────────────────────────────────────────────────
+
+  @override
+  ChatState build() {
+    _binding = ref.read(chatBindingProvider(_arg.transport));
+    _repo = ref.read(sessionRepositoryProvider);
+    _binding.addListener(this);
+    ref.onDispose(_disposeSafe);
+
+    final ChatSessionModel? argSession = _arg.session;
+    ChatSessionModel session;
+    if (argSession != null) {
+      session = argSession;
+    } else {
+      // Session keying: prefer the peer's STABLE per-install id (WFD
+      // identity frame) so the same device always merges into one session
+      // despite randomized P2P MAC rotation; fall back to the device
+      // address (BT / WFD before the frame), but never to the placeholder
+      // 'unknown' or the dummy P2P MAC (02:00:00:00:00:00) — uuid in that
+      // case. The MAC stays in device['address'] for display/reconnects.
+      final peerId = _binding.connectedDeviceId;
+      final mac = _binding.connectedDeviceKey;
+      final bool macUsable = mac != null &&
+          mac.isNotEmpty &&
+          mac != 'unknown' &&
+          mac != '02:00:00:00:00:00';
+      final keySource = peerId ?? mac;
+      final bool keyUsable = keySource != null &&
+          keySource.isNotEmpty &&
+          keySource != 'unknown' &&
+          keySource != '02:00:00:00:00:00';
+      final String key = keyUsable ? keySource : Uuid().v4();
+      _seedKey = key;
+      _seedMacUsable = macUsable;
+      if (kDebugMode) {
+        debugPrint(
+          'Chat open: key=$key (peerId=$peerId, mac=$mac) — merge will '
+          'match by key, then MAC, then name',
+        );
+      }
+      session = ChatSessionModel(
+        id: key,
+        name: _binding.connectedDeviceName ?? key,
+        createdAt: DateTime.now(),
+        updatedAt: DateTime.now(),
+        messages: const [],
+        device: {
+          'name': _binding.connectedDeviceName,
+          'address': macUsable ? mac : null,
+        },
+        // Tag the new session with the channel it was created on — the
+        // home list shows (and reopens) chats by this value.
+        transport: _binding.transportType,
+      );
+    }
+
+    // Microtask: `_open` reads `state`, which only exists after build
+    // returns — running it inline hits the uninitialized-provider assert.
+    Future.microtask(() => _open(seeded: argSession != null));
+
+    return ChatState(
+      chatSession: session,
+      messages: session.messages,
+      isConnected: _binding.isConnected,
+    );
+  }
+
+  /// Async part of the open — the old `onInit` body after its synchronous
+  /// seed: session load/merge/re-key (transport-reconstructed opens), the
+  /// transport tag stamp, callbacks, legacy id backfill, `onChatOpened`
+  /// and the initial history-sync microtask. Same order and logs as before.
+  Future<void> _open({required bool seeded}) async {
+    if (!seeded) {
+      final repo = _repo;
+      var session = await repo.loadChatSession(_seedKey!);
+      session ??= await _findExistingSessionForPeer();
+      if (kDebugMode) {
+        debugPrint(
+          'Session load: key=$_seedKey -> ${session?.id ?? 'MISS'}'
+          '${session == null ? '' : (session.id == _seedKey ? ' (direct hit)' : ' (merged)')}',
+        );
+      }
+      if (_closed) return;
+      if (session != null && session.id == _seedKey) {
+        // DIRECT key hit: load the existing session's messages. Re-bind the
+        // stored identity to the live connection: a stale address left
+        // behind by an earlier cross-transport merge (e.g. a Nearby-era uid
+        // under a Bluetooth MAC key) would otherwise make every later
+        // reconnect fail — Bluetooth dials `device['address']` verbatim.
+        // This also heals such rows on their next connection open.
+        final rebound = session.reboundTo(
+          address: _seedMacUsable ? _binding.connectedDeviceKey : null,
+          peerName: _binding.connectedDeviceName,
+          transport: _binding.transportType,
+        );
+        final bool identityChanged =
+            rebound.device['address'] != session.device['address'] ||
+                rebound.transport != session.transport;
+        state = state.copyWith(
+          chatSession: rebound,
+          messages: rebound.messages,
+        );
+        if (identityChanged) {
+          _scheduleSave();
+        }
+      } else if (session != null && session.id != _seedKey) {
+        // Re-key + adopt: move the matched session under the computed key so
+        // future opens hit it directly (no repeated merge search), and use
+        // the re-keyed instance — `chatSession.id` is final, so the session
+        // is re-created with the new id; the nested message objects are
+        // reused as-is. The stored identity is re-bound to the CURRENT
+        // connection (device address + transport tag).
+        final rebound = session.reboundTo(
+          address: _seedMacUsable ? _binding.connectedDeviceKey : null,
+          peerName: _binding.connectedDeviceName,
+          transport: _binding.transportType,
+        );
+        state = state.copyWith(
+          chatSession: rebound,
+          messages: rebound.messages,
+        );
+        try {
+          await repo.saveChatSession(rebound);
+          await repo.deleteChatSession(session.id);
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('Session re-key failed: $e');
+          }
+        }
+        if (_closed) return;
+        _scheduleSave();
+      } else if (session == null) {
+        // BRAND-NEW session: persist it right away. Saves are otherwise
+        // triggered only by dirty events (message, rename, sync) — a chat
+        // opened and closed without any of those would never touch the
+        // store and silently vanish on restart. The identity frame may
+        // still be in flight (or the MAC rotated): flag the open so a late
+        // identity frame re-checks for a stored session of the same peer
+        // and merges it in instead of leaving two chats for one device.
+        _openedAsFreshSession = true;
+        _scheduleSave();
+      }
+    }
+
+    if (_closed) return;
+
+    // Sessions persisted before the transport field existed carry no tag:
+    // stamp the transport in use now — the home list both labels and
+    // reopens chats by this value, so it always matches the screen the
+    // chat was reached on.
+    if (state.chatSession.transport == null) {
+      state.chatSession.transport = _binding.transportType;
+      _scheduleSave();
+    }
+
+    _setupCallbacks();
+
+    // Backfill ids for messages persisted by the legacy Hive-era schema
+    // (which never wrote `id`): deletion and progress bookkeeping key on
+    // ids, so legacy history needs one before it can be deleted.
+    final msgs = List.of(state.messages);
+    var backfilled = false;
+    for (var i = 0; i < msgs.length; i++) {
+      if (msgs[i].id == null) {
+        msgs[i] = msgs[i].copyWith(id: Uuid().v4());
+        backfilled = true;
+      }
+    }
+    if (backfilled) {
+      state = state.copyWith(messages: msgs);
+      _scheduleSave();
+    }
+
+    // Opening the chat counts as "chat open" for the transport: a connection
+    // arriving while this screen is visible must not push a second chat.
+    _binding.onChatOpened();
+
+    // When this is not the first session with this peer, share the last
+    // messages on (re)connection so both devices converge on the same
+    // history. Chat screens opened through the scan flow already have a
+    // socket, so the initial microtask send works; sessions opened without
+    // a connection (home -> chat -> Connect button) get the sync as soon as
+    // the socket comes up. A drop re-arms the sync (connection signal).
+    Future.microtask(_sendHistorySync);
+  }
+
+  /// Idempotent full teardown — the old `onClose` body exactly. Runs
+  /// synchronously from the screen's dispose (outside any provider
+  /// lifecycle; the same deterministic ordering the old
+  /// GetX delete→onClose had). The `ref.onDispose` backup ([_disposeSafe])
+  /// skips the transport calls — provider lifecycles forbid `ref`/`state`
+  /// access, and in the app the screen's dispose always runs this first.
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    _teardown(disconnectTransport: true);
+  }
+
+  /// Lifecycle-safe teardown for `ref.onDispose`: resources + the pending
+  /// save flush only (both are plain objects/snapshots — no `ref`, no
+  /// `state`). Also what test teardowns hit when a test never calls
+  /// [close] explicitly.
+  void _disposeSafe() {
+    if (_closed) return;
+    _closed = true;
+    _teardown(disconnectTransport: false);
+  }
+
+  void _teardown({required bool disconnectTransport}) {
+    _saveDebounce?.cancel();
+    // Capture the flush future: the pending write must land. Calling
+    // _flushPendingSave() again later would be a no-op (the debounce is
+    // already consumed).
+    final Future<void> flush = _flushPendingSave();
+    // Discard queued sends: there is no socket after the chat closes.
+    _sendQueue.clear();
+    // No peer answers deferred-download requests once the chat closes.
+    for (final t in _fetchWatchdogs.values) {
+      t.cancel();
+    }
+    _fetchWatchdogs.clear();
+    // Stop any active recording and release the player.
+    _recordTimer?.cancel();
+    _recorder?.dispose();
+    _audioPlayer.dispose();
+    audioPlayback.dispose();
+    textController.dispose();
+    _binding.removeListener(this);
+    if (disconnectTransport) {
+      // Disconnect when leaving the chat screen to release the socket
+      // cleanly. PopScope on the screen confirms there is no active
+      // transfer first.
+      _binding.disconnectFromDevice();
+      _binding.onChatClosed();
+    }
+    unawaited(flush.whenComplete(() {
+      // Home list refresh is handled by the drift stream in
+      // home_providers.dart — no manual refresh needed after a chat closes.
+    }));
+  }
+
+  // ── Transport signals (ChatTransportListener) ──────────────────────────
+
+  @override
+  void onTransportConnectionChanged(bool connected) {
+    if (_closed) return;
+    state = state.copyWith(isConnected: connected);
+    if (connected) {
+      _sendHistorySync();
+    } else {
+      _syncSentForSession = false;
+    }
+  }
+
+  @override
+  void onTransportDisconnectReason(String reason) {
+    if (_closed || reason.isEmpty) return;
+    final l10n = ref.read(appLocalizationsProvider);
+    _showNotice(l10n.disconnectedTitle, l10n.peerClosedConnectionMessage);
+  }
+
+  @override
+  void onTransportPeerName(String name) {
+    if (_closed) return;
+    _updateSessionName(name);
+  }
+
+  // ── Public surface (the old controller's API) ──────────────────────────
+
+  /// Live name of the connected peer (transport-provided; null before the
+  /// peer's name frame arrives on transports that announce it).
+  String? get connectedDeviceName => _binding.connectedDeviceName;
+
+  /// The app's unified notice card — the same surface the transport
+  /// notifiers and the scan screens raise (no plain snackbars anymore).
+  void _showNotice(
+    String title,
+    String message, {
+    IconData icon = Icons.link_off,
+    Color accent = Colors.redAccent,
+  }) {
+    ConnectionNotice.show(
+      title: title,
+      message: message,
+      isChatScreen: true,
+      icon: icon,
+      accent: accent,
+    );
+  }
+
+  /// Reconnects to the device this chat session belongs to. Used by the
+  /// Connect button shown when the chat is opened without a connection.
+  Future<void> connectToCurrentSession() async {
+    if (state.isConnected || state.isConnecting) return;
+    final address = state.chatSession.device['address'] as String?;
+    state = state.copyWith(isConnecting: true);
+    // The transport decides how to reach the stored peer: Bluetooth dials
+    // the stored address; Wi‑Fi Direct discovers the device first (P2P
+    // addresses rotate) and connects on a match — hence the name, used as
+    // the fallback match when the stored address went stale.
+    final bool ok = await _binding.connectToSessionPeer(
+      address: address,
+      name: state.chatSession.name,
+    );
+    if (_closed) return;
+    state = state.copyWith(isConnecting: false);
+    // Not connected yet, but the link is alive (socket up and/or the peer
+    // is still deciding): that is not a failure — tell the user we are
+    // waiting for the peer's acceptance instead. Only a genuinely dead
+    // attempt (no socket, nothing pending) reports failure.
+    final bool connected = state.isConnected;
+    final l10n = ref.read(appLocalizationsProvider);
+    // A declined request is announced by the transport's notice card (and
+    // lastConnectError carries its reason), so don't stack a second,
+    // plain notification on top of it.
+    final bool declined =
+        _binding.lastConnectError == l10n.connectionDeclinedMessage;
+    if (!connected && !ok && !_binding.isAwaitingAcceptance && !declined) {
+      _showNotice(
+        l10n.couldNotConnectTitle,
+        _binding.lastConnectError ?? l10n.couldNotConnectMessage,
+        icon: Icons.error_outline,
+      );
+    } else if (!connected && !declined) {
+      _showNotice(
+        l10n.waitingAcceptanceTitle,
+        l10n.waitingAcceptanceMessage,
+        icon: Icons.hourglass_top,
+        accent: Colors.amber,
+      );
+    }
+  }
+
   /// Applies a peer-reported device name (WFD sockets carry no name on the
   /// wire) to the app bar and the persisted session.
-  void updateSessionName(String name) {
-    if (name.isEmpty || peerName.value == name) return;
-    peerName.value = name;
-    if (chatSession.name != name) {
-      chatSession = ChatSessionModel(
-        id: chatSession.id,
+  void _updateSessionName(String name) {
+    if (_closed) return;
+    if (name.isEmpty || state.peerName == name) return;
+    final session = state.chatSession;
+    if (session.name != name) {
+      final renamed = ChatSessionModel(
+        id: session.id,
         name: name,
-        createdAt: chatSession.createdAt,
-        updatedAt: chatSession.updatedAt,
-        messages: chatSession.messages,
-        device: chatSession.device,
-        transport: chatSession.transport,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+        messages: session.messages,
+        device: session.device,
+        transport: session.transport,
       );
+      state = state.copyWith(peerName: name, chatSession: renamed);
       _scheduleSave();
+    } else {
+      state = state.copyWith(peerName: name);
     }
     // The real (model) device name just landed: if this chat opened as a
     // fresh session on an unknown identity, an existing session for the
@@ -246,45 +672,46 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// — if a stored session matches the peer (address, or a
   /// normalization-insensitive name), it is the same conversation: adopt
   /// its history here and delete the duplicate so the history sync and the
-  /// home list stay in ONE chat (a split makes the sync look like it did
-  /// nothing while the old history sits in a second chat).
+  /// home list stay in ONE chat.
   Future<void> _mergeLatePeerSession() async {
-    if (!_openedAsFreshSession || _lateMergeDone) return;
+    if (_closed || !_openedAsFreshSession || _lateMergeDone) return;
     final duplicate = await _findExistingSessionForPeer();
-    if (duplicate == null || duplicate.id == chatSession.id) return;
+    if (_closed) return;
+    if (duplicate == null || duplicate.id == state.chatSession.id) return;
     _lateMergeDone = true;
     final seen = <String>{};
     final combined = <MessageModel>[];
-    for (final m in [...duplicate.messages, ...messages]) {
+    for (final m in [...duplicate.messages, ...state.messages]) {
       final k = m.id ??
           '${m.timestamp.microsecondsSinceEpoch}|${m.isSentByMe}|'
               '${m.text}|${m.imagePath}';
       if (seen.add(k)) combined.add(m);
     }
     combined.sort((a, b) => a.timestamp.compareTo(b.timestamp));
-    chatSession = ChatSessionModel(
-      id: chatSession.id,
-      name: chatSession.name,
-      createdAt: duplicate.createdAt.isBefore(chatSession.createdAt)
+    final session = state.chatSession;
+    final merged = ChatSessionModel(
+      id: session.id,
+      name: session.name,
+      createdAt: duplicate.createdAt.isBefore(session.createdAt)
           ? duplicate.createdAt
-          : chatSession.createdAt,
+          : session.createdAt,
       updatedAt: DateTime.now(),
       messages: combined,
       device: {
-        'name': chatSession.device['name'] ?? duplicate.device['name'],
-        'address':
-            chatSession.device['address'] ?? duplicate.device['address'],
+        'name': session.device['name'] ?? duplicate.device['name'],
+        'address': session.device['address'] ?? duplicate.device['address'],
       },
-      transport: chatSession.transport,
+      transport: session.transport,
     );
-    messages.value = combined;
+    state = state.copyWith(chatSession: merged, messages: combined);
     try {
-      await SessionRepository.instance.saveChatSession(chatSession);
-      await SessionRepository.instance.deleteChatSession(duplicate.id);
+      final repo = _repo;
+      await repo.saveChatSession(merged);
+      await repo.deleteChatSession(duplicate.id);
       if (kDebugMode) {
         debugPrint(
           'Late identity merge: adopted "${duplicate.name}" '
-          '(${duplicate.id}) into ${chatSession.id} — '
+          '(${duplicate.id}) into ${merged.id} — '
           '${combined.length} messages',
         );
       }
@@ -293,6 +720,7 @@ abstract class ChatScreenControllerBase extends GetxController {
         debugPrint('Late identity merge failed: $e');
       }
     }
+    if (_closed) return;
     _scheduleSave();
     // The merged history may be exactly what the peer is missing: run the
     // sync again now that the session holds the real conversation.
@@ -307,9 +735,9 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// app).
   Future<ChatSessionModel?> _findExistingSessionForPeer() async {
     try {
-      final all = await SessionRepository.instance.getAllChatSessions();
-      final peerMac = transport.connectedDeviceKey;
-      final peerName = transport.connectedDeviceName;
+      final all = await _repo.getAllChatSessions();
+      final peerMac = _binding.connectedDeviceKey;
+      final peerName = _binding.connectedDeviceName;
       if (kDebugMode) {
         debugPrint(
           'Peer merge search: mac=$peerMac name=$peerName over '
@@ -345,236 +773,30 @@ abstract class ChatScreenControllerBase extends GetxController {
   String _normalizePeerName(String? value) =>
       (value ?? '').toLowerCase().replaceAll(RegExp('[^a-z0-9]'), '');
 
-  @override
-  void onInit() async {
-    if (Get.arguments is ChatSessionModel) {
-      chatSession = Get.arguments as ChatSessionModel;
-      messages.value = chatSession.messages;
-    } else {
-      // Session keying: prefer the peer's STABLE per-install id (WFD
-      // identity frame) so the same device always merges into one session
-      // despite randomized P2P MAC rotation; fall back to the device
-      // address (BT / WFD before the frame), but never to the placeholder
-      // 'unknown' or the dummy P2P MAC (02:00:00:00:00:00) — uuid in that
-      // case. The MAC stays in device['address'] for display/reconnects.
-      final peerId = transport.connectedDeviceId;
-      final mac = transport.connectedDeviceKey;
-      final bool macUsable = mac != null &&
-          mac.isNotEmpty &&
-          mac != 'unknown' &&
-          mac != '02:00:00:00:00:00';
-      final keySource = peerId ?? mac;
-      final bool keyUsable = keySource != null &&
-          keySource.isNotEmpty &&
-          keySource != 'unknown' &&
-          keySource != '02:00:00:00:00:00';
-      final String key = keyUsable ? keySource : Uuid().v4();
-      if (kDebugMode) {
-        debugPrint(
-          'Chat open: key=$key (peerId=$peerId, mac=$mac) — merge will '
-          'match by key, then MAC, then name',
-        );
-      }
-      // Assign the session BEFORE the first await: the first frame builds
-      // while onInit is still suspended on the session lookup, and widgets
-      // (ChatAppBar reads `chatSession.name`) would hit the uninitialized
-      // `late` field with a LateInitializationError — seen when a chat
-      // opens through the scan/connect flow (no Get.arguments). The lookup
-      // below hydrates the existing session (and its messages) in place.
-      chatSession =
-          ChatSessionModel(
-            id: key,
-            name: transport.connectedDeviceName ?? key,
-            createdAt: DateTime.now(),
-            updatedAt: DateTime.now(),
-            messages: messages.toList(),
-            device: {
-              'name': transport.connectedDeviceName,
-              'address': macUsable ? mac : null,
-            },
-            // Tag the new session with the channel it was created on the
-            // home list shows (and reopens) chats by this value.
-            transport: transport.transportType,
-          );
-      messages.value = chatSession.messages;
-      var session = await SessionRepository.instance.loadChatSession(key);
-      session ??= await _findExistingSessionForPeer();
-      if (kDebugMode) {
-        debugPrint(
-          'Session load: key=$key -> ${session?.id ?? 'MISS'}'
-          '${session == null ? '' : (session.id == key ? ' (direct hit)' : ' (merged)')}',
-        );
-      }
-      if (session != null && session.id == key) {
-        // DIRECT key hit: load the existing session's messages. (The
-        // sync-created shell above is replaced; this branch was missing —
-        // every connect to an existing session opened an empty shell.)
-        // Re-bind the stored identity to the live connection: a stale
-        // address left behind by an earlier cross-transport merge (e.g. a
-        // Nearby-era uid under a Bluetooth MAC key) would otherwise make
-        // every later reconnect fail — Bluetooth dials `device['address']`
-        // verbatim. This also heals such rows on their next connection
-        // open, so installs already carrying a poisoned address recover
-        // without a migration.
-        final rebound = session.reboundTo(
-          address: macUsable ? mac : null,
-          peerName: transport.connectedDeviceName,
-          transport: transport.transportType,
-        );
-        final bool identityChanged =
-            rebound.device['address'] != session.device['address'] ||
-                rebound.transport != session.transport;
-        chatSession = rebound;
-        if (identityChanged) {
-          _scheduleSave();
-        }
-        messages.value = rebound.messages;
-      } else if (session != null && session.id != key) {
-        // Re-key + adopt: move the matched session under the computed key so
-        // future opens hit it directly (no repeated merge search), and use
-        // the re-keyed instance — `chatSession.id` is final, so the session
-        // is re-created with the new id; the nested message objects are
-        // reused as-is. The stored identity is re-bound to the CURRENT
-        // connection (device address + transport tag): a cross-transport
-        // merge (same peer reached over another transport) otherwise keeps
-        // the OLD scheme's address — a Nearby-era uid under a Bluetooth MAC
-        // key made every later Bluetooth dial fail natively ("not a valid
-        // Bluetooth address").
-        chatSession = session.reboundTo(
-          address: macUsable ? mac : null,
-          peerName: transport.connectedDeviceName,
-          transport: transport.transportType,
-        );
-        messages.value = chatSession.messages;
-        try {
-          await SessionRepository.instance.saveChatSession(chatSession);
-          await SessionRepository.instance.deleteChatSession(session.id);
-        } catch (e) {
-          if (kDebugMode) {
-            debugPrint('Session re-key failed: $e');
-          }
-        }
-        _scheduleSave();
-      } else if (session == null) {
-        // BRAND-NEW session: persist it right away. Saves are otherwise
-        // triggered only by dirty events (message, rename, sync) — a chat
-        // opened and closed without any of those would never touch the store and
-        // silently vanish on restart. The identity frame may still be in
-        // flight (or the MAC rotated): flag the open so a late identity
-        // frame re-checks for a stored session of the same peer and merges
-        // it in instead of leaving two chats for one device.
-        _openedAsFreshSession = true;
-        _scheduleSave();
-      }
-    }
-
-    // Sessions persisted before the transport field existed carry no tag:
-    // stamp the transport in use now — the home list both labels and
-    // reopens chats by this value, so it always matches the screen the
-    // chat was reached on.
-    if (chatSession.transport == null) {
-      chatSession.transport = transport.transportType;
-      _scheduleSave();
-    }
-
-    setupCallbacks();
-    // Backfill ids for messages persisted by the legacy Hive-era schema (which
-    // never wrote `id`): deletion and progress bookkeeping key on ids, so
-    // legacy history needs one before it can be deleted.
-    var backfilled = false;
-    for (var i = 0; i < messages.length; i++) {
-      if (messages[i].id == null) {
-        messages[i] = messages[i].copyWith(id: Uuid().v4());
-        backfilled = true;
-      }
-    }
-    if (backfilled) {
-      _scheduleSave();
-    }
-    // Opening the chat counts as "chat open" for the transport: a connection
-    // arriving while this screen is visible must not push a second chat.
-    transport.onChatOpened();
-    _disconnectSubscription = transport.lastDisconnectReason.listen((reason) {
-      if (reason != null && reason.isNotEmpty) {
-        _showToast('disconnectedTitle'.tr, 'peerClosedConnectionMessage'.tr);
-      }
-    });
-
-    // When this is not the first session with this peer, share the last
-    // messages on (re)connection so both devices converge on the same
-    // history. Chat screens opened through the scan flow already have a
-    // socket, so the initial microtask send works; sessions opened without
-    // a connection (home -> chat -> Connect button) get the sync as soon as
-    // the socket comes up. A drop re-arms the sync: the next successful
-    // connection exchanges manifests again (messages sent while one side
-    // was offline would otherwise never converge).
-    Future.microtask(_sendHistorySync);
-    _connectionSubscription = transport.isConnected.listen((connected) {
-      if (connected) {
-        _sendHistorySync();
-      } else {
-        _syncSentForSession = false;
-      }
-    });
-    super.onInit();
-  }
-
-  @override
-  void onClose() {
-    _saveDebounce?.cancel();
-    // Capture the flush future: the refresh below must wait for THIS write
-    // to land. Calling _flushPendingSave() again later would be a no-op
-    // (the debounce is already consumed), so the refresh could otherwise
-    // run before the Hive write completed.
-    final Future<void> flush = _flushPendingSave();
-    // Discard queued sends: there is no socket after the chat closes.
-    _sendQueue.clear();
-    // No peer answers deferred-download requests once the chat closes.
-    for (final t in _fetchWatchdogs.values) {
-      t.cancel();
-    }
-    _fetchWatchdogs.clear();
-    // Stop any active recording and release the player.
-    _recordTimer?.cancel();
-    _recorder?.dispose();
-    _audioPlayer.dispose();
-    textController.dispose();
-    // Disconnect when leaving the chat screen to release the socket cleanly.
-    // PopScope on the screen confirms there is no active transfer first.
-    transport.disconnectFromDevice();
-    _disconnectSubscription?.cancel();
-    _connectionSubscription?.cancel();
-    transport.onChatClosed();
-    // The session list may have new/renamed sessions after a chat: refresh
-    // it AFTER the pending save has actually landed — chained on the flush
-    // future captured above, so the refreshed list reflects the final
-    // state (the flush is debounced 250 ms and may still be in flight
-    // when the screen closes).
-    unawaited(flush.whenComplete(() {
-      // Home list refresh is handled by the drift stream in
-      // home_providers.dart — no manual refresh needed after a chat closes.
-    }));
-    super.onClose();
-  }
-
-  void setupCallbacks() {
+  void _setupCallbacks() {
     // Playback position of the active voice bubble.
     _audioPlayer.positionStream.listen((position) {
       final duration = _audioPlayer.duration;
       if (duration != null && duration.inMilliseconds > 0) {
-        audioProgress.value =
-            (position.inMilliseconds / duration.inMilliseconds).clamp(0.0, 1.0);
+        _setPlayback(
+          progress: (position.inMilliseconds / duration.inMilliseconds)
+              .clamp(0.0, 1.0),
+          durationMs: duration.inMilliseconds.toDouble(),
+        );
       }
     });
+    _audioPlayer.durationStream.listen((duration) {
+      _setPlayback(durationMs: duration?.inMilliseconds.toDouble() ?? 0);
+    });
     _audioPlayer.playerStateStream.listen((state) {
-      isAudioPlaying.value = state.playing;
+      _setPlayback(playing: state.playing);
       if (state.processingState == ProcessingState.completed) {
-        playingAudioId.value = null;
-        audioProgress.value = 0;
+        _setPlayback(playingId: null, progress: 0);
       }
     });
 
-    transport.onSocketData((bytes, text, {required String kind}) async {
+    _binding.onSocketData((bytes, text, {required String kind}) async {
+      if (_closed) return;
       if (kDebugMode && showDebugLogs) {
         debugPrint('Socket data: $text\n Kind: $kind');
       }
@@ -594,7 +816,8 @@ abstract class ChatScreenControllerBase extends GetxController {
         // the local history instead of appending it to the chat.
         await _applyHistorySync(text.substring(_syncPrefix.length));
       } else {
-        messages.insert(
+        final msgs = List.of(state.messages);
+        msgs.insert(
           0,
           MessageModel(
             id: Uuid().v4(),
@@ -603,50 +826,72 @@ abstract class ChatScreenControllerBase extends GetxController {
             timestamp: DateTime.now(),
           ),
         );
+        if (_closed) return;
+        state = state.copyWith(messages: msgs);
         _scheduleSave();
       }
-      update();
     });
 
-    transport.onTransferProgress(({
+    _binding.onTransferProgress(({
       required String direction,
       required int current,
       required int total,
       required String kind,
     }) {
+      if (_closed) return;
       // History sync packets travel as one large text frame: reflect their
       // reception as a thin progress bar under the app bar. Plain messages
       // are far below the threshold.
       if (direction == 'in' &&
           kind == 'text' &&
           total >= _syncProgressThreshold) {
-        syncProgress.value =
-            total == 0 ? 0 : (current / total).clamp(0, 1).toDouble();
-        isSyncing.value = current < total;
+        state = state.copyWith(
+          syncProgress: total == 0 ? 0 : (current / total).clamp(0, 1).toDouble(),
+          isSyncing: current < total,
+        );
       }
-      final state = TransferState(
+      final transfer = TransferState(
         direction: direction,
         current: current,
         total: total,
         kind: kind,
       );
       if (direction == 'out') {
-        transport.outgoingTransfer.value = state;
+        state = state.copyWith(outgoingTransfer: transfer);
         if (kind == 'bytes') {
-          _updateOutgoingProgress(state);
+          _updateOutgoingProgress(transfer);
         }
       } else {
-        transport.incomingTransfer.value = state;
+        state = state.copyWith(incomingTransfer: transfer);
         // For incoming, only render intermediate progress; finalization
         // happens when the actual data bytes arrive in onSocketData.
-        if (kind == 'bytes' && !(state.total > 0 && state.current >= state.total)) {
-          _updateIncomingProgress(state);
+        if (kind == 'bytes' &&
+            !(transfer.total > 0 && transfer.current >= transfer.total)) {
+          _updateIncomingProgress(transfer);
         }
       }
       if (kDebugMode && showDebugLogs) {
         debugPrint('Transfer progress: $direction $current $total $kind');
       }
     });
+  }
+
+  /// Updates the playback ValueNotifier from any of the player streams.
+  void _setPlayback({
+    Object? playingId = _sentinel,
+    bool? playing,
+    double? progress,
+    double? durationMs,
+  }) {
+    if (_closed) return;
+    final cur = audioPlayback.value;
+    audioPlayback.value = AudioPlaybackState(
+      playingId:
+          identical(playingId, _sentinel) ? cur.playingId : playingId as String?,
+      playing: playing ?? cur.playing,
+      progress: progress ?? cur.progress,
+      durationMs: durationMs ?? cur.durationMs,
+    );
   }
 
   /// Sends the sync **manifest** — a light SHA-256 digest of the last
@@ -656,14 +901,15 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// bytes) is transferred unless needed. Called once per CONNECTION (a
   /// drop re-arms it) — on (re)connect, and via the late-identity merge.
   Future<void> _sendHistorySync() async {
+    if (_closed) return; // queued via microtask — the chat may have closed
     // One sync per connection: re-armed on every disconnect; a re-connect
     // then re-syncs without a screen reopen.
     if (_syncSentForSession) return;
     // No socket yet (chat opened from the session list): nothing to send;
-    // the connection listener re-invokes this as soon as the link is up.
-    if (!transport.isConnected.value) return;
+    // the connection signal re-invokes this as soon as the link is up.
+    if (!_binding.isConnected) return;
 
-    final history = messages.toList()
+    final history = state.messages.toList()
       ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
     final recent = history.take(_syncHistoryCount).toList();
 
@@ -679,7 +925,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     // Sync traffic rides OUTSIDE the user send queue: live messages are
     // never blocked behind sync packets (the single socket still orders
     // frames FIFO natively).
-    transport.sendMessage(
+    _binding.sendMessage(
       _syncPrefix +
           jsonEncode({
             'type': 'manifest',
@@ -690,41 +936,17 @@ abstract class ChatScreenControllerBase extends GetxController {
     );
   }
 
-  /// Media up to this size rides along with the history sync automatically;
-  /// larger payloads sync as a placeholder only (a size marker) and are
-  /// fetched from the peer when the user taps download.
-  static const int _syncInlineMediaBytes = 512 * 1024;
-
-  /// Payloads above this are never offered for download (they keep only
-  /// their caption): a single JSON frame should never carry absurdly large
-  /// files.
-  static const int _syncMaxFetchBytes = 16 * 1024 * 1024;
-
-  /// Image payloads larger than this are not embedded in the history sync
-  /// (they fall back to their text caption; a fresh transfer can always be
-  /// requested manually). Frames are length-prefixed on both transports and
-  /// written in 8 KB chunks, so multi-MB payloads are fine. Also the
-  /// hashing cutoff: bigger media hashes by its caption text.
-  static const int _syncMaxImageBytes = 3 * 1024 * 1024;
-
-  /// Incoming text frames at or above this size are treated as history sync
-  /// packets for the thin progress bar under the app bar (plain messages
-  /// are far smaller).
-  static const int _syncProgressThreshold = 4 * 1024;
-
-  // ── Deferred media download (sync placeholders) ────────────────────────
-  // Large media syncs as a placeholder only (kind + size); the file is
-  // fetched from the peer on tap. One watchdog per requested id keeps a
-  // lost reply from leaving the bubble spinning forever.
-
-  final Map<String, Timer> _fetchWatchdogs = <String, Timer>{};
-
   /// Asks the peer for the media file behind a placeholder bubble.
   Future<void> downloadMedia(MessageModel message) async {
     final id = message.id;
     if (id == null || !message.hasRemoteMedia) return;
-    if (!transport.isConnected.value) {
-      _showToast('downloadFailedTitle'.tr, 'downloadNeedConnection'.tr);
+    if (!_binding.isConnected) {
+      final l10n = ref.read(appLocalizationsProvider);
+      _showNotice(
+        l10n.downloadFailedTitle,
+        l10n.downloadNeedConnection,
+        icon: Icons.file_download_off,
+      );
       return;
     }
     _setMediaFetchBusy(id, true);
@@ -732,21 +954,29 @@ abstract class ChatScreenControllerBase extends GetxController {
     _fetchWatchdogs[id] = Timer(const Duration(seconds: 90), () {
       _fetchWatchdogs.remove(id);
       _setMediaFetchBusy(id, false);
-      _showToast('downloadFailedTitle'.tr, 'downloadTimeoutMessage'.tr);
+      if (_closed) return;
+      final l10n = ref.read(appLocalizationsProvider);
+      _showNotice(
+        l10n.downloadFailedTitle,
+        l10n.downloadTimeoutMessage,
+        icon: Icons.file_download_off,
+      );
     });
-    transport.sendMessage(
+    _binding.sendMessage(
       _syncPrefix + jsonEncode({'type': 'fetch', 'id': id}),
     );
   }
 
   /// Flips the placeholder bubble's busy flag (spinner) for [id].
   void _setMediaFetchBusy(String id, bool busy) {
-    final idx = messages.indexWhere((m) => m.id == id);
+    if (_closed) return;
+    final msgs = List.of(state.messages);
+    final idx = msgs.indexWhere((m) => m.id == id);
     if (idx == -1) return;
-    final cur = messages[idx];
+    final cur = msgs[idx];
     if (!cur.hasRemoteMedia || cur.isTransferring == busy) return;
-    messages[idx] = cur.copyWith(isTransferring: busy);
-    update();
+    msgs[idx] = cur.copyWith(isTransferring: busy);
+    state = state.copyWith(messages: msgs);
   }
 
   /// Stops the watchdog of [id] (the file arrived or the peer said no).
@@ -791,7 +1021,7 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// the hashes we are missing (with the missing count each).
   Future<void> _handleSyncManifest(dynamic itemsRaw) async {
     if (itemsRaw is! List || itemsRaw.isEmpty) return;
-    final myCounts = await _localHashCounts(messages);
+    final myCounts = await _localHashCounts(state.messages);
 
     final missing = <Map<String, dynamic>>[];
     for (final item in itemsRaw) {
@@ -804,7 +1034,7 @@ abstract class ChatScreenControllerBase extends GetxController {
     }
     if (missing.isEmpty) return;
 
-    transport.sendMessage(
+    _binding.sendMessage(
       _syncPrefix + jsonEncode({'type': 'request', 'items': missing}),
     );
   }
@@ -814,7 +1044,7 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// dropped frame only costs one message).
   Future<void> _handleSyncRequest(dynamic itemsRaw) async {
     if (itemsRaw is! List || itemsRaw.isEmpty) return;
-    final sorted = messages.toList()
+    final sorted = state.messages.toList()
       ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
 
     for (final item in itemsRaw) {
@@ -826,7 +1056,7 @@ abstract class ChatScreenControllerBase extends GetxController {
       for (final m in sorted) {
         if (sent >= n) break;
         if (await _messageHash(m) != h) continue;
-        transport.sendMessage(
+        _binding.sendMessage(
           _syncPrefix +
               jsonEncode({
                 'type': 'message',
@@ -844,14 +1074,14 @@ abstract class ChatScreenControllerBase extends GetxController {
   Future<void> _handleSyncFetch(dynamic idRaw) async {
     final id = idRaw is String ? idRaw : null;
     if (id == null) return;
-    for (final m in messages) {
+    for (final m in state.messages) {
       if (m.id != id) continue;
       final path = m.imagePath;
       if (path != null) {
         try {
           final file = File(path);
           if (await file.exists() && file.lengthSync() <= _syncMaxFetchBytes) {
-            transport.sendMessage(
+            _binding.sendMessage(
               _syncPrefix +
                   jsonEncode({
                     'type': 'download',
@@ -866,7 +1096,7 @@ abstract class ChatScreenControllerBase extends GetxController {
       }
       break;
     }
-    transport.sendMessage(
+    _binding.sendMessage(
       _syncPrefix + jsonEncode({'type': 'fetchMiss', 'id': id}),
     );
   }
@@ -878,7 +1108,13 @@ abstract class ChatScreenControllerBase extends GetxController {
     if (id == null) return;
     _settleFetch(id);
     _setMediaFetchBusy(id, false);
-    _showToast('downloadFailedTitle'.tr, 'downloadUnavailableMessage'.tr);
+    if (_closed) return;
+    final l10n = ref.read(appLocalizationsProvider);
+    _showNotice(
+      l10n.downloadFailedTitle,
+      l10n.downloadUnavailableMessage,
+      icon: Icons.file_download_off,
+    );
   }
 
   /// Builds the wire entry for one message. Media is embedded as base64 only
@@ -964,12 +1200,25 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// exist locally (same text, same direction and almost-same timestamp —
   /// the peer's copy of a message we already hold).
   Future<void> _applySyncMessages(dynamic raw) async {
-    if (raw is! List) return;
-    isSyncing.value = true;
+    if (raw is! List || _closed) return;
+    state = state.copyWith(isSyncing: true);
     try {
       final entries = raw;
+      // Collect the changes while awaiting disk writes; the state list is
+      // only re-read ONCE, synchronously, in the final phase. Writing back
+      // a snapshot captured before the awaits silently dropped every state
+      // change that landed meanwhile (live frames, back-to-back media) —
+      // the old live RxList never had that window.
+      final List<({String id, String path, bool isAudio})> completions = [];
+      final List<
+          ({
+            MessageModel model,
+            String text,
+            bool sentByMe,
+            DateTime ts,
+            int? incomingHash,
+          })> additions = [];
 
-      bool changed = false;
       for (final entry in entries) {
         if (entry is! Map) continue;
         final text = entry['text'] as String? ?? '';
@@ -1001,8 +1250,8 @@ abstract class ChatScreenControllerBase extends GetxController {
         // (clears the spinner and the pending marker in one step).
         final entryId = entry['id'] as String?;
         if (mediaBytes != null && entryId != null) {
-          final int idx = messages.indexWhere((m) => m.id == entryId);
-          if (idx != -1 && messages[idx].hasRemoteMedia) {
+          final int idx = state.messages.indexWhere((m) => m.id == entryId);
+          if (idx != -1 && state.messages[idx].hasRemoteMedia) {
             String? downloaded;
             try {
               downloaded = await _persistIncomingBytes(
@@ -1013,23 +1262,16 @@ abstract class ChatScreenControllerBase extends GetxController {
               downloaded = null;
             }
             if (downloaded != null) {
-              final cur = messages[idx];
-              messages[idx] = MessageModel(
-                id: cur.id,
-                text: cur.text,
-                isSentByMe: cur.isSentByMe,
-                timestamp: cur.timestamp,
-                imagePath: downloaded,
-                transferKind: isAudioEntry ? 'audio' : cur.transferKind,
+              completions.add(
+                (id: entryId, path: downloaded, isAudio: isAudioEntry),
               );
               _settleFetch(entryId);
-              changed = true;
               continue;
             }
           }
         }
 
-        bool alreadyHave = messages.any(
+        bool alreadyHave = state.messages.any(
           (m) =>
               m.text == text &&
               m.isSentByMe == sentByMe &&
@@ -1060,8 +1302,8 @@ abstract class ChatScreenControllerBase extends GetxController {
         // Large media arrives as a size marker WITHOUT bytes: create the
         // placeholder bubble (download on tap) instead of a local file.
         final int? remoteSize = entry['remoteSize'] as int?;
-        messages.add(
-          MessageModel(
+        additions.add((
+          model: MessageModel(
             // Keep the peer's id so future syncs can deduplicate on it.
             id: entryId,
             text: text,
@@ -1074,21 +1316,56 @@ abstract class ChatScreenControllerBase extends GetxController {
                     ? remoteSize
                     : null,
           ),
-        );
-        changed = true;
+          text: text,
+          sentByMe: sentByMe,
+          ts: ts,
+          incomingHash: incomingHash,
+        ));
       }
 
-      if (changed) {
-        messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      if ((completions.isNotEmpty || additions.isNotEmpty) && !_closed) {
+        // Final phase: fresh read + id-based merge in a single state write.
+        final msgs = List.of(state.messages);
+        for (final c in completions) {
+          final idx = msgs.indexWhere((m) => m.id == c.id);
+          if (idx != -1 && msgs[idx].hasRemoteMedia) {
+            final cur = msgs[idx];
+            msgs[idx] = MessageModel(
+              id: cur.id,
+              text: cur.text,
+              isSentByMe: cur.isSentByMe,
+              timestamp: cur.timestamp,
+              imagePath: c.path,
+              transferKind: c.isAudio ? 'audio' : cur.transferKind,
+            );
+          }
+        }
+        for (final a in additions) {
+          // Re-check the dedup against the FRESH list: a live frame may have
+          // integrated the same message while this batch was on disk.
+          final dup = msgs.any(
+            (m) =>
+                m.text == a.text &&
+                m.isSentByMe == a.sentByMe &&
+                (m.timestamp.difference(a.ts).abs().inSeconds <= 10 ||
+                    (a.incomingHash != null &&
+                        m.imagePath != null &&
+                        _fileHash(m.imagePath!) == a.incomingHash)),
+          );
+          if (!dup) msgs.add(a.model);
+        }
+        msgs.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+        state = state.copyWith(messages: msgs);
         _scheduleSave();
-        update();
       }
     } catch (_) {
       // Malformed sync packet — ignore silently.
     } finally {
       // Frame may have finished before applying (images written to disk);
       // hide the banner only once everything is processed.
-      isSyncing.value = false;
+      if (!_closed) {
+        state = state.copyWith(isSyncing: false);
+      }
     }
   }
 
@@ -1113,108 +1390,127 @@ abstract class ChatScreenControllerBase extends GetxController {
   }
 
   Future<void> _handleIncomingImage(Uint8List bytes) async {
-    int idx = _incomingProgressId == null
-        ? -1
-        : messages.indexWhere((m) => m.id == _incomingProgressId);
-    if (idx == -1) {
-      // Bubble may have been cleared or restored without an id: fall back to
-      // any incoming progress bubble still in the list.
-      idx = messages.indexWhere(
-        (m) => m.isTransferring && m.transferKind == 'bytes' && !m.isSentByMe,
-      );
-    }
+    if (_closed) return;
+    // Capture the target id and consume it BEFORE the disk write; the list
+    // is re-read afterwards so concurrent state changes (live frames, a
+    // second transfer) are not clobbered by a stale write-back.
+    final targetId = _incomingProgressId;
     _incomingProgressId = null;
 
     final filePath = await _persistIncomingBytes(bytes, 'jpg');
+    if (_closed) return;
 
-    if (idx != -1 && idx < messages.length) {
-      messages[idx] = messages[idx].copyWith(
-        text: 'imageCaption'.trParams({'size': '${bytes.lengthInBytes}'}),
+    final l10n = ref.read(appLocalizationsProvider);
+    final caption = l10n.imageCaption('${bytes.lengthInBytes}');
+    final msgs = List.of(state.messages);
+    int idx =
+        targetId == null ? -1 : msgs.indexWhere((m) => m.id == targetId);
+    if (idx == -1) {
+      // Bubble may have been cleared or restored without an id: fall back to
+      // any incoming progress bubble still in the list.
+      idx = msgs.indexWhere(
+        (m) => m.isTransferring && m.transferKind == 'bytes' && !m.isSentByMe,
+      );
+    }
+    if (idx != -1) {
+      msgs[idx] = msgs[idx].copyWith(
+        text: caption,
         isSentByMe: false,
         timestamp: DateTime.now(),
         imagePath: filePath,
         isTransferring: false,
       );
     } else {
-      messages.insert(
+      msgs.insert(
         0,
         MessageModel(
           id: Uuid().v4(),
-          text: 'imageCaption'.trParams({'size': '${bytes.lengthInBytes}'}),
+          text: caption,
           isSentByMe: false,
           timestamp: DateTime.now(),
           imagePath: filePath,
         ),
       );
     }
+    state = state.copyWith(messages: msgs);
     _scheduleSave();
   }
 
-  void _updateOutgoingProgress(TransferState state) {
+  void _updateOutgoingProgress(TransferState transfer) {
+    if (_closed) return;
+    final msgs = List.of(state.messages);
     int idx = _outgoingProgressId == null
         ? -1
-        : messages.indexWhere((m) => m.id == _outgoingProgressId);
+        : msgs.indexWhere((m) => m.id == _outgoingProgressId);
     if (idx == -1) {
       _outgoingProgressId = null;
-      final bubble = _newProgressBubble(isSentByMe: true, state: state);
+      final bubble = _newProgressBubble(isSentByMe: true, state: transfer);
       _outgoingProgressId = bubble.id;
-      messages.insert(0, bubble);
+      msgs.insert(0, bubble);
       idx = 0;
     } else {
-      messages[idx] = messages[idx].copyWith(
-        text: _progressPercent(state),
-        transferCurrent: state.current,
-        transferTotal: state.total,
-        isTransferring: state.current < state.total,
+      msgs[idx] = msgs[idx].copyWith(
+        text: _progressPercent(transfer),
+        transferCurrent: transfer.current,
+        transferTotal: transfer.total,
+        isTransferring: transfer.current < transfer.total,
       );
     }
 
-    // Finalize outgoing: convert the progress bubble into the real image message
-    if (state.total > 0 && state.current >= state.total) {
+    // Finalize outgoing: convert the progress bubble into the real image
+    // message.
+    var finalized = false;
+    if (transfer.total > 0 && transfer.current >= transfer.total) {
       final bytesToAttach = _pendingOutgoingBytes;
       final audioText = _pendingOutgoingAudioText;
-      messages[idx] = messages[idx].copyWith(
+      final l10n = ref.read(appLocalizationsProvider);
+      msgs[idx] = msgs[idx].copyWith(
         text: audioText ??
             (bytesToAttach != null
                 // Localized like the incoming path: the hardcoded English
                 // caption shipped "[Image] (…)" even on the TR UI.
-                ? 'imageCaption'.trParams(
-                    {'size': '${bytesToAttach.lengthInBytes}'})
-                : messages[idx].text),
-        imagePath: sendingImagePath ?? messages[idx].imagePath,
+                ? l10n.imageCaption('${bytesToAttach.lengthInBytes}')
+                : msgs[idx].text),
+        imagePath: _sendingImagePath ?? msgs[idx].imagePath,
         isTransferring: false,
-        transferCurrent: state.total,
-        transferTotal: state.total,
+        transferCurrent: transfer.total,
+        transferTotal: transfer.total,
         transferKind: audioText != null ? 'audio' : 'bytes',
       );
-      _scheduleSave();
-      sendingImagePath = null;
+      finalized = true;
+      _sendingImagePath = null;
       _pendingOutgoingBytes = null;
       _pendingOutgoingAudioText = null;
       _outgoingProgressId = null;
     }
-    update();
+    state = state.copyWith(messages: msgs);
+    // Persist AFTER the state write: _scheduleSave snapshots the CURRENT
+    // state — scheduling before the finalize write stored the bubble still
+    // mid-transfer (the old timer read the live list at fire time).
+    if (finalized) _scheduleSave();
   }
 
-  void _updateIncomingProgress(TransferState state) {
+  void _updateIncomingProgress(TransferState transfer) {
+    if (_closed) return;
+    final msgs = List.of(state.messages);
     int idx = _incomingProgressId == null
         ? -1
-        : messages.indexWhere((m) => m.id == _incomingProgressId);
+        : msgs.indexWhere((m) => m.id == _incomingProgressId);
     if (idx == -1) {
       _incomingProgressId = null;
-      final bubble = _newProgressBubble(isSentByMe: false, state: state);
+      final bubble = _newProgressBubble(isSentByMe: false, state: transfer);
       _incomingProgressId = bubble.id;
-      messages.insert(0, bubble);
+      msgs.insert(0, bubble);
       idx = 0;
     } else {
-      messages[idx] = messages[idx].copyWith(
-        text: _progressPercent(state),
-        transferCurrent: state.current,
-        transferTotal: state.total,
-        isTransferring: state.current < state.total,
+      msgs[idx] = msgs[idx].copyWith(
+        text: _progressPercent(transfer),
+        transferCurrent: transfer.current,
+        transferTotal: transfer.total,
+        isTransferring: transfer.current < transfer.total,
       );
     }
-    update();
+    state = state.copyWith(messages: msgs);
   }
 
   MessageModel _newProgressBubble({
@@ -1239,11 +1535,13 @@ abstract class ChatScreenControllerBase extends GetxController {
   }
 
   void sendTextMessage() {
-    if (isConnected.value) {
+    if (_closed) return;
+    if (state.isConnected) {
       final text = textController.text;
       // Show the bubble immediately (user feedback); the actual write is
       // serialized behind any in-flight transfer.
-      messages.insert(
+      final msgs = List.of(state.messages);
+      msgs.insert(
         0,
         MessageModel(
           id: Uuid().v4(),
@@ -1252,28 +1550,58 @@ abstract class ChatScreenControllerBase extends GetxController {
           timestamp: DateTime.now(),
         ),
       );
+      state = state.copyWith(messages: msgs);
       _scheduleSave();
       textController.clear();
       _enqueueSend(_OutgoingJob.text(text));
-      update();
     }
   }
 
-  Future<void> saveChatSession() async {
-    chatSession.messages = messages.toList();
-    chatSession.updatedAt = DateTime.now();
-    await SessionRepository.instance.saveChatSession(chatSession);
+  Future<void> _saveChatSession() async {
+    final session = state.chatSession;
+    session.messages = List.of(state.messages);
+    session.updatedAt = DateTime.now();
+    await _repo.saveChatSession(session);
+  }
+
+  /// Clears the conversation (the old kit's `messages.clear() +
+  /// saveChatSession()` pair as one call — same behavior).
+  Future<void> clearConversation() async {
+    if (_closed) return;
+    // Drop any pending debounced write first — a stale snapshot must not
+    // race the cleared conversation back into the store.
+    _saveDebounce?.cancel();
+    _saveDebounce = null;
+    _pendingSaveSnapshot = null;
+    state = state.copyWith(messages: const []);
+    await _saveChatSession();
+  }
+
+  /// Snapshot of the session as of the last scheduled save. Captured
+  /// OUTSIDE any provider lifecycle: the flush path may run inside
+  /// `ref.onDispose`, where reading `state` is forbidden.
+  ChatSessionModel? _pendingSaveSnapshot;
+
+  ChatSessionModel _snapshotSession() {
+    final session = state.chatSession;
+    session.messages = List.of(state.messages);
+    session.updatedAt = DateTime.now();
+    return session;
   }
 
   /// Debounced persistence: bursts of events (message storms, transfer
-  /// progress) result in a single Hive write. [onClose] flushes the pending
-  /// write so no change is lost.
+  /// progress) result in a single write. [close] flushes the pending write
+  /// so no change is lost.
   void _scheduleSave() {
     _saveDebounce?.cancel();
+    _pendingSaveSnapshot = _snapshotSession();
     _saveDebounce = Timer(const Duration(milliseconds: 250), () async {
       _saveDebounce = null;
+      final snapshot = _pendingSaveSnapshot;
+      _pendingSaveSnapshot = null;
+      if (snapshot == null) return;
       try {
-        await saveChatSession();
+        await _repo.saveChatSession(snapshot);
       } catch (e) {
         // Never let a persistence failure vanish silently — it previously
         // made sessions disappear after restart with no trace.
@@ -1285,11 +1613,13 @@ abstract class ChatScreenControllerBase extends GetxController {
   }
 
   Future<void> _flushPendingSave() async {
-    if (_saveDebounce == null) return;
+    final snapshot = _pendingSaveSnapshot;
+    if (_saveDebounce == null || snapshot == null) return;
     _saveDebounce!.cancel();
     _saveDebounce = null;
+    _pendingSaveSnapshot = null;
     try {
-      await saveChatSession();
+      await _repo.saveChatSession(snapshot);
     } catch (e) {
       if (kDebugMode) {
         debugPrint('Chat session flush failed: $e');
@@ -1297,23 +1627,26 @@ abstract class ChatScreenControllerBase extends GetxController {
     }
   }
 
-  /// Remove a message at the given index from the shared message list
+  /// Remove a message at the given index from the shared message list.
   void deleteMessageAt(int index) {
-    if (index >= 0 && index < messages.length) {
-      messages.removeAt(index);
+    if (_closed) return;
+    if (index >= 0 && index < state.messages.length) {
+      final msgs = List.of(state.messages)..removeAt(index);
+      state = state.copyWith(messages: msgs);
     }
   }
 
-  /// Removes one of the user's own messages by id (UI + persisted Hive
-  /// session). Local only: the peer's copy is untouched, so a later history
-  /// sync may re-deliver the message.
+  /// Removes one of the user's own messages by id (UI + persisted session).
+  /// Local only: the peer's copy is untouched, so a later history sync may
+  /// re-deliver the message.
   void deleteMessage(String? id) {
-    if (id == null) return;
-    final idx = messages.indexWhere((m) => m.id == id);
+    if (_closed || id == null) return;
+    final msgs = List.of(state.messages);
+    final idx = msgs.indexWhere((m) => m.id == id);
     if (idx == -1) return;
-    messages.removeAt(idx);
+    msgs.removeAt(idx);
+    state = state.copyWith(messages: msgs);
     _scheduleSave();
-    update();
   }
 
   Future<void> pickAndSendImage() => _pickAndSend(ImageSource.gallery);
@@ -1322,8 +1655,9 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// caller's context) — no GetX sheet API; the sheet is dismissed through
   /// its own route before the picker opens.
   Future<void> showImageSourceSheet(BuildContext context) async {
-    if (!isConnected.value) return;
+    if (!state.isConnected) return;
     final Color cardColor = Theme.of(context).cardColor;
+    final l10n = ref.read(appLocalizationsProvider);
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -1344,7 +1678,7 @@ abstract class ChatScreenControllerBase extends GetxController {
             children: [
               ListTile(
                 leading: const Icon(Icons.photo_library),
-                title: Text('gallerySource'.tr),
+                title: Text(l10n.gallerySource),
                 onTap: () async {
                   Navigator.of(sheetContext).pop();
                   await _pickAndSend(ImageSource.gallery);
@@ -1352,7 +1686,7 @@ abstract class ChatScreenControllerBase extends GetxController {
               ),
               ListTile(
                 leading: const Icon(Icons.photo_camera),
-                title: Text('cameraSource'.tr),
+                title: Text(l10n.cameraSource),
                 onTap: () async {
                   Navigator.of(sheetContext).pop();
                   await _pickAndSend(ImageSource.camera);
@@ -1366,21 +1700,24 @@ abstract class ChatScreenControllerBase extends GetxController {
   }
 
   Future<void> _pickAndSend(ImageSource source) async {
-    if (!isConnected.value) return;
+    if (_closed || !state.isConnected) return;
     final picker = ImagePicker();
     final XFile? file = await picker.pickImage(source: source);
-    if (file == null) return;
+    if (file == null || _closed) return;
 
     Uint8List bytes = await file.readAsBytes();
-    sendingImagePath = file.path;
+    if (_closed) return;
+    _sendingImagePath = file.path;
     // Single compression pass: pickImage is used without imageQuality so the
     // JPEG is not decoded twice (previous code compressed twice).
     try {
-      final compressed = await FlutterImageCompress.compressWithList(bytes, quality: 70);
+      final compressed =
+          await FlutterImageCompress.compressWithList(bytes, quality: 70);
       if (compressed.isNotEmpty) {
         bytes = Uint8List.fromList(compressed);
       }
     } catch (_) {}
+    if (_closed) return;
 
     // Queue the transfer instead of sending immediately: it starts only
     // after any currently in-flight send completes, so wire order and
@@ -1416,27 +1753,29 @@ abstract class ChatScreenControllerBase extends GetxController {
         // Wire these before sendBytes so progress callbacks can finalize the
         // bubble; cleared on completion/failure in _updateOutgoingProgress.
         _pendingOutgoingBytes = job.bytes;
-        sendingImagePath = job.imagePath;
+        _sendingImagePath = job.imagePath;
         _pendingOutgoingAudioText = job.audioText;
-        await transport.sendBytes(job.bytes!);
+        await _binding.sendBytes(job.bytes!);
       } else {
-        await transport.sendMessage(job.text!);
+        await _binding.sendMessage(job.text!);
       }
     } catch (_) {
-      if (job.kind == _SendKind.bytes) {
+      if (job.kind == _SendKind.bytes && !_closed) {
+        final msgs = List.of(state.messages);
         final int? idx = _outgoingProgressId == null
-            ? (messages.isNotEmpty ? 0 : null)
-            : messages.indexWhere((m) => m.id == _outgoingProgressId);
-        if (idx != null && idx >= 0 && idx < messages.length) {
-          messages[idx] = messages[idx].copyWith(
-            text: 'imageSendFailed'.tr,
+            ? (msgs.isNotEmpty ? 0 : null)
+            : msgs.indexWhere((m) => m.id == _outgoingProgressId);
+        if (idx != null && idx >= 0 && idx < msgs.length) {
+          final l10n = ref.read(appLocalizationsProvider);
+          msgs[idx] = msgs[idx].copyWith(
+            text: l10n.imageSendFailed,
             isTransferring: false,
           );
+          state = state.copyWith(messages: msgs);
         }
         _pendingOutgoingBytes = null;
         _outgoingProgressId = null;
-        sendingImagePath = null;
-        update();
+        _sendingImagePath = null;
       }
     }
     // Even when the future completes without any progress events, the next
@@ -1453,18 +1792,26 @@ abstract class ChatScreenControllerBase extends GetxController {
     return path;
   }
 
-  // ── Voice recording & playback ───────────────────────────────────────────
+  // ── Voice recording & playback ─────────────────────────────────────────
 
   /// Starts a voice recording (hold-to-record). Requires the microphone
-  /// runtime permission; the file is AAc-LC (.m4a) in app documents.
+  /// runtime permission; the file is AAC-LC (.m4a) in app documents.
   Future<void> startRecording() async {
-    if (isRecording.value || !transport.isConnected.value) return;
+    if (_closed || state.isRecording || !state.isConnected) return;
     final status = await Permission.microphone.request();
+    if (_closed) return;
     if (!status.isGranted) {
-      _showToast('micPermissionTitle'.tr, 'recordingUnavailableMessage'.tr);
+      final l10n = ref.read(appLocalizationsProvider);
+      _showNotice(
+        l10n.micPermissionTitle,
+        l10n.recordingUnavailableMessage,
+        icon: Icons.mic_off,
+        accent: Colors.amber,
+      );
       return;
     }
     final dir = await getApplicationDocumentsDirectory();
+    if (_closed) return;
     _recordingPath =
         '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
     _recorder = AudioRecorder();
@@ -1479,18 +1826,26 @@ abstract class ChatScreenControllerBase extends GetxController {
       }
       _recorder = null;
       _recordingPath = null;
-      _showToast('recordingErrorTitle'.tr, 'recordingStartFailedMessage'.tr);
+      if (_closed) return;
+      final l10n = ref.read(appLocalizationsProvider);
+      _showNotice(
+        l10n.recordingErrorTitle,
+        l10n.recordingStartFailedMessage,
+        icon: Icons.error_outline,
+      );
       return;
     }
-    recordSeconds.value = 0;
-    isRecording.value = true;
+    if (_closed) return;
+    state = state.copyWith(recordSeconds: 0, isRecording: true);
     _recordTimer?.cancel();
     _recordTimer = Timer.periodic(
       const Duration(seconds: 1),
       (_) {
-        recordSeconds.value++;
+        if (_closed) return;
+        final seconds = state.recordSeconds + 1;
+        state = state.copyWith(recordSeconds: seconds);
         // Automatic cut-off: stop and send at the configured limit.
-        if (recordSeconds.value >= _maxRecordSeconds) {
+        if (seconds >= _maxRecordSeconds) {
           stopRecordingAndSend();
         }
       },
@@ -1500,22 +1855,25 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// Stops the recording and queues it for sending (≥ 1 s; shorter takes are
   /// discarded to avoid accidental taps).
   Future<void> stopRecordingAndSend() async {
-    if (!isRecording.value) return;
+    if (_closed || !state.isRecording) return;
     final path = _recordingPath;
-    final seconds = recordSeconds.value;
+    final seconds = state.recordSeconds;
     await cancelRecording(deleteFile: false);
-    if (path == null) return;
+    if (_closed || path == null) return;
     final file = File(path);
     if (!await file.exists() || file.lengthSync() == 0) return;
+    if (_closed) return;
     if (seconds < 1) {
       await file.delete().catchError((_) => file);
       return;
     }
     _enqueueSend(
-      _OutgoingJob.text(_audioPrefix + jsonEncode({'duration': _formatDuration(seconds)})),
+      _OutgoingJob.text(
+          _audioPrefix + jsonEncode({'duration': _formatDuration(seconds)})),
     );
     _enqueueSend(
-      _OutgoingJob.bytes(await file.readAsBytes(), path, audioText: _formatDuration(seconds)),
+      _OutgoingJob.bytes(await file.readAsBytes(), path,
+          audioText: _formatDuration(seconds)),
     );
   }
 
@@ -1523,8 +1881,9 @@ abstract class ChatScreenControllerBase extends GetxController {
   Future<void> cancelRecording({bool deleteFile = true}) async {
     _recordTimer?.cancel();
     _recordTimer = null;
-    isRecording.value = false;
-    recordSeconds.value = 0;
+    if (!_closed) {
+      state = state.copyWith(isRecording: false, recordSeconds: 0);
+    }
     final path = _recordingPath;
     _recordingPath = null;
     try {
@@ -1543,7 +1902,7 @@ abstract class ChatScreenControllerBase extends GetxController {
   Future<void> toggleAudio(MessageModel msg) async {
     final path = msg.imagePath;
     if (path == null) return;
-    if (playingAudioId.value == msg.id) {
+    if (audioPlayback.value.playingId == msg.id) {
       if (_audioPlayer.playing) {
         await _audioPlayer.pause();
       } else {
@@ -1552,15 +1911,14 @@ abstract class ChatScreenControllerBase extends GetxController {
       return;
     }
     await _audioPlayer.stop();
-    playingAudioId.value = msg.id;
-    audioProgress.value = 0;
+    _setPlayback(playingId: msg.id, progress: 0);
     try {
       await _audioPlayer.setFilePath(path);
     } catch (e) {
       if (kDebugMode && showDebugLogs) {
         debugPrint('Audio load failed: $e');
       }
-      playingAudioId.value = null;
+      _setPlayback(playingId: null);
       return;
     }
     await _audioPlayer.play();
@@ -1569,7 +1927,7 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// Seeks the given bubble to [millis]. Loads the track first when another
   /// message is currently bound to the player.
   Future<void> seekAudio(MessageModel msg, double millis) async {
-    if (playingAudioId.value != msg.id) {
+    if (audioPlayback.value.playingId != msg.id) {
       await toggleAudio(msg);
     }
     if (millis < 0) millis = 0;
@@ -1594,6 +1952,7 @@ abstract class ChatScreenControllerBase extends GetxController {
   /// Processes an incoming voice transfer: persists the bytes and finalizes
   /// the transfer bubble as an audio message.
   Future<void> _handleIncomingAudio(Uint8List bytes) async {
+    if (_closed) return;
     final meta = _pendingAudioMeta;
     _pendingAudioMeta = null;
     String? durationText;
@@ -1605,21 +1964,25 @@ abstract class ChatScreenControllerBase extends GetxController {
       }
     }
 
-    int idx = _incomingProgressId == null
-        ? -1
-        : messages.indexWhere((m) => m.id == _incomingProgressId);
-    if (idx == -1) {
-      idx = messages.indexWhere(
-        (m) => m.isTransferring && m.transferKind == 'bytes' && !m.isSentByMe,
-      );
-    }
+    // Capture the target id and consume it BEFORE the disk write; the list
+    // is re-read afterwards (see _handleIncomingImage).
+    final targetId = _incomingProgressId;
     _incomingProgressId = null;
 
     final filePath = await _persistIncomingBytes(bytes, 'm4a');
+    if (_closed) return;
 
-    if (idx != -1 && idx < messages.length) {
-      messages[idx] = messages[idx].copyWith(
-        text: durationText ?? messages[idx].text,
+    final msgs = List.of(state.messages);
+    int idx =
+        targetId == null ? -1 : msgs.indexWhere((m) => m.id == targetId);
+    if (idx == -1) {
+      idx = msgs.indexWhere(
+        (m) => m.isTransferring && m.transferKind == 'bytes' && !m.isSentByMe,
+      );
+    }
+    if (idx != -1) {
+      msgs[idx] = msgs[idx].copyWith(
+        text: durationText ?? msgs[idx].text,
         isSentByMe: false,
         timestamp: DateTime.now(),
         imagePath: filePath,
@@ -1627,7 +1990,7 @@ abstract class ChatScreenControllerBase extends GetxController {
         transferKind: 'audio',
       );
     } else {
-      messages.insert(
+      msgs.insert(
         0,
         MessageModel(
           id: Uuid().v4(),
@@ -1639,7 +2002,7 @@ abstract class ChatScreenControllerBase extends GetxController {
         ),
       );
     }
+    state = state.copyWith(messages: msgs);
     _scheduleSave();
-    update();
   }
 }

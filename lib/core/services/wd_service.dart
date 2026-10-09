@@ -67,6 +67,26 @@ class WifiDirectService {
     }
   }
 
+  /// Whether the device's location master toggle is on (required for P2P
+  /// discovery on many OEM builds — MIUI/HyperOS fail silently without it).
+  Future<bool> isLocationEnabled() async {
+    try {
+      return await _platform.isLocationEnabled();
+    } catch (_) {
+      return true; // fail-open: never block the normal flow on channel errors
+    }
+  }
+
+  /// Opens the system location settings screen so the user can turn the
+  /// location master toggle on.
+  Future<bool> requestEnableLocation() async {
+    try {
+      return await _platform.requestEnableLocation();
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// This device's current P2P MAC (rides in the identity frame so the peer
   /// can key its chat session — the socket carries no address).
   Future<String?> getThisDeviceAddress() async {

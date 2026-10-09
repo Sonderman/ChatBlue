@@ -1,23 +1,54 @@
 // Wi‑Fi Direct scan screen: discovery, peer list, and connect. Riverpod
 // transport notifier (ported from the GetX controller).
+import 'dart:async';
+
 import 'package:chatblue/core/services/wd_service.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
-import 'package:chatblue/providers/app_providers.dart';
+import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:chatblue/providers/transport_providers.dart';
 import 'package:chatblue/screens/chat_ui/connecting_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-class WifiDirectScanScreen extends ConsumerWidget {
+class WifiDirectScanScreen extends ConsumerStatefulWidget {
   const WifiDirectScanScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<WifiDirectScanScreen> createState() =>
+      _WifiDirectScanScreenState();
+}
+
+class _WifiDirectScanScreenState extends ConsumerState<WifiDirectScanScreen>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Fresh location state on mount: the master toggle can change outside
+    // the app (quick settings) between sessions.
+    unawaited(ref.read(wdTransportProvider.notifier).refreshLocationState());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
+    // The user may toggle location in the system settings we opened (or via
+    // quick settings) and come back — re-read so the panel reflects it.
+    if (lifecycleState == AppLifecycleState.resumed) {
+      unawaited(ref.read(wdTransportProvider.notifier).refreshLocationState());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     final state = ref.watch(wdTransportProvider);
     final notifier = ref.read(wdTransportProvider.notifier);
-    notifier.translate = (key, {params}) =>
-        transportKeyToL10n(l10n, key, params: params);
 
     return Scaffold(
       appBar: AppBar(
@@ -48,6 +79,35 @@ class WifiDirectScanScreen extends ConsumerWidget {
                             : notifier.enableWifi,
                         icon: const Icon(Icons.wifi),
                         label: Text(l10n.enableWifi),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            )
+          // Location off: P2P discovery fails on many OEM builds (MIUI/
+          // HyperOS) while the master toggle is off — same panel pattern as
+          // Wi‑Fi, with a shortcut into the system location settings.
+          else if (!state.isLocationOn)
+            Expanded(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        l10n.locationOffTitle,
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                      const SizedBox(height: 16),
+                      ElevatedButton.icon(
+                        onPressed: state.isLocationEnableInFlight
+                            ? null
+                            : notifier.enableLocation,
+                        icon: const Icon(Icons.location_on_outlined),
+                        label: Text(l10n.enableLocation),
                       ),
                     ],
                   ),
@@ -134,8 +194,6 @@ class WifiDirectScanScreen extends ConsumerWidget {
                               if (outcome == ConnectingOutcome.cancelled) {
                                 return;
                               }
-                              final messenger =
-                                  scaffoldMessengerKey.currentState;
                               // A timeout with the peer still deciding is
                               // NOT a failure: the link is alive and the
                               // READY frame will open the chat once the
@@ -146,29 +204,27 @@ class WifiDirectScanScreen extends ConsumerWidget {
                               if (!isConnected && !awaiting) {
                                 // A declined request is announced by the
                                 // transport's notice card — don't stack a
-                                // second, plain snackbar on top of it.
+                                // second notice card on top of it.
                                 if (ref
                                         .read(wdTransportProvider)
                                         .lastConnectError ==
                                     l10n.connectionDeclinedMessage) {
                                   return;
                                 }
-                                messenger?.showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      '${l10n.couldNotConnectTitle}: '
-                                      '${ref.read(wdTransportProvider).lastConnectError ?? l10n.couldNotConnectMessage}',
-                                    ),
-                                  ),
+                                ConnectionNotice.show(
+                                  title: l10n.couldNotConnectTitle,
+                                  message: ref
+                                          .read(wdTransportProvider)
+                                          .lastConnectError ??
+                                      l10n.couldNotConnectMessage,
+                                  icon: Icons.error_outline,
                                 );
                               } else if (!isConnected) {
-                                messenger?.showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      '${l10n.waitingAcceptanceTitle}: '
-                                      '${l10n.waitingAcceptanceMessage}',
-                                    ),
-                                  ),
+                                ConnectionNotice.show(
+                                  title: l10n.waitingAcceptanceTitle,
+                                  message: l10n.waitingAcceptanceMessage,
+                                  icon: Icons.hourglass_top,
+                                  accent: Colors.amber,
                                 );
                               }
                               // On success the notifier navigates to the

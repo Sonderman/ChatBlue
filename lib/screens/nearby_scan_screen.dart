@@ -3,9 +3,8 @@
 // screen); the WFD-specific server mode has no Nearby equivalent.
 import 'package:chatblue/core/services/nearby_service.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
-import 'package:chatblue/providers/app_providers.dart';
+import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:chatblue/providers/nearby_transport_providers.dart';
-import 'package:chatblue/providers/transport_providers.dart';
 import 'package:chatblue/screens/chat_ui/connecting_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,8 +17,6 @@ class NearbyScanScreen extends ConsumerWidget {
     final l10n = AppLocalizations.of(context)!;
     final state = ref.watch(nearbyTransportProvider);
     final notifier = ref.read(nearbyTransportProvider.notifier);
-    notifier.translate = (key, {params}) =>
-        transportKeyToL10n(l10n, key, params: params);
 
     return Scaffold(
       appBar: AppBar(
@@ -144,37 +141,33 @@ class NearbyScanScreen extends ConsumerWidget {
                             if (outcome == ConnectingOutcome.cancelled) {
                               return;
                             }
-                            final messenger =
-                                scaffoldMessengerKey.currentState;
                             final isConnected =
                                 ref.read(nearbyTransportProvider).isConnected;
                             final awaiting = notifier.isAwaitingAcceptance;
                             if (!isConnected && !awaiting) {
                               // A declined request is announced by the
                               // transport's notice card — don't stack a
-                              // second, plain snackbar on top of it.
+                              // second notice card on top of it.
                               if (ref
                                       .read(nearbyTransportProvider)
                                       .lastConnectError ==
                                   l10n.connectionDeclinedMessage) {
                                 return;
                               }
-                              messenger?.showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    '${l10n.couldNotConnectTitle}: '
-                                    '${ref.read(nearbyTransportProvider).lastConnectError ?? l10n.couldNotConnectMessage}',
-                                  ),
-                                ),
+                              ConnectionNotice.show(
+                                title: l10n.couldNotConnectTitle,
+                                message: ref
+                                        .read(nearbyTransportProvider)
+                                        .lastConnectError ??
+                                    l10n.couldNotConnectMessage,
+                                icon: Icons.error_outline,
                               );
                             } else if (!isConnected) {
-                              messenger?.showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    '${l10n.waitingAcceptanceTitle}: '
-                                    '${l10n.waitingAcceptanceMessage}',
-                                  ),
-                                ),
+                              ConnectionNotice.show(
+                                title: l10n.waitingAcceptanceTitle,
+                                message: l10n.waitingAcceptanceMessage,
+                                icon: Icons.hourglass_top,
+                                accent: Colors.amber,
                               );
                             }
                             // On success the notifier navigates to the chat

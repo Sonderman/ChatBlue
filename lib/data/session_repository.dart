@@ -15,11 +15,6 @@ import 'package:uuid/uuid.dart';
 class SessionRepository {
   SessionRepository(this._db);
 
-  /// Migration bridge: legacy GetX screens cannot take providers yet, so
-  /// `main()` assigns this once after opening the database. New Riverpod
-  /// code should read `sessionRepositoryProvider` instead.
-  static late SessionRepository instance;
-
   final AppDatabase _db;
 
   static const _uuid = Uuid();

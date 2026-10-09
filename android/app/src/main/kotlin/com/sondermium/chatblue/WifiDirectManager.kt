@@ -165,6 +165,14 @@ class WifiDirectManager(private val context: Context) {
             onScanError?.invoke("Missing Wi‑Fi Direct discovery permission")
             return
         }
+        if (!isLocationOn()) {
+            // The location master toggle must be on for P2P discovery on
+            // many OEM builds (MIUI/HyperOS fail silently or with an opaque
+            // ERROR without it) — mirror the connect() pre-flight so the UI
+            // gets a clear message instead of "discoverPeers failed: 0".
+            onScanError?.invoke("Location is turned off")
+            return
+        }
         tryRegisterReceiver()
         peersByAddress.clear()
         onScanStarted?.invoke()
@@ -358,7 +366,25 @@ class WifiDirectManager(private val context: Context) {
         }
     }
 
-    private fun isLocationOn(): Boolean {
+    /// Opens the system location settings screen so the user can turn the
+    /// location master toggle on (required for P2P discovery on many OEM
+    /// builds; apps cannot toggle it programmatically). Returns whether the
+    /// launch was attempted.
+    fun requestEnableLocation(): Boolean {
+        return try {
+            val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /// Whether the location master toggle is on (required for P2P
+    /// discovery/connect on many OEM builds). Public: exposed to Dart
+    /// for the scan screen's pre-flight panel.
+    fun isLocationOn(): Boolean {
         val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             lm?.isLocationEnabled == true

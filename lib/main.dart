@@ -2,16 +2,13 @@ import 'dart:async';
 
 import 'package:chatblue/config.dart';
 import 'package:chatblue/core/theme/app_theme.dart';
-import 'package:chatblue/core/translations/app_translations.dart';
 import 'package:chatblue/data/db/app_database.dart';
-import 'package:chatblue/data/session_repository.dart';
 import 'package:chatblue/data/settings_repository.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
 import 'package:chatblue/providers/app_providers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:get/get.dart';
 import 'package:mcp_toolkit/mcp_toolkit.dart';
 import 'package:chatblue/screens/homescreen/home_screen.dart';
 import 'package:sizer/sizer.dart';
@@ -45,15 +42,14 @@ void main() async {
 /// App bootstrap after binding/toolkit init: services, container, runApp.
 Future<void> _launchApp() async {
   final database = await setupServices();
-  // Transport controllers are NOT registered here: each screen registers its
-  // own on first access via `ensureRegistered`, so no permissions dialog
-  // appears on launch and hot reloads (which skip main()) stay consistent.
+  // Transports are Riverpod providers now — nothing is registered here.
+  // Providers build lazily on first access, so no permissions dialog appears
+  // on launch and hot reloads (which skip main()) stay consistent.
   final container = ProviderContainer(
     overrides: [
       if (database != null) appDatabaseProvider.overrideWithValue(database),
     ],
   );
-  rootProviderContainer = container;
   runApp(UncontrolledProviderScope(container: container, child: MyApp()));
 }
 
@@ -63,14 +59,12 @@ class MyApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return Sizer(
-      builder: (context, orientation, deviceType) => GetMaterialApp(
+      builder: (context, orientation, deviceType) => MaterialApp(
         title: appName,
         debugShowCheckedModeBanner: false,
         navigatorKey: navigatorKey,
         scaffoldMessengerKey: scaffoldMessengerKey,
-        translations: AppTranslations(),
         locale: ref.watch(localeProvider),
-        fallbackLocale: const Locale('en', 'US'),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
         supportedLocales: AppLocalizations.supportedLocales,
         theme: AppTheme.light,
@@ -95,7 +89,6 @@ Future<AppDatabase?> setupServices() async {
     // present (P1/P2 builds); Hive itself is gone (P3) — boxes remaining on
     // test devices are inert files.
     database = await AppDatabase.open();
-    SessionRepository.instance = SessionRepository(database);
     // Settings cache loads before runApp: the notifiers read synchronously
     // (no theme/locale flicker on launch).
     final settings = SettingsRepository(database);

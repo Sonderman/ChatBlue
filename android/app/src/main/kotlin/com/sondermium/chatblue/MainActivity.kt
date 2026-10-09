@@ -466,6 +466,8 @@ class MainActivity : FlutterActivity() {
                 }
                 "isWifiEnabled" -> { result.success(wifiDirectManager.isWifiEnabled()) }
                 "requestEnableWifi" -> { result.success(wifiDirectManager.requestEnableWifi()) }
+                "isLocationEnabled" -> { result.success(wifiDirectManager.isLocationOn()) }
+                "requestEnableLocation" -> { result.success(wifiDirectManager.requestEnableLocation()) }
                 "getThisDeviceAddress" -> { result.success(wifiDirectManager.getThisDeviceAddress()) }
                 "startDiscovery" -> { wifiDirectManager.startDiscovery(); result.success(true) }
                 "stopDiscovery" -> { wifiDirectManager.stopDiscovery(); result.success(true) }

@@ -1,41 +1,58 @@
-// ChatScreen for Wi‑Fi Direct — modern UI built from the shared chat_ui kit
-// (dark navy canvas, cyan accents, gradient bubbles).
+// ChatScreen for Wi‑Fi Direct — modern UI built from the shared chat_ui
+// kit (dark navy canvas, cyan accents, gradient bubbles).
 
+import 'package:chatblue/core/models/chatsession_model.dart';
+import 'package:chatblue/providers/chat_controller.dart';
 import 'package:chatblue/screens/chat_ui/chat_ui.dart';
-import 'package:chatblue/screens/w_chatscreen/w_chatscreen_controller.dart';
 import 'package:flutter/material.dart';
-import 'package:get/get.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-class WChatScreen extends StatefulWidget {
+class WChatScreen extends ConsumerStatefulWidget {
   const WChatScreen({super.key});
 
   @override
-  State<WChatScreen> createState() => _WChatScreenState();
+  ConsumerState<WChatScreen> createState() => _WChatScreenState();
 }
 
-class _WChatScreenState extends State<WChatScreen> {
+class _WChatScreenState extends ConsumerState<WChatScreen> {
   bool _allowPop = false;
+  ChatOpenArg? _arg;
+  ChatController? _controller;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_arg != null) return;
+    // Home-list opens carry the stored session; scan/incoming opens pass no
+    // arguments and the controller reconstructs the session from the live
+    // transport identity.
+    final session = ModalRoute.of(context)?.settings.arguments;
+    _arg = ChatOpenArg(
+      transport: ChatSessionModel.transportWifiDirect,
+      session: session is ChatSessionModel ? session : null,
+    );
+    _controller = ref.read(chatControllerProvider(_arg!).notifier);
+  }
 
   @override
   void dispose() {
-    // The chat controller is registered via Get.put but never auto-deleted
-    // when the route pops: without this, onClose (socket disconnect + P2P
-    // group teardown + _chatOpen reset) never runs, the first connection
-    // stays alive and the next attempt fails — "connects once, then never
-    // again".
-    Get.delete<WChatScreenController>();
+    // Deterministic teardown on route pop — the old GetX onClose ordering:
+    // socket disconnect + transport chat-open reset happen synchronously
+    // here, so reconnects start from clean state. The provider's autoDispose
+    // keeps a lifecycle-safe backup teardown.
+    _controller?.close();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final controller = Get.put(WChatScreenController());
+    final state = ref.watch(chatControllerProvider(_arg!));
+    final controller = _controller!;
     return PopScope(
       canPop: _allowPop,
       onPopInvokedWithResult: (didPop, result) async {
         if (didPop) return;
-        final current = Get.find<WChatScreenController>();
-        if (current.hasActiveTransfer) {
+        if (ref.read(chatControllerProvider(_arg!)).hasActiveTransfer) {
           // Warn before leaving mid-transfer: leaving closes the connection
           // and cancels the image transfer.
           final leave = await showChatTransferDialog(context);
@@ -48,7 +65,7 @@ class _WChatScreenState extends State<WChatScreen> {
       child: Scaffold(
         extendBodyBehindAppBar: true,
         backgroundColor: Colors.transparent,
-        appBar: ChatAppBar(controller: controller),
+        appBar: ChatAppBar(state: state, controller: controller),
         body: Container(
           decoration: BoxDecoration(
             gradient: LinearGradient(
@@ -64,9 +81,11 @@ class _WChatScreenState extends State<WChatScreen> {
             bottom: false,
             child: Column(
               children: [
-                ChatSyncBanner(controller: controller),
-                Expanded(child: ChatMessageList(controller: controller)),
-                ChatInputBar(controller: controller),
+                ChatSyncBanner(state: state),
+                Expanded(
+                  child: ChatMessageList(state: state, controller: controller),
+                ),
+                ChatInputBar(state: state, controller: controller),
               ],
             ),
           ),

@@ -15,7 +15,6 @@ dependencies:
   flutter_localizations:
     sdk: flutter
 
-  get: ^4.7.2
   flutter_riverpod: ^3.0.0
   riverpod: ^3.4.3
   intl: any

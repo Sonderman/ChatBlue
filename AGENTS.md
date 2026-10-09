@@ -1,6 +1,6 @@
 # AGENTS.md — ChatBlue
 
-ChatBlue: Flutter P2P mesajlaşma uygulaması; state katmanı GetX'ten Riverpod'a taşınıyor (app state + transport notifier'ları Riverpod; chat ekranları geçiş boyunca GetX + `transport_adapter.dart` köprüsü ile çalışır). İki taşıma kanalı vardır: **Bluetooth Classic (RFCOMM)** ve **Wi‑Fi Direct (TCP socket)**. Her iki taşıma da Android'de native Kotlin (Platform Channels) ile uygulanmıştır.
+ChatBlue: Flutter P2P mesajlaşma uygulaması; state katmanı tamamen Riverpod (app state + transport notifier'ları + chat controller), GetX bağımlılığı tamamen kaldırıldı; çevirilerin tek kaynağı gen-l10n. Üç taşıma kanalı vardır: **Bluetooth Classic (RFCOMM)**, **Wi‑Fi Direct (TCP socket)** ve **Nearby Connections**. Üçü de Android'de native Kotlin (Platform Channels) ile uygulanmıştır.
 
 ---
 
@@ -21,10 +21,10 @@ ChatBlue: Flutter P2P mesajlaşma uygulaması; state katmanı GetX'ten Riverpod'
 ## Konvansiyonlar
 
 - Yanıt dili: **Türkçe** (kullanıcı İngilizce yazarsa o dile geçilir).
-- UI dili: **İngilizce varsayılan + Türkçe seçeneği** (Settings → Language; ilk açılışta cihaz dili Türkçe ise Türkçe başlar; çeviriler chat ekranlarında `.tr` (`lib/core/translations/app_translations.dart`), ported ekranlarda gen-l10n (`lib/l10n`, `AppLocalizations`) üzerinden tüketilir).
+- UI dili: **İngilizce varsayılan + Türkçe seçeneği** (Settings → Language; ilk açılışta cihaz dili Türkçe ise Türkçe başlar; tüm çeviriler gen-l10n tek kaynağından tüketilir (`lib/l10n`, `AppLocalizations`; `.tr` sistemi kaldırıldı).
 - Göreve başlamadan önce `project_overview.md` oku; önemli değişikliklerden sonra onu güncelle (architecture / directory / recent-changes bölümleri).
 - Commit istendiğinde: tek commit, mesaj tüm değişiklikleri kapsar, commit öncesi `project_overview.md` güncellenir. Mesajlar **İngilizce** ve Conventional Commits formatındadır: `feat:`/`fix:` başlığı + neden odaklı, alan alan bölümlenmiş gövde; sonuna `project_overview.md updated.` satırı eklenir; uzun mesaj scratch dosyaya yazılıp `git commit -F <dosya>` ile verilir.
-- Kod: mevcut stile ve GetX katman düzenine (services → controllers → screens) uy; mevcut özellikleri bozmadan değişiklik yap.
+- Kod: mevcut stile ve katman düzenine (services → transport notifier'ları → chat controller → screens) uy; mevcut özellikleri bozmadan değişiklik yap.
 
 ## Ortam
 
@@ -50,57 +50,66 @@ Detaylı P2P teşhis sırası ve OEM davranışları için `android-wifi-direct-
 - İlk connect denemesi `groupOwnerIntent = 15` ile yapılır (0 ile pasif eşin intent'i eşitlenince negotiation sessizce ölür).
 - **Bayat `WifiP2pManager.Channel`** ("bir kez bağlanıp bir daha bağlanamama"nın bilinen nedeni): teardown sonrası tüm ops ERROR/BUSY döner → `STATE_CHANGED DISABLED`'da `channelDirty`, connect öncesi `manager.initialize()`.
 - Xiaomi gelen P2P isteğini önce sistem davetiyesi (bildirim perdesi) ile sorar — bağlantı testlerinde iki cihazın ekranı da izlenir.
+- WFD taraması Konum kapalıyken opak `ERROR (0)` ile düşer → tarama öncesi pre-flight: ekran "Konum'u Aç" paneline geçer (native `startDiscovery` de location kontrol eder); buton `ACTION_LOCATION_SOURCE_SETTINGS` açar + 15 sn poll, resume'da yeniden okunur.
 
-## Durum (snapshot: 2026-10-09)
+## Durum (snapshot: 2026-10-10)
 
-- Aktif branch `main` (`963da0f` + bu tur commit'i); `origin/main` ile senkron (ahead 0 / behind 0), working tree temiz.
-- Son commit'ler: `98301d0` Nearby Connections 3. taşıma + connect-UX hardening → `963da0f` connect kök-neden fix (connecting panel dial'ı `initState`'te başlatıyordu → build-fazı Riverpod assert'i boş catch'te yutuluyor, istek hiç gönderilmiyordu → panel post-frame'de başlatılıyor + hatalar loglanıyor; `scaffoldMessengerKey` GetMaterialApp'e bağlandı; BT tarama canlı liste + 1 dk re-arm; BT/WFD alıcı-red bildirimleri) → **bu tur**: BT chat reconnect kök-neden fix (cross-transport merge'ün adres zehirlemesi → `reboundTo` self-heal + MAC guard + native try/catch), red bildirimleri `ConnectionNotice` kartına geçti (çift snackbar de-dup), chat tarafındaki tüm Get UI API'leri saf Flutter'a çevrildi, chat app bar çöp ikonu tema uyumlu (accent).
-- Branch'ler: `migration/riverpod-state` (`6d240d6`) ve `migration/hive-to-drift` (`e7e80b3`) main'e FF edilmiş; `feature/nearby-transport` = `98301d0`; `migration/riverpod-drift-nearby` (`dab6d9a`) **PARK** (dersler `chatblue-stack-migration` skill'inde).
-- Cihazda doğrulandı: Nearby connect çalışıyor; BT reconnect fix kullanıcı tarafından doğrulandı ("düzelmiş"), POCO'daki karışmış oturum adresi kendini onardı (DB + ana ekran kontrolde). Bildirim kartı / Get-free dönüşümü / tema düzeltmesi bir sonraki build ile cihazda test edilecek.
+- **GetX sökümü tamamlandı, commit'lendi ve main'e FF edildi** (tek commit; `origin/main`'ın 2 önünde — push atılmadı). Branch `migration/getx-removal` korunuyor.
+- `lib/` GetX'siz (import/API/`.tr` = 0; `test/no_getx_test.dart` guard'ı), pubspec + lock'ta `get` yok, host `MaterialApp`; chat `ChatController` (Riverpod family+autoDispose) + `ChatTransportBinding`; silinenler: `app_translations.dart` / `transport_adapter.dart` / `chat_transport.dart` / `chat_screen_controller_base.dart` / b-w-n chatscreen controller'ları.
+- Whole-branch review düzeltmeleri dahil (race ×3 + finalize persist + clear invariant; 6 regresyon testi) — suite **85/85**, analyze 0.
+- Cihaz geri bildirimleri işlendi: WFD location pre-flight + "Konum'u Aç" paneli; Nearby dialer red çift-yüzeyi → tek sahip; **tüm bildirimler tek tip `ConnectionNotice` kartına dönüştü** (17 çağrı noktası; `showSnackBar` = 0; ikon/renk türe göre).
+- Kalan: **son build'in cihaz testi** (bildirim kartları, location paneli, red akışı) → istenirse push.
+- Branch'ler: `migration/riverpod-state` (`6d240d6`) ve `migration/hive-to-drift` (`e7e80b3`) main'e FF edilmiş; `feature/nearby-transport` = `98301d0`; `migration/riverpod-drift-nearby` (`dab6d9a`) **PARK** (dersler `chatblue-stack-migration` skill'inde); `migration/getx-removal` = bu commit.
+- Cihazda doğrulanmış (önceki turlar): Nearby connect; BT reconnect fix ("düzelmiş"); POCO'daki karışık adres self-heal. Bekleyen cihaz testi: bu commit'in build'i.
 
 ## Mimari Özet
 
 ```
 lib/
-  main.dart               → ProviderContainer + UncontrolledProviderScope; Sizer + GetMaterialApp (locale/themeMode provider'lardan), drift açılışı + settings cache, HomeScreen açılır
+  main.dart               → ProviderContainer + UncontrolledProviderScope; Sizer + MaterialApp (locale/themeMode provider'lardan), drift açılışı + settings cache, HomeScreen açılır
   config.dart             → appName, appVersion, showDebugLogs
   core/
     models/               → ChatSessionModel, MessageModel (plain data class'lar)
-    platform/             → BtPlatformChannel, WdPlatformChannel (Method/Event Channel tanımları)
-    services/             → BtClassicService, WifiDirectService, DeviceIdService
+    platform/             → Bt/Wd/NearbyPlatformChannel (Method/Event Channel tanımları)
+    services/             → BtClassicService, WifiDirectService, NearbyService, DeviceIdService
     theme/                → AppTheme (light/dark ThemeData, cyan seed + navy canvas)
+  l10n/                   → app_en.arb + app_tr.arb + generated app_localizations*.dart (tek çeviri kaynağı)
   data/
     db/                   → tables.dart + app_database.dart (+ generated .g.dart)
     session_repository.dart  → drift CRUD (sessions/messages) + reactive watchSessions()
     settings_repository.dart → cache'li key/value deposu (themeMode/locale/device_id)
   controllers/
-    transport_adapter.dart → GetX↔Riverpod köprüsü (Bt/WdTransportAdapter; Rx ChatTransport yüzeyi)
-    chat_transport.dart   → chat tarafı için ortak arayüz (connectToPeer, onChatOpened/Closed)
+    chat_transport_binding.dart → chat ↔ transport bağlama katmanı (chatBindingProvider; typed listener fan-out + metot delegasyonu)
   providers/
-    app_providers.dart    → themeMode/locale notifier'ları, navigatorKey/scaffoldMessengerKey, rootProviderContainer
+    app_providers.dart    → themeMode/locale notifier'ları, navigatorKey/scaffoldMessengerKey, appLocalizationsProvider
     home_providers.dart   → homeSessionsProvider (drift watchSessions stream), deleteChatSessionProvider
-    transport_providers.dart → Bt/WdTransportNotifier (scan/socket/handshake — eski GetX controller'ların Riverpod portu)
+    transport_providers.dart → Bt/WdTransportNotifier (scan/socket/handshake)
+    nearby_transport_providers.dart → NearbyTransportNotifier
+    chat_controller.dart  → ChatController + chatControllerProvider (family+autoDispose) — sohbet mantığının TEK implementasyonu (mesaj, transfer, senkronizasyon, gönderim kuyruğu)
   screens/
-    chat_screen_controller_base.dart → B/W sohbet mantığının TEK implementasyonu (mesaj, transfer, senkronizasyon, gönderim kuyruğu)
-    chat_ui/              → chat_ui.dart: ortak modern sohbet widget kiti (ChatAppBar, Balon, InputBar, SyncBanner, ConnectBar, Preview) — ChatPalette ile tema-duyarlı
+    chat_ui/              → chat_ui.dart: ortak modern sohbet widget kiti (ChatAppBar, Balon, InputBar, SyncBanner, ConnectBar, Preview; connecting_panel, connection_notice, connection_request) — ChatPalette ile tema-duyarlı
     homescreen/           → HomeScreen (bottom nav: Chats/Settings; Riverpod Consumer)
     settings/             → SettingsScreen (tema seçimi + hakkında)
-    b_chatscreen/         → BChatScreen + BChatScreenController (BT sohbet)
-    w_chatscreen/         → WChatScreen + WChatScreenController (WFD sohbet)
+    b_chatscreen/         → BChatScreen (BT sohbet; ConsumerStatefulWidget)
+    w_chatscreen/         → WChatScreen (WFD sohbet)
+    n_chatscreen/         → NChatScreen (Nearby sohbet)
     bluetooth_scan_screen.dart
     wifid_scan_screen.dart
-test/                     → model/TransferState + drift repo/şema + Riverpod provider/i18n unit testleri (flutter test ile çalışır)
+    nearby_scan_screen.dart
+test/                     → model/TransferState + drift repo/şema + Riverpod provider/chat/binding/i18n + no-getx guard testleri (flutter test ile çalışır)
 
 android/app/src/main/kotlin/com/sondermium/chatblue/
   MainActivity.kt                  → kanal kurulumu, handler yönlendirme, runtime istekleri
   BluetoothClassicManager.kt       → RFCOMM server/client, discovery, transfer (accept döngüsü kalıcı — yeniden bağlantı)
   WifiDirectManager.kt             → P2P group/peer, framed TCP I/O, transfer (server döngüsü kalıcı)
+  NearbyManager.kt                 → Nearby Connections advertise+discover, BYTES framing, accept lifecycle
 ```
 
 **Platform kanalları:**
 - BT: `com.sondermium.chatblue/bt` (method), `/scan` + `/socket` (event)
 - WFD: `com.sondermium.chatblue/wd` (method), `/wd_scan` + `/wd_socket` (event)
+- Nearby: `com.sondermium.chatblue/nearby` (method), `/nearby_scan` + `/nearby_socket` (event)
 
-**Veri akışı:** `Manager (Kotlin) → PlatformChannel → Service (callback/stream) → Transport notifier (Riverpod) → transport_adapter (GetX köprüsü) → Chat controller (GetX reactive) → Screen`.
+**Veri akışı:** `Manager (Kotlin) → PlatformChannel → Service (callback/stream) → Transport notifier (Riverpod) → ChatTransportBinding → ChatController (Riverpod) → Screen`.
 
-**Not:** B/W sohbet ekranları `ChatScreenControllerBase`'i paylaşır; taşıma farkları `ChatTransport` arayüzü ile soyutlanır. Unit testler `flutter test` ile koşulur (yalnızca kullanıcı isterse çalıştırılır).
+**Not:** B/W/N sohbet ekranları `ChatController`'ı paylaşır; taşıma farkları `ChatTransportBinding` ile soyutlanır. Unit testler `flutter test` ile koşulur (yalnızca kullanıcı isterse çalıştırılır).
