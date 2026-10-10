@@ -35,6 +35,20 @@ class NearbyPlatformChannel {
     return name ?? '';
   }
 
+  /// Opens the system location settings screen (the master toggle must be
+  /// on for Nearby discovery on many OEM builds).
+  Future<bool> requestEnableLocation() async {
+    final bool ok = await _method.invokeMethod('requestEnableLocation');
+    return ok;
+  }
+
+  /// Opens this app's system settings page (the escape hatch when a runtime
+  /// permission was permanently denied and the dialog no longer appears).
+  Future<bool> openAppSettings() async {
+    final bool ok = await _method.invokeMethod('openAppSettings');
+    return ok;
+  }
+
   Future<bool> requestEnableBluetooth() async {
     final bool ok = await _method.invokeMethod('requestEnableBluetooth');
     return ok;

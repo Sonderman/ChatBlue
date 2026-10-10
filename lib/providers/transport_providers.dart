@@ -56,6 +56,8 @@ String transportKeyToL10n(
       return l10n.btOffForNearby;
     case 'nearbyNoDevicesFound':
       return l10n.nearbyNoDevicesFound;
+    case 'nearbyLocationPermissionMissing':
+      return l10n.nearbyLocationPermissionMissing;
     case 'nearbyTargetNotFound':
       return l10n.nearbyTargetNotFound(params?['count'] ?? '');
   }
@@ -766,6 +768,11 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   bool _pendingAccept = false;
   bool _wifiEnableInFlight = false;
   bool _locationEnableInFlight = false;
+
+  /// Enable-flow generations: a resume (or a newer flow) bumps the counter,
+  /// so a superseded 30 x 500 ms poll loop exits without touching state.
+  int _wifiEnableGeneration = 0;
+  int _locationEnableGeneration = 0;
   bool _suppressScanErrors = false;
   void Function(Uint8List bytes, String text, {required String kind})?
       _chatDataCallback;
@@ -859,18 +866,24 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   Future<void> enableWifi() async {
     if (_wifiEnableInFlight) return;
     _wifiEnableInFlight = true;
+    final int generation = ++_wifiEnableGeneration;
     state = state.copyWith(isWifiEnableInFlight: true);
     try {
       final opened = await _service.requestEnableWifi();
       if (!opened) return;
       for (var i = 0; i < 30; i++) {
         await Future.delayed(const Duration(milliseconds: 500));
+        if (generation != _wifiEnableGeneration) return;
         await _refreshWifiState();
         if (state.isWifiOn) return;
       }
     } finally {
-      _wifiEnableInFlight = false;
-      state = state.copyWith(isWifiEnableInFlight: false);
+      if (generation == _wifiEnableGeneration) {
+        _wifiEnableInFlight = false;
+        if (ref.mounted) {
+          state = state.copyWith(isWifiEnableInFlight: false);
+        }
+      }
     }
   }
 
@@ -891,19 +904,47 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   Future<void> enableLocation() async {
     if (_locationEnableInFlight) return;
     _locationEnableInFlight = true;
+    final int generation = ++_locationEnableGeneration;
     state = state.copyWith(isLocationEnableInFlight: true);
     try {
       final opened = await _service.requestEnableLocation();
       if (!opened) return;
       for (var i = 0; i < 30; i++) {
         await Future.delayed(const Duration(milliseconds: 500));
+        if (generation != _locationEnableGeneration) return;
         await refreshLocationState();
         if (state.isLocationOn) return;
       }
     } finally {
-      _locationEnableInFlight = false;
-      state = state.copyWith(isLocationEnableInFlight: false);
+      if (generation == _locationEnableGeneration) {
+        _locationEnableInFlight = false;
+        if (ref.mounted) {
+          state = state.copyWith(isLocationEnableInFlight: false);
+        }
+      }
     }
+  }
+
+  /// Called by the scan screen on app resume: re-reads both radios and
+  /// RELEASES any pending enable-flow. The user may have toggled Wi‑Fi /
+  /// location in the system panel we opened — or returned WITHOUT touching
+  /// anything, in which case the enable button must be tappable again
+  /// immediately; it used to stay disabled for the rest of the flow's 15 s
+  /// poll window (device report: "the button stays stuck"). The superseded
+  /// poll loops exit quietly via the generation guard, and the radio
+  /// re-read here picks up a toggle flipped in the panel.
+  Future<void> onAppResumed() async {
+    _wifiEnableGeneration++;
+    _locationEnableGeneration++;
+    _wifiEnableInFlight = false;
+    _locationEnableInFlight = false;
+    if (!ref.mounted) return;
+    state = state.copyWith(
+      isWifiEnableInFlight: false,
+      isLocationEnableInFlight: false,
+    );
+    await refreshLocationState();
+    await _refreshWifiState();
   }
 
   Future<bool> connectToDevice(WdPeerInfo device) {
@@ -1398,8 +1439,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
 
   Future<void> _sendOwnName() async {
     try {
-      final name = _ownDeviceName ??=
-          (await DeviceInfoPlugin().androidInfo).model.trim();
+      final name = _ownDeviceName ??= await _resolveOwnDeviceName();
       if (name.isEmpty) return;
       final uid = await DeviceIdService.get();
       if (uid.isEmpty) return;
@@ -1410,6 +1450,25 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       if (kDebugMode && showDebugLogs) {
         debugPrint('Send own device name failed: $e');
       }
+    }
+  }
+
+  /// Best-effort user-visible name for the identity frame: the OS/BT device
+  /// name first (what peers show in their lists, banners and chat titles),
+  /// the hardware model code only as the last resort.
+  Future<String> _resolveOwnDeviceName() async {
+    final native = (await _service.getDeviceName()).trim();
+    if (kDebugMode && showDebugLogs) {
+      debugPrint(
+        'WD own display name: "$native"'
+        '${native.isEmpty ? ' (native empty — falling back to the model code)' : ''}',
+      );
+    }
+    if (native.isNotEmpty) return native;
+    try {
+      return (await DeviceInfoPlugin().androidInfo).model.trim();
+    } catch (_) {
+      return '';
     }
   }
 

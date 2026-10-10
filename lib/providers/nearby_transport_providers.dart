@@ -21,6 +21,10 @@ class NearbyTransportState {
     this.isBluetoothOn = true,
     this.isPlayServicesAvailable = true,
     this.canAdvertise = true,
+    this.isLocationPermissionGranted = true,
+    this.isLocationOn = true,
+    this.isLocationEnableInFlight = false,
+    this.isWifiOn = true,
     this.peers = const [],
     this.connectedPeer,
     this.lastDisconnectReason,
@@ -35,6 +39,20 @@ class NearbyTransportState {
   /// False when the device's Bluetooth stack cannot advertise over BLE at
   /// all (old budget stacks): the scan screen shows an explanatory note.
   final bool canAdvertise;
+
+  /// Whether a location runtime permission is granted. GMS Nearby refuses
+  /// discovery with "8034: MISSING_PERMISSION_ACCESS_COARSE_LOCATION"
+  /// without it — the scan screen shows a grant panel while missing.
+  final bool isLocationPermissionGranted;
+
+  /// Location master toggle mirror (required for Nearby discovery on many
+  /// OEM builds); drives the scan screen's "turn on location" panel.
+  final bool isLocationOn;
+  final bool isLocationEnableInFlight;
+
+  /// Wi‑Fi radio mirror — informational note only (Nearby can discover over
+  /// other mediums, but Wi‑Fi off may hide devices).
+  final bool isWifiOn;
   final List<NearbyPeerInfo> peers;
   final NearbyPeerInfo? connectedPeer;
   final String? lastDisconnectReason;
@@ -46,6 +64,10 @@ class NearbyTransportState {
     bool? isBluetoothOn,
     bool? isPlayServicesAvailable,
     bool? canAdvertise,
+    bool? isLocationPermissionGranted,
+    bool? isLocationOn,
+    bool? isLocationEnableInFlight,
+    bool? isWifiOn,
     List<NearbyPeerInfo>? peers,
     NearbyPeerInfo? connectedPeer,
     bool clearConnectedPeer = false,
@@ -61,6 +83,12 @@ class NearbyTransportState {
       isPlayServicesAvailable:
           isPlayServicesAvailable ?? this.isPlayServicesAvailable,
       canAdvertise: canAdvertise ?? this.canAdvertise,
+      isLocationPermissionGranted:
+          isLocationPermissionGranted ?? this.isLocationPermissionGranted,
+      isLocationOn: isLocationOn ?? this.isLocationOn,
+      isLocationEnableInFlight:
+          isLocationEnableInFlight ?? this.isLocationEnableInFlight,
+      isWifiOn: isWifiOn ?? this.isWifiOn,
       peers: peers ?? this.peers,
       connectedPeer:
           clearConnectedPeer ? null : (connectedPeer ?? this.connectedPeer),
@@ -106,6 +134,9 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
 
   late NearbyService _service;
   bool _chatOpen = false;
+  bool _locationEnableInFlight = false;
+  int _locationEnableGeneration = 0;
+  bool _bluetoothEnableInFlight = false;
   bool _pendingAccept = false;
   String? _ownDeviceName;
   String? _ownUid;
@@ -178,6 +209,10 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
     );
   }
 
+  /// Re-reads the Play Services / Bluetooth / permission / location / Wi‑Fi
+  /// status. Public: the scan screen refreshes it on mount and on app
+  /// resume so its panels reflect the current system state (the toggles can
+  /// change outside the app).
   Future<void> refreshStatus() async {
     try {
       final status = await _service.getStatus();
@@ -185,16 +220,104 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
         isPlayServicesAvailable: status.playServices,
         isBluetoothOn: status.bluetoothEnabled,
         canAdvertise: status.canAdvertise,
+        isLocationPermissionGranted: status.locationPermission,
+        isLocationOn: status.locationEnabled,
+        isWifiOn: status.wifiEnabled,
       );
     } catch (_) {
       // fail-open: keep the last known state
     }
   }
 
-  /// Opens the system Bluetooth-enable prompt (consent-pref backed natively).
+  /// Opens the consent flow for enabling Bluetooth and re-reads the status
+  /// so the panel clears once the adapter is actually on. Android 13+ apps
+  /// cannot enable Bluetooth silently (`BluetoothAdapter.enable()` is a
+  /// documented no-op for targetSdk 33+ apps) — the native side then opens
+  /// the system dialog directly; below 13 a remembered consent enables
+  /// silently.
   Future<void> enableBluetooth() async {
-    final granted = await _service.requestEnableBluetooth();
-    if (!granted) return;
+    if (_bluetoothEnableInFlight) return;
+    _bluetoothEnableInFlight = true;
+    try {
+      final granted = await _service.requestEnableBluetooth();
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('[nearby] enableBluetooth result=$granted');
+      }
+      if (granted) {
+        // The dialog decision (or a silent enable) landed: refresh, with a
+        // short poll as a safety net for a lagging adapter flip.
+        for (var i = 0; i < 10; i++) {
+          await refreshStatus();
+          if (state.isBluetoothOn) return;
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+      } else {
+        await refreshStatus();
+      }
+    } finally {
+      _bluetoothEnableInFlight = false;
+    }
+  }
+
+  /// Re-requests the Nearby runtime permissions (the scan screen's grant
+  /// panel) and re-reads the status so the panel clears once the grant
+  /// lands.
+  Future<void> requestPermissions() async {
+    try {
+      await _service.requestNearbyPermissions();
+    } catch (_) {
+      // fail-open: refreshStatus below still reads the real grant state
+    }
+    if (!ref.mounted) return;
+    await refreshStatus();
+  }
+
+  /// Opens this app's system settings page (escape hatch when a permission
+  /// is permanently denied and the system dialog no longer appears).
+  Future<void> openAppSettings() async {
+    try {
+      await _service.openAppSettings();
+    } catch (_) {
+      // fail-open
+    }
+  }
+
+  /// Opens the system location settings and polls until the master toggle
+  /// turns on (mirrors the Wi‑Fi Direct flow: 30 x 500 ms window).
+  Future<void> enableLocation() async {
+    if (_locationEnableInFlight) return;
+    _locationEnableInFlight = true;
+    final int generation = ++_locationEnableGeneration;
+    state = state.copyWith(isLocationEnableInFlight: true);
+    try {
+      final opened = await _service.requestEnableLocation();
+      if (!opened) return;
+      for (var i = 0; i < 30; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        if (generation != _locationEnableGeneration) return;
+        await refreshStatus();
+        if (state.isLocationOn) return;
+      }
+    } finally {
+      if (generation == _locationEnableGeneration) {
+        _locationEnableInFlight = false;
+        if (ref.mounted) {
+          state = state.copyWith(isLocationEnableInFlight: false);
+        }
+      }
+    }
+  }
+
+  /// Called by the scan screen on mount and app resume: re-reads the full
+  /// precondition status and releases a pending "turn on Location" flow so
+  /// its button is tappable again immediately after the user returns from
+  /// the system settings (it used to stay disabled for the rest of the
+  /// flow's 15 s poll window when nothing was changed).
+  Future<void> onAppResumed() async {
+    _locationEnableGeneration++;
+    _locationEnableInFlight = false;
+    if (!ref.mounted) return;
+    state = state.copyWith(isLocationEnableInFlight: false);
     await refreshStatus();
   }
 
@@ -207,6 +330,15 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
     }
     if (!state.isBluetoothOn) {
       // The screen shows the "turn on Bluetooth" panel; never touch native.
+      return;
+    }
+    if (!state.isLocationPermissionGranted) {
+      // GMS refuses discovery with 8034 while the location permission is
+      // missing — the screen shows the grant panel; never touch native.
+      return;
+    }
+    if (!state.isLocationOn) {
+      // The screen shows the "turn on Location" panel; never touch native.
       return;
     }
     final name = _ownDeviceName ??= await _resolveOwnDeviceName();
@@ -357,6 +489,25 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
         return false;
       }
     }
+    // Location pre-flight (same as the scan gate): a missing permission or
+    // a master toggle off makes discovery fail — offer the grant / settings
+    // path instead of a misleading "no devices found".
+    if (!state.isLocationPermissionGranted) {
+      await requestPermissions();
+      if (!state.isLocationPermissionGranted) {
+        state = state.copyWith(
+          lastConnectError: _t('nearbyLocationPermissionMissing'),
+        );
+        return false;
+      }
+    }
+    if (!state.isLocationOn) {
+      await enableLocation();
+      if (!state.isLocationOn) {
+        state = state.copyWith(lastConnectError: _t('locationOffTitle'));
+        return false;
+      }
+    }
 
     final search = await _discoverSessionPeer(uid: address, name: name);
     if (state.isConnected) return true;
@@ -444,6 +595,17 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
 
   String _normalizeDeviceName(String? value) =>
       (value ?? '').toLowerCase().replaceAll(RegExp('[^a-z0-9]'), '');
+
+  /// GMS refusals carry raw texts like "startDiscovery failed: 8034:
+  /// MISSING_PERMISSION_ACCESS_COARSE_LOCATION" — swap the permission case
+  /// for an actionable, localized message (the panel offers the fix path).
+  String _friendlyScanError(String message) {
+    if (message.contains('8034') ||
+        message.contains('MISSING_PERMISSION_ACCESS_COARSE_LOCATION')) {
+      return _t('nearbyLocationPermissionMissing');
+    }
+    return message;
+  }
 
   Future<NearbyPeerInfo?> _promptPeerSelection(List<NearbyPeerInfo> candidates) {
     final ctx = navigatorKey.currentContext;
@@ -607,14 +769,18 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       if (kDebugMode && showDebugLogs) {
         debugPrint('Nearby scan error: $message');
       }
+      final friendly = _friendlyScanError(message);
       state = state.copyWith(isScanning: false);
-      state = state.copyWith(lastConnectError: message);
+      state = state.copyWith(lastConnectError: friendly);
       ConnectionNotice.show(
         title: _t('scanErrorTitle'),
-        message: message,
+        message: friendly,
         isChatScreen: _chatOpen,
         icon: Icons.error_outline,
       );
+      // The panels are status-driven: re-read it so a permission or
+      // location change surfaced by this failure shows up immediately.
+      unawaited(refreshStatus());
     };
 
     _service.onSocketError = (message) {
@@ -739,6 +905,12 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
   /// hardware model code as the last resort.
   Future<String> _resolveOwnDeviceName() async {
     final native = (await _service.getDeviceName()).trim();
+    if (kDebugMode && showDebugLogs) {
+      debugPrint(
+        'Nearby own display name: "$native"'
+        '${native.isEmpty ? ' (native empty — falling back to the model code)' : ''}',
+      );
+    }
     if (native.isNotEmpty) return native;
     try {
       return (await DeviceInfoPlugin().androidInfo).model.trim();

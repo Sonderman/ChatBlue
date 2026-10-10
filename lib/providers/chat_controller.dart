@@ -403,7 +403,9 @@ class ChatController extends Notifier<ChatState>
         );
         final bool identityChanged =
             rebound.device['address'] != session.device['address'] ||
-                rebound.transport != session.transport;
+                rebound.transport != session.transport ||
+                rebound.name != session.name ||
+                rebound.device['name'] != session.device['name'];
         state = state.copyWith(
           chatSession: rebound,
           messages: rebound.messages,
@@ -640,12 +642,15 @@ class ChatController extends Notifier<ChatState>
   }
 
   /// Applies a peer-reported device name (WFD sockets carry no name on the
-  /// wire) to the app bar and the persisted session.
+  /// wire) to the app bar and the persisted session — an UPGRADE only: a
+  /// raw model code must not downgrade a stored display name.
   void _updateSessionName(String name) {
     if (_closed) return;
     if (name.isEmpty || state.peerName == name) return;
     final session = state.chatSession;
-    if (session.name != name) {
+    if (session.name == name) {
+      state = state.copyWith(peerName: name);
+    } else if (ChatSessionModel.shouldReplaceDisplayName(session.name, name)) {
       final renamed = ChatSessionModel(
         id: session.id,
         name: name,
@@ -657,9 +662,8 @@ class ChatController extends Notifier<ChatState>
       );
       state = state.copyWith(peerName: name, chatSession: renamed);
       _scheduleSave();
-    } else {
-      state = state.copyWith(peerName: name);
     }
+    // else: downgrade blocked — keep both the stored title and peerName.
     // The real (model) device name just landed: if this chat opened as a
     // fresh session on an unknown identity, an existing session for the
     // same peer may now be findable and must absorb into this one.

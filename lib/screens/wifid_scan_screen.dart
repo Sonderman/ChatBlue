@@ -24,9 +24,9 @@ class _WifiDirectScanScreenState extends ConsumerState<WifiDirectScanScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Fresh location state on mount: the master toggle can change outside
+    // Fresh radio + flow state on mount: the toggles can change outside
     // the app (quick settings) between sessions.
-    unawaited(ref.read(wdTransportProvider.notifier).refreshLocationState());
+    unawaited(ref.read(wdTransportProvider.notifier).onAppResumed());
   }
 
   @override
@@ -37,10 +37,13 @@ class _WifiDirectScanScreenState extends ConsumerState<WifiDirectScanScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState lifecycleState) {
-    // The user may toggle location in the system settings we opened (or via
-    // quick settings) and come back — re-read so the panel reflects it.
+    // The user may have toggled Wi‑Fi/location in the system panel we
+    // opened (or via quick settings) and come back — re-read so the panels
+    // reflect it, and release a pending enable-flow so its button is
+    // tappable again RIGHT AWAY (it used to stay disabled for the rest of
+    // the 15 s poll window when nothing was changed).
     if (lifecycleState == AppLifecycleState.resumed) {
-      unawaited(ref.read(wdTransportProvider.notifier).refreshLocationState());
+      unawaited(ref.read(wdTransportProvider.notifier).onAppResumed());
     }
   }
 

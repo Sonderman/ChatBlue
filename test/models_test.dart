@@ -149,5 +149,81 @@ void main() {
       // A missing device name is filled from the live connection.
       expect(rebound.device['name'], 'Peer Phone');
     });
+
+    test('reboundTo upgrades a raw model title to the live display name', () {
+      final session = ChatSessionModel(
+        id: 'uid-1',
+        name: 'M2101K6G',
+        createdAt: DateTime(2026, 10, 8, 0, 0),
+        updatedAt: DateTime(2026, 10, 8, 0, 5),
+        messages: const [],
+        device: {'name': 'M2101K6G', 'address': 'uid-1'},
+        transport: ChatSessionModel.transportNearby,
+      );
+
+      final rebound = session.reboundTo(
+        peerName: 'Redmi Note 10 Pro',
+        transport: ChatSessionModel.transportNearby,
+      );
+
+      expect(rebound.name, 'Redmi Note 10 Pro');
+      expect(rebound.device['name'], 'Redmi Note 10 Pro');
+      // The id and address scheme stay untouched by the name upgrade.
+      expect(rebound.id, 'uid-1');
+      expect(rebound.device['address'], 'uid-1');
+    });
+
+    test('reboundTo never downgrades a display name to a model code', () {
+      final session = ChatSessionModel(
+        id: 'uid-2',
+        name: 'Redmi Note 10 Pro',
+        createdAt: DateTime(2026, 10, 8, 0, 0),
+        updatedAt: DateTime(2026, 10, 8, 0, 5),
+        messages: const [],
+        device: {'name': 'Redmi Note 10 Pro', 'address': 'uid-2'},
+        transport: ChatSessionModel.transportNearby,
+      );
+
+      final rebound = session.reboundTo(
+        peerName: 'M2101K6G',
+        transport: ChatSessionModel.transportNearby,
+      );
+
+      expect(rebound.name, 'Redmi Note 10 Pro');
+      expect(rebound.device['name'], 'Redmi Note 10 Pro');
+    });
+
+    test('isRawModelCode separates model codes from display names', () {
+      expect(ChatSessionModel.isRawModelCode('M2101K6G'), isTrue);
+      expect(ChatSessionModel.isRawModelCode('2412DPC0AG'), isTrue);
+      expect(ChatSessionModel.isRawModelCode('SM-G610F'), isTrue);
+      expect(ChatSessionModel.isRawModelCode('Redmi Note 10 Pro'), isFalse);
+      expect(ChatSessionModel.isRawModelCode('POCO X7 Pro'), isFalse);
+      expect(ChatSessionModel.isRawModelCode(''), isFalse);
+      expect(ChatSessionModel.isRawModelCode(null), isFalse);
+    });
+
+    test('shouldReplaceDisplayName blocks downgrades but allows renames', () {
+      // Upgrade: raw model → display name.
+      expect(
+        ChatSessionModel.shouldReplaceDisplayName(
+            'M2101K6G', 'Redmi Note 10 Pro'),
+        isTrue,
+      );
+      // Downgrade: display name → raw model code.
+      expect(
+        ChatSessionModel.shouldReplaceDisplayName(
+            'Redmi Note 10 Pro', 'M2101K6G'),
+        isFalse,
+      );
+      // Both display names: a device rename wins.
+      expect(
+        ChatSessionModel.shouldReplaceDisplayName('Old Name', 'New Name'),
+        isTrue,
+      );
+      // No-ops.
+      expect(ChatSessionModel.shouldReplaceDisplayName('Same', 'Same'), isFalse);
+      expect(ChatSessionModel.shouldReplaceDisplayName('Same', '  '), isFalse);
+    });
   });
 }

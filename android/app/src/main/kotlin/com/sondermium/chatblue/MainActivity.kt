@@ -8,6 +8,8 @@ import android.content.pm.PackageManager
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -259,18 +261,11 @@ class MainActivity : FlutterActivity() {
                     result.success(BluetoothAdapter.getDefaultAdapter()?.isEnabled == true)
                 }
                 "requestEnableBluetooth" -> {
-                    val prefs = getSharedPreferences("chatblue_prefs", Context.MODE_PRIVATE)
-                    if (prefs.getBoolean("bt_enable_consent_granted", false)) {
-                        // User consented before: enable silently instead of asking again
-                        @Suppress("MissingPermission")
-                        runCatching { BluetoothAdapter.getDefaultAdapter()?.enable() }
-                        result.success(BluetoothAdapter.getDefaultAdapter()?.isEnabled == true)
-                    } else {
-                        val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-                        pendingEnableBtResult = result
-                        @Suppress("DEPRECATION")
-                        startActivityForResult(intent, REQUEST_ENABLE_BT)
-                    }
+                    // Startup path (no user gesture): enable silently when a
+                    // consent is remembered — never a nagging dialog on
+                    // every cold start with Bluetooth off; the scan
+                    // screens' own buttons carry the consent flow.
+                    requestEnableBluetoothFlow(result, nearby = false, dialogFallback = false)
                 }
                 "requestBluetoothPermissions" -> {
                     val needed = requiredRuntimePermissions()
@@ -469,6 +464,7 @@ class MainActivity : FlutterActivity() {
                 "isLocationEnabled" -> { result.success(wifiDirectManager.isLocationOn()) }
                 "requestEnableLocation" -> { result.success(wifiDirectManager.requestEnableLocation()) }
                 "getThisDeviceAddress" -> { result.success(wifiDirectManager.getThisDeviceAddress()) }
+                "getDeviceName" -> { result.success(DeviceNameResolver.resolve(this)) }
                 "startDiscovery" -> { wifiDirectManager.startDiscovery(); result.success(true) }
                 "stopDiscovery" -> { wifiDirectManager.stopDiscovery(); result.success(true) }
                 "getDiscoveredPeers" -> { result.success(wifiDirectManager.getDiscoveredPeers()) }
@@ -503,7 +499,12 @@ class MainActivity : FlutterActivity() {
         return if (Build.VERSION.SDK_INT >= 33) {
             listOf(android.Manifest.permission.NEARBY_WIFI_DEVICES)
         } else {
-            listOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+            // On Android 12+ FINE is only granted when requested together
+            // with COARSE; older versions accept the pair as well.
+            listOf(
+                android.Manifest.permission.ACCESS_FINE_LOCATION,
+                android.Manifest.permission.ACCESS_COARSE_LOCATION
+            )
         }
     }
 
@@ -611,6 +612,20 @@ class MainActivity : FlutterActivity() {
                 "getDeviceName" -> {
                     result.success(nearbyManager.getDeviceName())
                 }
+                "requestEnableLocation" -> {
+                    result.success(nearbyManager.requestEnableLocation())
+                }
+                "openAppSettings" -> {
+                    // Escape hatch for a permanently denied permission: the
+                    // system dialog no longer appears, but the app's own
+                    // settings page still grants it.
+                    val intent = Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        android.net.Uri.fromParts("package", packageName, null)
+                    )
+                    runCatching { startActivity(intent) }
+                    result.success(true)
+                }
                 "cancelConnect" -> {
                     nearbyManager.cancelConnect()
                     result.success(true)
@@ -627,17 +642,11 @@ class MainActivity : FlutterActivity() {
                     }
                 }
                 "requestEnableBluetooth" -> {
-                    val prefs = getSharedPreferences("chatblue_prefs", Context.MODE_PRIVATE)
-                    if (prefs.getBoolean("bt_enable_consent_granted", false)) {
-                        @Suppress("MissingPermission")
-                        runCatching { BluetoothAdapter.getDefaultAdapter()?.enable() }
-                        result.success(BluetoothAdapter.getDefaultAdapter()?.isEnabled == true)
-                    } else {
-                        val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-                        pendingNjEnableBtResult = result
-                        @Suppress("DEPRECATION")
-                        startActivityForResult(intent, REQUEST_NJ_ENABLE_BT)
-                    }
+                    // The Nearby screen's "turn on Bluetooth" button: an
+                    // explicit user gesture — the flow must always end in a
+                    // visible outcome (system dialog when a silent enable
+                    // is impossible), never in a dead tap.
+                    requestEnableBluetoothFlow(result, nearby = true, dialogFallback = true)
                 }
                 "startScan" -> {
                     val uid: String = call.argument<String>("uid") ?: ""
@@ -703,23 +712,33 @@ class MainActivity : FlutterActivity() {
     private fun requiredNearbyRuntimePermissions(): List<String> {
         return if (Build.VERSION.SDK_INT >= 33) {
             // Android 13+: Nearby's WiFi mediums (WiFi LAN / hotspot used by
-            // discovery and connections) need NEARBY_WIFI_DEVICES; without a
-            // runtime grant the WiFi side cannot engage on 13+ devices.
+            // discovery and connections) need NEARBY_WIFI_DEVICES, and
+            // discovery additionally needs a location permission: GMS
+            // checks ACCESS_COARSE_LOCATION specifically (refusing with
+            // "8034: MISSING_PERMISSION_ACCESS_COARSE_LOCATION" otherwise).
+            // On Android 12+ FINE must be requested together with COARSE —
+            // a lone FINE request is ignored by the system, and the
+            // "approximate" grant delivers COARSE only, which is enough.
             listOf(
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_CONNECT,
                 Manifest.permission.BLUETOOTH_ADVERTISE,
-                Manifest.permission.NEARBY_WIFI_DEVICES
+                Manifest.permission.NEARBY_WIFI_DEVICES,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
             )
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             listOf(
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.BLUETOOTH_ADVERTISE
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
             )
         } else {
             listOf(
-                Manifest.permission.ACCESS_FINE_LOCATION
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
             )
         }
     }
@@ -732,9 +751,113 @@ class MainActivity : FlutterActivity() {
                 Manifest.permission.BLUETOOTH_ADVERTISE
             )
         } else {
+            // On Android 12+ FINE is only granted when requested together
+            // with COARSE; older versions accept the pair as well.
             listOf(
-                Manifest.permission.ACCESS_FINE_LOCATION
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
             )
+        }
+    }
+
+    /// Completes [result] with the outcome of a Bluetooth enable request.
+    /// Below Android 13 a remembered consent enables silently; from
+    /// TIRAMISU on, `BluetoothAdapter.enable()` is a documented no-op for
+    /// targetSdk 33+ apps ("applications are not allowed to enable/disable
+    /// Bluetooth", always returns false), so a silent attempt that fails to
+    /// take must fall back to the visible system dialog — the old silent
+    /// branch returned the pre-enable snapshot, which made the scan
+    /// screens' "turn on Bluetooth" buttons look completely dead (stale
+    /// false → the Dart side bailed with no UI at all).
+    private fun requestEnableBluetoothFlow(
+        result: MethodChannel.Result,
+        nearby: Boolean,
+        dialogFallback: Boolean,
+    ) {
+        val adapter = BluetoothAdapter.getDefaultAdapter()
+        if (adapter == null) {
+            result.success(false)
+            return
+        }
+        if (adapter.isEnabled) {
+            result.success(true)
+            return
+        }
+        val prefs = getSharedPreferences("chatblue_prefs", Context.MODE_PRIVATE)
+        val consented = prefs.getBoolean("bt_enable_consent_granted", false)
+        // Android 13+: `enable()` is a documented no-op for targetSdk 33+
+        // apps — there is NO silent path there, so the system dialog
+        // (ACTION_REQUEST_ENABLE) opens directly: for every user gesture
+        // (scan-screen buttons) and every first-time request. Only the 13+
+        // cold-start path (no gesture, consent already remembered) gives up
+        // quietly, so a prompt never nags on app launch.
+        val api33Plus = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+        if (!consented || (api33Plus && dialogFallback)) {
+            launchBluetoothEnableDialog(result, nearby)
+            return
+        }
+        // Below 13 (or the quiet 13+ cold-start path): try the silent
+        // enable; poll the adapter state instead of trusting the
+        // pre-enable snapshot.
+        @Suppress("MissingPermission")
+        val silent = runCatching { adapter.enable() }.getOrDefault(false)
+        if (!silent) {
+            if (dialogFallback) {
+                launchBluetoothEnableDialog(result, nearby)
+            } else {
+                result.success(false)
+            }
+            return
+        }
+        if (nearby) pendingNjEnableBtResult = result else pendingEnableBtResult = result
+        pollSilentBluetoothEnable(adapter, 0, nearby, dialogFallback)
+    }
+
+    private fun launchBluetoothEnableDialog(result: MethodChannel.Result, nearby: Boolean) {
+        if (nearby) pendingNjEnableBtResult = result else pendingEnableBtResult = result
+        val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+        @Suppress("DEPRECATION")
+        startActivityForResult(intent, if (nearby) REQUEST_NJ_ENABLE_BT else REQUEST_ENABLE_BT)
+    }
+
+    /// The adapter state flips a beat after a silent enable — poll instead
+    /// of reporting the pre-enable snapshot; if it never takes, fall back
+    /// to the visible dialog (the pending result stays armed for it).
+    private fun pollSilentBluetoothEnable(
+        adapter: BluetoothAdapter,
+        attempt: Int,
+        nearby: Boolean,
+        dialogFallback: Boolean,
+    ) {
+        Handler(Looper.getMainLooper()).postDelayed({
+            if (adapter.isEnabled) {
+                completeBtEnable(nearby, true)
+                return@postDelayed
+            }
+            if (attempt >= 5) {
+                if (dialogFallback) {
+                    val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                    @Suppress("DEPRECATION")
+                    startActivityForResult(
+                        intent,
+                        if (nearby) REQUEST_NJ_ENABLE_BT else REQUEST_ENABLE_BT,
+                    )
+                } else {
+                    completeBtEnable(nearby, false)
+                }
+                return@postDelayed
+            }
+            pollSilentBluetoothEnable(adapter, attempt + 1, nearby, dialogFallback)
+        }, 500)
+    }
+
+    private fun completeBtEnable(nearby: Boolean, value: Boolean) {
+        if (nearby) {
+            pendingNjEnableBtResult?.success(value)
+            pendingNjEnableBtResult = null
+        } else {
+            pendingEnableBtResult?.success(value)
+            pendingEnableBtResult = null
         }
     }
 

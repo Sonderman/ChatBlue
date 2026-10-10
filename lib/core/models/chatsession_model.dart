@@ -57,6 +57,33 @@ class ChatSessionModel {
     return firstOctet != null && (firstOctet & 0x02) != 0;
   }
 
+  /// True for a raw hardware model code ("M2101K6G", "2412DPC0AG",
+  /// "SM-G610F"): no lowercase letters, no whitespace, at least one digit.
+  /// These make two phones indistinguishable and are never preferred over a
+  /// human-readable display name.
+  static bool isRawModelCode(String? value) {
+    final v = (value ?? '').trim();
+    if (v.isEmpty) return false;
+    if (RegExp(r'\s').hasMatch(v)) return false;
+    if (RegExp(r'[a-z]').hasMatch(v)) return false;
+    if (!RegExp(r'[0-9]').hasMatch(v)) return false;
+    return RegExp(r'^[A-Z0-9][A-Z0-9-]*$').hasMatch(v);
+  }
+
+  /// Whether a live peer name should replace the stored display name: any
+  /// non-empty change EXCEPT a raw model code replacing a real display name
+  /// (older peers report models over identity frames; a stored display name
+  /// must never be downgraded, while stale model titles are upgraded).
+  static bool shouldReplaceDisplayName(String? current, String? incoming) {
+    final next = (incoming ?? '').trim();
+    if (next.isEmpty) return false;
+    final cur = (current ?? '').trim();
+    if (cur.isEmpty) return true;
+    if (cur == next) return false;
+    if (isRawModelCode(next) && !isRawModelCode(cur)) return false;
+    return true;
+  }
+
   /// Returns a copy of this session bound to the CURRENT connection's
   /// identity: the stored device address and the transport tag are refreshed
   /// so the persisted identity always matches the channel the chat is
@@ -71,21 +98,32 @@ class ChatSessionModel {
   /// transport the session is tagged with.
   ///
   /// [address] overrides the stored one only when non-null and non-empty
-  /// (pass null to keep the old value); [peerName] fills the device name
-  /// only when the session has none; [transport] is the channel in use now.
+  /// (pass null to keep the old value); [peerName], when it is a usable
+  /// upgrade, refreshes the display name — the title and the device name —
+  /// so a stale raw model code heals to the peer's real name on reconnect
+  /// (and a display name is never downgraded); [transport] is the channel in
+  /// use now.
   ChatSessionModel reboundTo({
     String? address,
     String? peerName,
     required String transport,
   }) {
+    final live = (peerName ?? '').trim();
+    final bool upgrade = shouldReplaceDisplayName(name, live);
+    final Object? stored = device['name'];
+    final String? resolvedName = upgrade
+        ? live
+        : (stored is String && stored.isNotEmpty
+            ? stored
+            : (live.isNotEmpty ? live : null));
     return ChatSessionModel(
       id: id,
-      name: name,
+      name: upgrade ? live : name,
       createdAt: createdAt,
       updatedAt: updatedAt,
       messages: messages,
       device: {
-        'name': device['name'] ?? peerName,
+        'name': resolvedName,
         'address': (address != null && address.isNotEmpty)
             ? address
             : device['address'],

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:chatblue/core/services/nearby_service.dart';
@@ -94,6 +95,125 @@ void main() {
       expect(state2.isScanning, isFalse);
       expect(state2.isBluetoothOn, isFalse);
       expect(service.startScanCalls, isEmpty);
+    });
+
+    test('preconditions: a missing location permission or a location toggle '
+        'off never reaches native (8034 guard)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(nearbyTransportProvider.notifier);
+
+      service.locationPermission = false;
+      await notifier.startScan();
+      final state1 = c.read(nearbyTransportProvider);
+      expect(state1.isScanning, isFalse);
+      expect(state1.isLocationPermissionGranted, isFalse);
+      expect(service.startScanCalls, isEmpty);
+
+      service.locationPermission = true;
+      service.locationEnabled = false;
+      await notifier.startScan();
+      final state2 = c.read(nearbyTransportProvider);
+      expect(state2.isScanning, isFalse);
+      expect(state2.isLocationOn, isFalse);
+      expect(service.startScanCalls, isEmpty);
+
+      // Both back on: the scan reaches native.
+      service.locationEnabled = true;
+      await notifier.startScan();
+      expect(c.read(nearbyTransportProvider).isScanning, isTrue);
+      expect(service.startScanCalls, hasLength(1));
+    });
+
+    test('enableBluetooth re-reads the status once the adapter is on '
+        '(dialog path)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(nearbyTransportProvider.notifier);
+      service.bluetoothEnabled = false;
+      await notifier.refreshStatus();
+      expect(c.read(nearbyTransportProvider).isBluetoothOn, isFalse);
+
+      final f = notifier.enableBluetooth();
+      await pumpEventQueue();
+      // The user allows the system dialog: the adapter flips on before the
+      // next status refresh — the panel must clear without a re-press.
+      service.bluetoothEnabled = true;
+      await f;
+      expect(c.read(nearbyTransportProvider).isBluetoothOn, isTrue);
+      expect(service.enableBluetoothCalls, 1);
+    });
+
+    test('onAppResumed releases a pending enableLocation flow (button not '
+        'stuck after returning from the system settings)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(nearbyTransportProvider.notifier);
+      service.locationEnabled = false;
+      await notifier.onAppResumed();
+      expect(c.read(nearbyTransportProvider).isLocationOn, isFalse);
+
+      unawaited(notifier.enableLocation());
+      await pumpEventQueue();
+      expect(
+        c.read(nearbyTransportProvider).isLocationEnableInFlight,
+        isTrue,
+      );
+
+      // Back from the system settings without touching anything: the
+      // resume releases the flow immediately.
+      await notifier.onAppResumed();
+      final state = c.read(nearbyTransportProvider);
+      expect(state.isLocationEnableInFlight, isFalse);
+      expect(state.isLocationOn, isFalse);
+    });
+
+    test('requestPermissions re-requests the grant and re-reads the status',
+        () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(nearbyTransportProvider.notifier);
+      service.locationPermission = false;
+      await notifier.refreshStatus();
+      expect(
+        c.read(nearbyTransportProvider).isLocationPermissionGranted,
+        isFalse,
+      );
+
+      // The user grants in the system dialog: the fake flips on the call.
+      service.locationPermission = true;
+      await notifier.requestPermissions();
+      expect(service.requestPermissionCalls, 1);
+      expect(
+        c.read(nearbyTransportProvider).isLocationPermissionGranted,
+        isTrue,
+      );
+    });
+
+    test('scan error 8034 is mapped to the actionable location message',
+        () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      // Wire the callbacks (the notifier only wires them on build).
+      c.read(nearbyTransportProvider.notifier);
+      service.onScanError?.call(
+        'startDiscovery failed: 8034: MISSING_PERMISSION_ACCESS_COARSE_LOCATION',
+      );
+      await pumpEventQueue();
+      expect(
+        c.read(nearbyTransportProvider).lastConnectError,
+        AppLocalizationsEn().nearbyLocationPermissionMissing,
+      );
     });
 
     test('capability: a device without BLE advertising surfaces '
@@ -376,6 +496,9 @@ class FakeNearbyService extends NearbyService {
   bool playServices = true;
   bool bluetoothEnabled = true;
   bool canAdvertise = true;
+  bool locationPermission = true;
+  bool locationEnabled = true;
+  bool wifiEnabled = true;
   bool enableBluetoothResult = true;
 
   final List<String> startScanCalls = [];
@@ -393,13 +516,45 @@ class FakeNearbyService extends NearbyService {
         playServices: playServices,
         bluetoothEnabled: bluetoothEnabled,
         canAdvertise: canAdvertise,
+        locationPermission: locationPermission,
+        locationEnabled: locationEnabled,
+        wifiEnabled: wifiEnabled,
       );
 
   @override
   Future<String> getDeviceName() async => '';
 
+  int enableBluetoothCalls = 0;
+
   @override
-  Future<bool> requestEnableBluetooth() async => enableBluetoothResult;
+  Future<bool> requestEnableBluetooth() async {
+    enableBluetoothCalls++;
+    return enableBluetoothResult;
+  }
+
+  int requestPermissionCalls = 0;
+
+  @override
+  Future<bool> requestNearbyPermissions() async {
+    requestPermissionCalls++;
+    return locationPermission;
+  }
+
+  int enableLocationCalls = 0;
+
+  @override
+  Future<bool> requestEnableLocation() async {
+    enableLocationCalls++;
+    return true;
+  }
+
+  int openAppSettingsCalls = 0;
+
+  @override
+  Future<bool> openAppSettings() async {
+    openAppSettingsCalls++;
+    return true;
+  }
 
   @override
   Future<void> startScan({required String name, required String uid}) async {

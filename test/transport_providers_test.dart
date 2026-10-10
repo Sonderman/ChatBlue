@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:chatblue/core/services/bt_classic_service.dart';
@@ -331,6 +332,31 @@ void main() {
         c.read(wdTransportProvider).lastConnectError,
         AppLocalizationsEn().wifiOffTitle,
       );
+    });
+
+    test('onAppResumed releases a pending enableWifi flow so the button is '
+        'not stuck after returning from the system panel', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(wdTransportProvider.notifier);
+      service.wifiEnabled = false;
+      await notifier.onAppResumed(); // sync the radio state
+      expect(c.read(wdTransportProvider).isWifiOn, isFalse);
+
+      // The user taps "turn on Wi‑Fi": the flow starts and the button flips
+      // to its disabled (in-flight) state while the 15 s poll window opens.
+      unawaited(notifier.enableWifi());
+      await pumpEventQueue();
+      expect(c.read(wdTransportProvider).isWifiEnableInFlight, isTrue);
+
+      // Back from the system panel WITHOUT touching anything: the resume
+      // must release the flow immediately — not 15 s later.
+      await notifier.onAppResumed();
+      final state = c.read(wdTransportProvider);
+      expect(state.isWifiEnableInFlight, isFalse);
+      expect(state.isWifiOn, isFalse);
     });
 
     test('READY frame connects and clears the peer list (post-session)',

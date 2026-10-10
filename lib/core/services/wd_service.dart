@@ -97,6 +97,17 @@ class WifiDirectService {
     }
   }
 
+  /// Best-effort user-visible device name (OS/Bluetooth name on the native
+  /// side, model fallback) — rides in the identity frame so the peer's chat
+  /// session shows the display name instead of the hardware model code.
+  Future<String> getDeviceName() async {
+    try {
+      return (await _platform.getDeviceName()).trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
   // region Discovery
   Future<void> startDiscovery({Duration? autoStopAfter}) async {
     _ensureEventSubscriptions();

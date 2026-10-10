@@ -51,6 +51,14 @@ class WdPlatformChannel {
     final String? addr = await _method.invokeMethod('getThisDeviceAddress');
     return addr;
   }
+
+  /// The user-visible device name (Settings/Bluetooth name on the native
+  /// side). Rides in the identity frame so the peer's chat session shows the
+  /// display name instead of the hardware model code.
+  Future<String> getDeviceName() async {
+    final String? name = await _method.invokeMethod('getDeviceName');
+    return name ?? '';
+  }
   // endregion
 
   // region Discovery

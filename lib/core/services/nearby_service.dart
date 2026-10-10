@@ -73,6 +73,36 @@ class NearbyService {
     }
   }
 
+  /// Re-requests the Nearby runtime permission set (Bluetooth + Nearby Wi‑Fi
+  /// + location). Public: the scan screen's permission panel re-triggers
+  /// the system dialog when a grant is missing.
+  Future<bool> requestNearbyPermissions() async {
+    try {
+      final Map result = await _platform.requestNearbyPermissions();
+      return (result['granted'] as bool?) ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Opens the system location settings screen (master toggle pre-flight).
+  Future<bool> requestEnableLocation() async {
+    try {
+      return await _platform.requestEnableLocation();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Opens this app's system settings page.
+  Future<bool> openAppSettings() async {
+    try {
+      return await _platform.openAppSettings();
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<bool> requestEnableBluetooth() async {
     try {
       return await _platform.requestEnableBluetooth();
@@ -266,6 +296,9 @@ class NearbyStatus {
     required this.playServices,
     required this.bluetoothEnabled,
     this.canAdvertise = true,
+    this.locationPermission = true,
+    this.locationEnabled = true,
+    this.wifiEnabled = true,
   });
 
   final bool playServices;
@@ -276,10 +309,26 @@ class NearbyStatus {
   /// true so an older native side / channel failure never shows a warning.
   final bool canAdvertise;
 
+  /// Whether a location runtime permission is granted — GMS Nearby refuses
+  /// discovery with "8034: MISSING_PERMISSION_ACCESS_COARSE_LOCATION"
+  /// without it. Defaults to true (fail-open) for older native sides.
+  final bool locationPermission;
+
+  /// Location master toggle state (many OEM builds block discovery scans
+  /// while it is off). Defaults to true (fail-open).
+  final bool locationEnabled;
+
+  /// Wi‑Fi radio state (informational note on the scan screen). Defaults to
+  /// true (fail-open).
+  final bool wifiEnabled;
+
   static NearbyStatus fromMap(Map<dynamic, dynamic> map) => NearbyStatus(
         playServices: (map['playServices'] as bool?) ?? true,
         bluetoothEnabled: (map['bluetoothEnabled'] as bool?) ?? true,
         canAdvertise: (map['canAdvertise'] as bool?) ?? true,
+        locationPermission: (map['locationPermission'] as bool?) ?? true,
+        locationEnabled: (map['locationEnabled'] as bool?) ?? true,
+        wifiEnabled: (map['wifiEnabled'] as bool?) ?? true,
       );
 }
 

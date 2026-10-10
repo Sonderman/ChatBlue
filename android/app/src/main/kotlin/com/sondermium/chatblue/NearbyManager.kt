@@ -1,9 +1,15 @@
 package com.sondermium.chatblue
 
+import android.Manifest
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.location.LocationManager
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.nearby.Nearby
@@ -148,24 +154,11 @@ class NearbyManager(private val context: Context) {
 
     fun isConnected(): Boolean = connectedEndpointId != null
 
-    /// Best-effort user-visible device name — shown to peers in their lists
-    /// and banners: OS device name, then legacy Bluetooth name, then the
-    /// adapter name, then the hardware model code.
-    fun getDeviceName(): String {
-        val fromSettings = runCatching {
-            Settings.Global.getString(context.contentResolver, "device_name")
-        }.getOrNull()
-        if (!fromSettings.isNullOrBlank()) return fromSettings
-        val fromSecure = runCatching {
-            Settings.Secure.getString(context.contentResolver, "bluetooth_name")
-        }.getOrNull()
-        if (!fromSecure.isNullOrBlank()) return fromSecure
-        val fromAdapter = runCatching {
-            BluetoothAdapter.getDefaultAdapter()?.name
-        }.getOrNull()
-        if (!fromAdapter.isNullOrBlank()) return fromAdapter
-        return runCatching { Build.MODEL }.getOrNull().orEmpty()
-    }
+    /// Best-effort user-visible device name — shown to peers in their lists,
+    /// banners and chat session titles. Delegates to the shared resolver
+    /// (OS device name → legacy Bluetooth name → adapter name → hardware
+    /// model code only as the last resort).
+    fun getDeviceName(): String = DeviceNameResolver.resolve(context)
 
     /// {playServices, bluetoothEnabled, canAdvertise} — the scan screen
     /// shows a panel instead of the controls when the first two are missing,
@@ -191,11 +184,64 @@ class NearbyManager(private val context: Context) {
                 BluetoothAdapter.getDefaultAdapter()?.bluetoothLeAdvertiser != null
             }.getOrDefault(true)
         }
+        // Precondition mirrors for the scan screen's panels: the location
+        // permission (GMS discovery needs ACCESS_COARSE_LOCATION — error
+        // 8034), the location master toggle (OEM radio-scan block) and the
+        // Wi‑Fi radio state (informational note).
+        val locationPermission = hasLocationPermission()
+        val locationEnabled = isLocationEnabled()
+        val wifiEnabled = isWifiEnabled()
         return mapOf(
             "playServices" to playServices,
             "bluetoothEnabled" to bluetoothEnabled,
-            "canAdvertise" to canAdvertise
+            "canAdvertise" to canAdvertise,
+            "locationPermission" to locationPermission,
+            "locationEnabled" to locationEnabled,
+            "wifiEnabled" to wifiEnabled
         )
+    }
+
+    /// True when ACCESS_COARSE_LOCATION is granted — the exact permission
+    /// GMS Nearby checks for discovery (play-services-nearby 19.5.1 fails
+    /// with "8034: MISSING_PERMISSION_ACCESS_COARSE_LOCATION" without it).
+    /// On Android 12+ the runtime request asks for FINE + COARSE together;
+    /// the "approximate" grant delivers COARSE only, which is enough here.
+    fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+    /// Location master toggle state (required for Nearby discovery on many
+    /// OEM builds — MIUI/HyperOS refuse radio scans while it is off).
+    fun isLocationEnabled(): Boolean {
+        val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            lm?.isLocationEnabled == true
+        } else {
+            val gps = lm?.isProviderEnabled(LocationManager.GPS_PROVIDER) == true
+            val net = lm?.isProviderEnabled(LocationManager.NETWORK_PROVIDER) == true
+            gps || net
+        }
+    }
+
+    /// Opens the system location settings screen so the user can turn the
+    /// master toggle on. Returns whether the launch was attempted.
+    fun requestEnableLocation(): Boolean {
+        return try {
+            val intent = Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /// Wi‑Fi radio state (informational: Nearby can discover over other
+    /// mediums, but with Wi‑Fi off discovery may miss devices).
+    fun isWifiEnabled(): Boolean {
+        val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        return wm?.isWifiEnabled == true
     }
 
     // region Scanning (advertise + discover together)

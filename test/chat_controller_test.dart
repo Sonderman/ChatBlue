@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:chatblue/controllers/chat_transport_binding.dart';
 import 'package:chatblue/core/models/chatsession_model.dart';
@@ -306,6 +305,41 @@ void main() {
       final state = stateOf(c, arg);
       expect(state.chatSession.id, 'AA:BB:CC:DD:EE:FF');
       expect(state.messages.map((m) => m.text), contains('stored'));
+    });
+
+    test('a direct key hit heals a stale model-code title from the live name',
+        () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final repo = SessionRepository(database);
+      await repo.saveChatSession(
+        sessionFixture(
+          id: 'uid-1',
+          name: 'M2101K6G',
+          device: {'name': 'M2101K6G', 'address': 'uid-1'},
+          transport: ChatSessionModel.transportNearby,
+        ),
+      );
+
+      final b = FakeChatBinding(transport: ChatSessionModel.transportNearby)
+        ..deviceKey = 'uid-1'
+        ..deviceName = 'Redmi Note 10 Pro';
+      final c = container(b: b, database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportNearby);
+      open(c, arg);
+      await pumpEventQueue();
+
+      final state = stateOf(c, arg);
+      expect(state.chatSession.name, 'Redmi Note 10 Pro');
+      expect(state.chatSession.device['name'], 'Redmi Note 10 Pro');
+
+      // The upgrade is persisted (debounced save) — a later list load shows
+      // the display name instead of the raw model code.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final stored = await repo.loadChatSession('uid-1');
+      expect(stored?.name, 'Redmi Note 10 Pro');
+      expect(stored?.device['name'], 'Redmi Note 10 Pro');
     });
   });
 
