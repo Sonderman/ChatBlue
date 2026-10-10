@@ -78,6 +78,17 @@ class $SessionsTable extends Sessions
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _deviceAddressesMeta = const VerificationMeta(
+    'deviceAddresses',
+  );
+  @override
+  late final GeneratedColumn<String> deviceAddresses = GeneratedColumn<String>(
+    'device_addresses',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -87,6 +98,7 @@ class $SessionsTable extends Sessions
     transport,
     deviceName,
     deviceAddress,
+    deviceAddresses,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -134,6 +146,15 @@ class $SessionsTable extends Sessions
         ),
       );
     }
+    if (data.containsKey('device_addresses')) {
+      context.handle(
+        _deviceAddressesMeta,
+        deviceAddresses.isAcceptableOrUnknown(
+          data['device_addresses']!,
+          _deviceAddressesMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -175,6 +196,10 @@ class $SessionsTable extends Sessions
         DriftSqlType.string,
         data['${effectivePrefix}device_address'],
       ),
+      deviceAddresses: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}device_addresses'],
+      ),
     );
   }
 
@@ -201,6 +226,14 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
   final String? transport;
   final String? deviceName;
   final String? deviceAddress;
+
+  /// Per-transport peer addresses as a JSON map (e.g.
+  /// {"bt":"34:8A:7B:B4:5B:9D","wfd":"36:8a:7b:b4:5b:9e"}): the same peer
+  /// has a different address per radio, and the chat's transport picker
+  /// dials the target transport with ITS entry. Null on rows written before
+  /// the column existed — the single [deviceAddress] then serves as the
+  /// entry for [transport] (see SessionRepository._decodeAddresses).
+  final String? deviceAddresses;
   const SessionRow({
     required this.id,
     required this.name,
@@ -209,6 +242,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
     this.transport,
     this.deviceName,
     this.deviceAddress,
+    this.deviceAddresses,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -234,6 +268,9 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
     if (!nullToAbsent || deviceAddress != null) {
       map['device_address'] = Variable<String>(deviceAddress);
     }
+    if (!nullToAbsent || deviceAddresses != null) {
+      map['device_addresses'] = Variable<String>(deviceAddresses);
+    }
     return map;
   }
 
@@ -252,6 +289,9 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
       deviceAddress: deviceAddress == null && nullToAbsent
           ? const Value.absent()
           : Value(deviceAddress),
+      deviceAddresses: deviceAddresses == null && nullToAbsent
+          ? const Value.absent()
+          : Value(deviceAddresses),
     );
   }
 
@@ -268,6 +308,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
       transport: serializer.fromJson<String?>(json['transport']),
       deviceName: serializer.fromJson<String?>(json['deviceName']),
       deviceAddress: serializer.fromJson<String?>(json['deviceAddress']),
+      deviceAddresses: serializer.fromJson<String?>(json['deviceAddresses']),
     );
   }
   @override
@@ -281,6 +322,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
       'transport': serializer.toJson<String?>(transport),
       'deviceName': serializer.toJson<String?>(deviceName),
       'deviceAddress': serializer.toJson<String?>(deviceAddress),
+      'deviceAddresses': serializer.toJson<String?>(deviceAddresses),
     };
   }
 
@@ -292,6 +334,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
     Value<String?> transport = const Value.absent(),
     Value<String?> deviceName = const Value.absent(),
     Value<String?> deviceAddress = const Value.absent(),
+    Value<String?> deviceAddresses = const Value.absent(),
   }) => SessionRow(
     id: id ?? this.id,
     name: name ?? this.name,
@@ -302,6 +345,9 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
     deviceAddress: deviceAddress.present
         ? deviceAddress.value
         : this.deviceAddress,
+    deviceAddresses: deviceAddresses.present
+        ? deviceAddresses.value
+        : this.deviceAddresses,
   );
   SessionRow copyWithCompanion(SessionsCompanion data) {
     return SessionRow(
@@ -316,6 +362,9 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
       deviceAddress: data.deviceAddress.present
           ? data.deviceAddress.value
           : this.deviceAddress,
+      deviceAddresses: data.deviceAddresses.present
+          ? data.deviceAddresses.value
+          : this.deviceAddresses,
     );
   }
 
@@ -328,7 +377,8 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
           ..write('updatedAt: $updatedAt, ')
           ..write('transport: $transport, ')
           ..write('deviceName: $deviceName, ')
-          ..write('deviceAddress: $deviceAddress')
+          ..write('deviceAddress: $deviceAddress, ')
+          ..write('deviceAddresses: $deviceAddresses')
           ..write(')'))
         .toString();
   }
@@ -342,6 +392,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
     transport,
     deviceName,
     deviceAddress,
+    deviceAddresses,
   );
   @override
   bool operator ==(Object other) =>
@@ -353,7 +404,8 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
           other.updatedAt == this.updatedAt &&
           other.transport == this.transport &&
           other.deviceName == this.deviceName &&
-          other.deviceAddress == this.deviceAddress);
+          other.deviceAddress == this.deviceAddress &&
+          other.deviceAddresses == this.deviceAddresses);
 }
 
 class SessionsCompanion extends UpdateCompanion<SessionRow> {
@@ -364,6 +416,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
   final Value<String?> transport;
   final Value<String?> deviceName;
   final Value<String?> deviceAddress;
+  final Value<String?> deviceAddresses;
   final Value<int> rowid;
   const SessionsCompanion({
     this.id = const Value.absent(),
@@ -373,6 +426,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
     this.transport = const Value.absent(),
     this.deviceName = const Value.absent(),
     this.deviceAddress = const Value.absent(),
+    this.deviceAddresses = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   SessionsCompanion.insert({
@@ -383,6 +437,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
     this.transport = const Value.absent(),
     this.deviceName = const Value.absent(),
     this.deviceAddress = const Value.absent(),
+    this.deviceAddresses = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        name = Value(name),
@@ -396,6 +451,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
     Expression<String>? transport,
     Expression<String>? deviceName,
     Expression<String>? deviceAddress,
+    Expression<String>? deviceAddresses,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -406,6 +462,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
       if (transport != null) 'transport': transport,
       if (deviceName != null) 'device_name': deviceName,
       if (deviceAddress != null) 'device_address': deviceAddress,
+      if (deviceAddresses != null) 'device_addresses': deviceAddresses,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -418,6 +475,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
     Value<String?>? transport,
     Value<String?>? deviceName,
     Value<String?>? deviceAddress,
+    Value<String?>? deviceAddresses,
     Value<int>? rowid,
   }) {
     return SessionsCompanion(
@@ -428,6 +486,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
       transport: transport ?? this.transport,
       deviceName: deviceName ?? this.deviceName,
       deviceAddress: deviceAddress ?? this.deviceAddress,
+      deviceAddresses: deviceAddresses ?? this.deviceAddresses,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -460,6 +519,9 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
     if (deviceAddress.present) {
       map['device_address'] = Variable<String>(deviceAddress.value);
     }
+    if (deviceAddresses.present) {
+      map['device_addresses'] = Variable<String>(deviceAddresses.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -476,6 +538,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
           ..write('transport: $transport, ')
           ..write('deviceName: $deviceName, ')
           ..write('deviceAddress: $deviceAddress, ')
+          ..write('deviceAddresses: $deviceAddresses, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1541,6 +1604,7 @@ typedef $$SessionsTableCreateCompanionBuilder = SessionsCompanion Function({
   Value<String?> transport,
   Value<String?> deviceName,
   Value<String?> deviceAddress,
+  Value<String?> deviceAddresses,
   Value<int> rowid,
 });
 typedef $$SessionsTableUpdateCompanionBuilder = SessionsCompanion Function({
@@ -1551,6 +1615,7 @@ typedef $$SessionsTableUpdateCompanionBuilder = SessionsCompanion Function({
   Value<String?> transport,
   Value<String?> deviceName,
   Value<String?> deviceAddress,
+  Value<String?> deviceAddresses,
   Value<int> rowid,
 });
 
@@ -1623,6 +1688,11 @@ class $$SessionsTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<String> get deviceAddresses => $composableBuilder(
+    column: $table.deviceAddresses,
+    builder: (column) => ColumnFilters(column),
+  );
+
   Expression<bool> messagesRefs(
     Expression<bool> Function($$MessagesTableFilterComposer f) f,
   ) {
@@ -1692,6 +1762,11 @@ class $$SessionsTableOrderingComposer
     column: $table.deviceAddress,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get deviceAddresses => $composableBuilder(
+    column: $table.deviceAddresses,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$SessionsTableAnnotationComposer
@@ -1725,6 +1800,11 @@ class $$SessionsTableAnnotationComposer
 
   GeneratedColumn<String> get deviceAddress => $composableBuilder(
     column: $table.deviceAddress,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get deviceAddresses => $composableBuilder(
+    column: $table.deviceAddresses,
     builder: (column) => column,
   );
 
@@ -1789,6 +1869,7 @@ class $$SessionsTableTableManager
                 Value<String?> transport = const Value.absent(),
                 Value<String?> deviceName = const Value.absent(),
                 Value<String?> deviceAddress = const Value.absent(),
+                Value<String?> deviceAddresses = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => SessionsCompanion(
                 id: id,
@@ -1798,6 +1879,7 @@ class $$SessionsTableTableManager
                 transport: transport,
                 deviceName: deviceName,
                 deviceAddress: deviceAddress,
+                deviceAddresses: deviceAddresses,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -1809,6 +1891,7 @@ class $$SessionsTableTableManager
                 Value<String?> transport = const Value.absent(),
                 Value<String?> deviceName = const Value.absent(),
                 Value<String?> deviceAddress = const Value.absent(),
+                Value<String?> deviceAddresses = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => SessionsCompanion.insert(
                 id: id,
@@ -1818,6 +1901,7 @@ class $$SessionsTableTableManager
                 transport: transport,
                 deviceName: deviceName,
                 deviceAddress: deviceAddress,
+                deviceAddresses: deviceAddresses,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

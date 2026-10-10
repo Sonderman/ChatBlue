@@ -21,6 +21,16 @@ class ChatSessionModel {
   /// existed (backfilled with the transport in use when the chat opens).
   String? transport;
 
+  /// The peer's address PER TRANSPORT ('bt' → its Bluetooth MAC, 'wfd' →
+  /// its Wi‑Fi Direct p2p address): the same device is reached with a
+  /// different address on each radio. The chat's transport picker dials the
+  /// target transport with ITS entry from here — a chat created over Wi‑Fi
+  /// Direct can thus be dialed over Bluetooth directly, without a scan,
+  /// once ANY Bluetooth link has taught the app the peer's MAC (and vice
+  /// versa). Empty on sessions persisted before the map existed; the
+  /// repository seeds it from the single legacy `device['address']`.
+  final Map<String, String> deviceAddresses;
+
   ChatSessionModel({
     required this.id,
     required this.name,
@@ -29,7 +39,33 @@ class ChatSessionModel {
     required this.messages,
     required this.device,
     this.transport,
+    this.deviceAddresses = const {},
   });
+
+  /// The stored address for [kind], or null when this session never learned
+  /// that transport's address yet.
+  String? addressFor(String kind) {
+    final a = deviceAddresses[kind];
+    return (a == null || a.isEmpty) ? null : a;
+  }
+
+  /// A copy with [kind]'s address set to [address] — the learn-on-link path
+  /// (a live Bluetooth link reveals the peer's MAC; the WFD link its p2p
+  /// address). Returns [this] when nothing would change (no useless save).
+  ChatSessionModel recordingPeerAddress(String kind, String? address) {
+    final a = (address ?? '').trim();
+    if (kind.isEmpty || a.isEmpty || deviceAddresses[kind] == a) return this;
+    return ChatSessionModel(
+      id: id,
+      name: name,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      messages: messages,
+      device: device,
+      transport: transport,
+      deviceAddresses: {...deviceAddresses, kind: a},
+    );
+  }
 
   /// Transport this chat is displayed and reopened with: the recorded
   /// [transport] when present, otherwise inferred from the stored device
@@ -87,7 +123,9 @@ class ChatSessionModel {
   /// Returns a copy of this session bound to the CURRENT connection's
   /// identity: the stored device address and the transport tag are refreshed
   /// so the persisted identity always matches the channel the chat is
-  /// actually running on.
+  /// actually running on. [transport]'s entry in [deviceAddresses] is
+  /// refreshed with [address] alongside — the map keeps every transport's
+  /// address across channel switches.
   ///
   /// Needed after cross-transport merges (the same peer reached over another
   /// transport): those keep the OLD session's device map, so e.g. a
@@ -120,6 +158,10 @@ class ChatSessionModel {
         : (stored is String && stored.isNotEmpty
             ? stored
             : (live.isNotEmpty ? live : null));
+    final Map<String, String> addresses = {...deviceAddresses};
+    if (address != null && address.isNotEmpty) {
+      addresses[transport] = address;
+    }
     return ChatSessionModel(
       id: (newId != null && newId.isNotEmpty) ? newId : id,
       name: upgrade ? live : name,
@@ -133,6 +175,7 @@ class ChatSessionModel {
             : device['address'],
       },
       transport: transport,
+      deviceAddresses: addresses,
     );
   }
 
@@ -145,10 +188,19 @@ class ChatSessionModel {
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': updatedAt.toIso8601String(),
       'transport': transport,
+      'deviceAddresses': deviceAddresses,
     };
   }
 
   factory ChatSessionModel.fromJson(Map<String, dynamic> json) {
+    final addresses = <String, String>{};
+    final raw = json['deviceAddresses'];
+    if (raw is Map) {
+      for (final e in raw.entries) {
+        final v = e.value;
+        if (v is String && v.isNotEmpty) addresses[e.key.toString()] = v;
+      }
+    }
     return ChatSessionModel(
       id: json['id'],
       name: json['name'],
@@ -159,6 +211,7 @@ class ChatSessionModel {
       createdAt: DateTime.parse(json['createdAt']),
       updatedAt: DateTime.parse(json['updatedAt']),
       transport: json['transport'],
+      deviceAddresses: addresses,
     );
   }
 }

@@ -55,18 +55,21 @@ class _OutgoingJob {
     this.imagePath, {
     this.audioText,
     this.fileName,
+    this.messageId,
   })  : kind = _SendKind.bytes,
-        text = null,
-        messageId = null;
+        text = null;
 
   final _SendKind kind;
   final String? text;
   final Uint8List? bytes;
   final String? imagePath;
 
-  /// Bubble id of a text job's message — lets the send result stamp its
-  /// delivery state (sent / failed). Bytes jobs carry none: their progress
-  /// bubble is identified at finalize time.
+  /// Bubble id of the message this job carries: for a text job the sender
+  /// stamps the send result's delivery state (sent / failed) on it; for a
+  /// bytes job (voice/file) it is the id minted UP FRONT and announced on
+  /// the wire — both replicas must end up on ONE identity, or an id-based
+  /// flow (the deferred-download fetch) misses on the peer even though it
+  /// holds the file. The progress bubble adopts it at mint time.
   final String? messageId;
 
   /// When set, the transferred bytes are a voice recording and the bubble
@@ -391,6 +394,11 @@ class ChatController extends Notifier<ChatState>
   Uint8List? _pendingOutgoingBytes;
   String? _sendingImagePath;
 
+  /// Sender-minted id of the active bytes job (voice/file): the progress
+  /// bubble is minted with it and the announcement carried it, so both
+  /// replicas converge on one message identity.
+  String? _pendingOutgoingMessageId;
+
   // Debounces session writes during message bursts (text/image/traffic storms).
   Timer? _saveDebounce;
 
@@ -587,6 +595,7 @@ class ChatController extends Notifier<ChatState>
           'match by key, then MAC, then name',
         );
       }
+      final String? liveAddr = _livePeerAddress();
       session = ChatSessionModel(
         id: key,
         name: _binding.connectedDeviceName ?? key,
@@ -600,6 +609,12 @@ class ChatController extends Notifier<ChatState>
         // Tag the new session with the channel it was created on — the
         // home list shows (and reopens) chats by this value.
         transport: _binding.transportType,
+        // Seed the per-transport map with the live address: the fresh row
+        // already carries the address of the link that created it (the
+        // absorb/merge then unions it with the stored row's entries).
+        deviceAddresses: liveAddr == null
+            ? const {}
+            : {_binding.transportType: liveAddr},
       );
     }
 
@@ -656,7 +671,10 @@ class ChatController extends Notifier<ChatState>
             rebound.device['address'] != session.device['address'] ||
                 rebound.transport != session.transport ||
                 rebound.name != session.name ||
-                rebound.device['name'] != session.device['name'];
+                rebound.device['name'] != session.device['name'] ||
+                // A healed entry in the per-transport map (a live link's
+                // address learned) is an identity change worth persisting.
+                !mapEquals(rebound.deviceAddresses, session.deviceAddresses);
         // The state carries only session meta here; the visible window
         // fills via loadRecentMessages (both paths load it below).
         state = state.copyWith(chatSession: rebound);
@@ -930,6 +948,7 @@ class ChatController extends Notifier<ChatState>
     state = state.copyWith(isConnected: connected);
     if (connected) {
       _connectedSince = DateTime.now();
+      _recordPeerAddress();
       _syncNudgeTimer ??= Timer(syncNudgeDelay, _onSyncNudge);
       _sendHistorySync();
       // Re-share on every (re)connection: the reading is per-link.
@@ -962,6 +981,39 @@ class ChatController extends Notifier<ChatState>
       // bubble now instead of leaving it stuck at its last reading.
       _failActiveTransfers();
     }
+  }
+
+  /// The live peer address of the current link, keyed by the transport's
+  /// identity semantics: Bluetooth → the peer's MAC (connectedDeviceKey),
+  /// Wi‑Fi Direct → the peer's p2p address, Nearby → its per-install uid
+  /// (endpoint id as the fallback). Null when nothing usable is bound yet;
+  /// the placeholder markers never leak into the map.
+  String? _livePeerAddress() {
+    final kind = _binding.transportType;
+    final String? raw = switch (kind) {
+      ChatSessionModel.transportNearby =>
+        _binding.connectedDeviceId ?? _binding.connectedDeviceKey,
+      _ => _binding.connectedDeviceKey,
+    };
+    final a = (raw ?? '').trim();
+    if (a.isEmpty || a == 'unknown' || a == '02:00:00:00:00:00') return null;
+    return a;
+  }
+
+  /// Records the live peer address under the CURRENT transport in the
+  /// session's per-transport map ({bt: MAC, wfd: p2p address}): every live
+  /// link teaches the app the peer's address on that channel, so a later
+  /// pick of the same transport can dial it directly instead of
+  /// re-discovering — and the knowledge persists across restarts with the
+  /// session row.
+  void _recordPeerAddress() {
+    final a = _livePeerAddress();
+    if (a == null) return;
+    final session = state.chatSession;
+    final updated = session.recordingPeerAddress(_binding.transportType, a);
+    if (identical(updated, session)) return;
+    state = state.copyWith(chatSession: updated);
+    _scheduleSave();
   }
 
   @override
@@ -1040,7 +1092,10 @@ class ChatController extends Notifier<ChatState>
   /// Connect button shown when the chat is opened without a connection.
   Future<void> connectToCurrentSession() async {
     if (state.isConnected || state.isConnecting) return;
-    final address = state.chatSession.device['address'] as String?;
+    // This transport's own entry from the per-transport map, with the
+    // legacy single address as the fallback for rows older than the map.
+    final address = state.chatSession.addressFor(_arg.transport) ??
+        state.chatSession.device['address'] as String?;
     state = state.copyWith(isConnecting: true);
     // The transport decides how to reach the stored peer: Bluetooth dials
     // the stored address; Wi‑Fi Direct discovers the device first (P2P
@@ -1092,7 +1147,13 @@ class ChatController extends Notifier<ChatState>
       await connectToCurrentSession();
       return;
     }
-    final address = state.chatSession.device['address'] as String?;
+    // The TARGET transport's own address from the per-transport map: a
+    // chat created over another radio holds no meaningful value in its
+    // single stored address (a Wi‑Fi Direct p2p MAC is not dialable over
+    // Bluetooth). The map entry — learned whenever a link over that
+    // transport was live — is dialed instead; a missing entry means
+    // "discover the peer by name" on the target transport.
+    final address = state.chatSession.addressFor(kind);
     final name = state.chatSession.name;
     final target = ref.read(chatBindingProvider(kind));
     final l10n = ref.read(appLocalizationsProvider);
@@ -1176,6 +1237,7 @@ class ChatController extends Notifier<ChatState>
           messages: session.messages,
           device: session.device,
           transport: session.transport,
+          deviceAddresses: session.deviceAddresses,
         );
         state = state.copyWith(peerName: name, chatSession: renamed);
         _scheduleSave();
@@ -1252,6 +1314,13 @@ class ChatController extends Notifier<ChatState>
         'address': session.device['address'] ?? duplicate.device['address'],
       },
       transport: session.transport,
+      // The absorbed row may hold the OTHER transport's address (sibling
+      // rows split by channel): the union keeps both entries — a later
+      // pick of either transport dials its own address.
+      deviceAddresses: {
+        ...duplicate.deviceAddresses,
+        ...session.deviceAddresses,
+      },
     );
     try {
       await _repo.saveChatSession(merged);
@@ -1326,7 +1395,14 @@ class ChatController extends Notifier<ChatState>
           peerMac != 'unknown' &&
           peerMac != '02:00:00:00:00:00') {
         for (final s in all) {
-          if (s.id != excludeId && s.device['address'] == peerMac) return s;
+          if (s.id == excludeId) continue;
+          // The single stored address — or any per-transport entry: a
+          // sibling row may carry this MAC in its map while its single
+          // address (the winning transport's) holds something else.
+          if (s.device['address'] == peerMac ||
+              s.deviceAddresses.containsValue(peerMac)) {
+            return s;
+          }
         }
       }
       if (peerUid != null && peerUid.isNotEmpty && peerUid != 'unknown') {
@@ -1718,7 +1794,18 @@ class ChatController extends Notifier<ChatState>
       );
     });
     _sendText(
-      _syncPrefix + jsonEncode({'type': 'fetch', 'id': id}),
+      _syncPrefix +
+          jsonEncode({
+            'type': 'fetch',
+            'id': id,
+            // Repair keys for id-diverged replicas (live voice/file
+            // transfers used to mint receiver-side ids): the peer falls
+            // back to a content match when the id misses. Old peers read
+            // only `id`.
+            'kind': message.transferKind,
+            'caption': message.text,
+            'size': message.remoteMediaSize,
+          }),
     );
   }
 
@@ -1869,7 +1956,7 @@ class ChatController extends Notifier<ChatState>
         case 'request':
           await _handleSyncRequest(decoded['items']);
         case 'fetch':
-          await _handleSyncFetch(decoded['id']);
+          await _handleSyncFetch(decoded);
         case 'download':
           await _applySyncMessages(decoded['messages']);
         case 'fetchMiss':
@@ -1946,30 +2033,59 @@ class ChatController extends Notifier<ChatState>
   /// Peer asked for the file behind a placeholder (deferred download): send
   /// that single message with its bytes embedded (up to the fetch cap), or a
   /// miss so the requester's spinner can stop.
-  Future<void> _handleSyncFetch(dynamic idRaw) async {
-    final id = idRaw is String ? idRaw : null;
+  ///
+  /// The lookup is by id first — then by CONTENT (kind + caption + exact
+  /// byte size): live voice/file transfers used to mint receiver-side ids,
+  /// so the same message can carry different ids on the two replicas while
+  /// this side still holds the file. The requester's placeholder has
+  /// exactly those three keys, and for a live transfer they are exact.
+  Future<void> _handleSyncFetch(Map<dynamic, dynamic> frame) async {
+    final id = frame['id'] is String ? frame['id'] as String : null;
     if (id == null) return;
+    MessageModel? target;
     for (final m in state.messages) {
-      if (m.id != id) continue;
-      final path = m.imagePath;
-      if (path != null) {
-        try {
-          final file = File(path);
-          if (await file.exists() && file.lengthSync() <= _syncMaxFetchBytes) {
-            _sendText(
-              _syncPrefix +
-                  jsonEncode({
-                    'type': 'download',
-                    'messages': [await _syncEntryFor(m, forceBytes: true)],
-                  }),
-            );
-            return;
+      if (m.id == id) {
+        target = m;
+        break;
+      }
+    }
+    if (target?.imagePath == null) {
+      final kind = frame['kind'];
+      final caption = frame['caption'];
+      final size = frame['size'];
+      if (kind is String && caption is String && size is int && size > 0) {
+        for (final m in state.messages) {
+          if (m.imagePath == null) continue;
+          if (m.transferKind != kind || m.text != caption) continue;
+          try {
+            final f = File(m.imagePath!);
+            if (await f.exists() && f.lengthSync() == size) {
+              target = m;
+              break;
+            }
+          } catch (_) {
+            // Unreadable candidate: keep looking.
           }
-        } catch (_) {
-          // Unreadable file: fall through to the miss below.
         }
       }
-      break;
+    }
+    final path = target?.imagePath;
+    if (target != null && path != null) {
+      try {
+        final file = File(path);
+        if (await file.exists() && file.lengthSync() <= _syncMaxFetchBytes) {
+          _sendText(
+            _syncPrefix +
+                jsonEncode({
+                  'type': 'download',
+                  'messages': [await _syncEntryFor(target, forceBytes: true)],
+                }),
+          );
+          return;
+        }
+      } catch (_) {
+        // Unreadable file: fall through to the miss below.
+      }
     }
     _sendText(
       _syncPrefix + jsonEncode({'type': 'fetchMiss', 'id': id}),
@@ -2146,8 +2262,30 @@ class ChatController extends Notifier<ChatState>
         // (clears the spinner and the pending marker in one step).
         final entryId = entry['id'] as String?;
         if (mediaBytes != null && entryId != null) {
-          final int idx = state.messages.indexWhere((m) => m.id == entryId);
+          final int payloadLen = mediaBytes.length;
+          var idx = state.messages.indexWhere((m) => m.id == entryId);
+          if (idx == -1 || !state.messages[idx].hasRemoteMedia) {
+            // Id-diverged replicas (live voice/file transfers used to mint
+            // receiver-side ids — the mirror of the serve-side content
+            // fallback): the file we asked for may belong to a LOCAL
+            // placeholder under a different id. Match by content: same
+            // kind + same caption, size equal to the payload (or unknown).
+            final String? wantKind =
+                isAudioEntry ? 'audio' : (isFileEntry ? 'file' : null);
+            if (wantKind != null) {
+              final localIdx = state.messages.indexWhere(
+                (m) =>
+                    m.hasRemoteMedia &&
+                    m.transferKind == wantKind &&
+                    m.text == text &&
+                    (m.remoteMediaSize == 0 ||
+                        m.remoteMediaSize == payloadLen),
+              );
+              if (localIdx != -1) idx = localIdx;
+            }
+          }
           if (idx != -1 && state.messages[idx].hasRemoteMedia) {
+            final String? localId = state.messages[idx].id;
             String? downloaded;
             try {
               downloaded = isFileEntry
@@ -2162,11 +2300,11 @@ class ChatController extends Notifier<ChatState>
             } catch (_) {
               downloaded = null;
             }
-            if (downloaded != null) {
+            if (downloaded != null && localId != null) {
               completions.add(
-                (id: entryId, path: downloaded, isAudio: isAudioEntry),
+                (id: localId, path: downloaded, isAudio: isAudioEntry),
               );
-              _settleFetch(entryId);
+              _settleFetch(localId);
               continue;
             }
           }
@@ -2257,6 +2395,9 @@ class ChatController extends Notifier<ChatState>
               timestamp: cur.timestamp,
               imagePath: c.path,
               transferKind: c.isAudio ? 'audio' : cur.transferKind,
+              // A fetched file coming back must not erase the delivery
+              // tick (the row kept it through the placeholder flip).
+              delivery: cur.delivery,
             );
           }
         }
@@ -2445,6 +2586,7 @@ class ChatController extends Notifier<ChatState>
       _pendingOutgoingBytes = null;
       _pendingOutgoingAudioText = null;
       _pendingOutgoingFileText = null;
+      _pendingOutgoingMessageId = null;
       _outgoingProgressId = null;
     }
     state = state.copyWith(messages: msgs);
@@ -2572,6 +2714,7 @@ class ChatController extends Notifier<ChatState>
     _pendingOutgoingBytes = null;
     _pendingOutgoingAudioText = null;
     _pendingOutgoingFileText = null;
+    _pendingOutgoingMessageId = null;
     _sendingImagePath = null;
     if (idx == -1) return;
     final l10n = ref.read(appLocalizationsProvider);
@@ -2598,7 +2741,10 @@ class ChatController extends Notifier<ChatState>
     required TransferState state,
   }) {
     return MessageModel(
-      id: Uuid().v4(),
+      // An outgoing voice/file bubble is born with the SENDER-MINTED id
+      // (already on the wire in its announcement): the finalize keeps the
+      // bubble's id, so both replicas stay on one identity.
+      id: (isSentByMe ? _pendingOutgoingMessageId : null) ?? Uuid().v4(),
       text: _progressPercent(state),
       isSentByMe: isSentByMe,
       timestamp: DateTime.now(),
@@ -3146,7 +3292,13 @@ class ChatController extends Notifier<ChatState>
           ? path.split(Platform.pathSeparator).last
           : name,
     );
-    _enqueueSend(_OutgoingJob.bytes(bytes, path, fileName: fileName));
+    // Sender-minted id: announced with the file so the receiver's row
+    // adopts it (see _OutgoingJob.messageId) — the replicas share ONE
+    // identity and the fetch flow resolves on either side.
+    _enqueueSend(
+      _OutgoingJob.bytes(bytes, path,
+          fileName: fileName, messageId: Uuid().v4()),
+    );
   }
 
   /// Queues a one-shot location share. The message text is the encoded
@@ -3214,7 +3366,14 @@ class ChatController extends Notifier<ChatState>
         if (fileName != null) {
           await _sendText(
             _filePrefix +
-                jsonEncode({'name': fileName, 'size': job.bytes!.length}),
+                jsonEncode({
+                  'name': fileName,
+                  'size': job.bytes!.length,
+                  // Sender-minted id; old receivers ignore the extra key
+                  // (they keep minting locally — healed by the fetch
+                  // content fallback).
+                  if (job.messageId != null) 'id': job.messageId,
+                }),
           );
         }
         // Wire these before sendBytes so progress callbacks can finalize the
@@ -3223,6 +3382,7 @@ class ChatController extends Notifier<ChatState>
         _sendingImagePath = job.imagePath;
         _pendingOutgoingAudioText = job.audioText;
         _pendingOutgoingFileText = fileName;
+        _pendingOutgoingMessageId = job.messageId;
         await _sendBytesFrame(job.bytes!);
       } else {
         await _sendText(job.text!);
@@ -3369,13 +3529,21 @@ class ChatController extends Notifier<ChatState>
       await file.delete().catchError((_) => file);
       return;
     }
+    // One id for the wire and both bubbles: the announcement carries it so
+    // the receiver adopts it, and the sender's progress bubble is minted
+    // with it — the two replicas stay on ONE identity (the fetch flow then
+    // resolves on either side; without this each side minted its own id
+    // and a deferred download missed on the peer that held the file).
+    final id = Uuid().v4();
     _enqueueSend(
       _OutgoingJob.text(
-          _audioPrefix + jsonEncode({'duration': _formatDuration(seconds)})),
+        _audioPrefix +
+            jsonEncode({'duration': _formatDuration(seconds), 'id': id}),
+      ),
     );
     _enqueueSend(
       _OutgoingJob.bytes(await file.readAsBytes(), path,
-          audioText: _formatDuration(seconds)),
+          audioText: _formatDuration(seconds), messageId: id),
     );
   }
 
@@ -3458,9 +3626,16 @@ class ChatController extends Notifier<ChatState>
     final meta = _pendingAudioMeta;
     _pendingAudioMeta = null;
     String? durationText;
+    String? senderId;
     if (meta != null && meta.isNotEmpty) {
       try {
-        durationText = (jsonDecode(meta)['duration'] as String?) ?? '0:00';
+        final decoded = jsonDecode(meta);
+        durationText = (decoded['duration'] as String?) ?? '0:00';
+        // Sender-minted id (new senders): adopting it keeps both replicas
+        // on ONE identity — the deferred-download fetch and every id-based
+        // flow then resolve on both sides. Old senders omit it.
+        final rawId = decoded['id'];
+        if (rawId is String && rawId.isNotEmpty) senderId = rawId;
       } catch (_) {
         durationText = meta;
       }
@@ -3495,20 +3670,46 @@ class ChatController extends Notifier<ChatState>
         (m) => m.isTransferring && m.transferKind == 'bytes' && !m.isSentByMe,
       );
     }
-    if (idx != -1) {
-      msgs[idx] = msgs[idx].copyWith(
-        text: durationText ?? msgs[idx].text,
-        isSentByMe: false,
-        timestamp: DateTime.now(),
+    final existingIdx =
+        senderId == null ? -1 : msgs.indexWhere((m) => m.id == senderId);
+    if (existingIdx != -1) {
+      // The sync path already materialized this message (possibly as a
+      // placeholder): fill its file and drop the local transfer bubble.
+      msgs[existingIdx] = msgs[existingIdx].copyWith(
+        text: durationText ?? msgs[existingIdx].text,
         imagePath: filePath,
         isTransferring: false,
         transferKind: 'audio',
       );
+      if (idx != -1) msgs.removeAt(idx);
+    } else if (idx != -1) {
+      final bubble = msgs[idx];
+      if (senderId != null && bubble.id != senderId) {
+        // Finalize under the sender's id: MessageModel.id is final, so the
+        // row is re-created (the transfer bubble has no other referents).
+        msgs[idx] = MessageModel(
+          id: senderId,
+          text: durationText ?? bubble.text,
+          isSentByMe: false,
+          timestamp: DateTime.now(),
+          imagePath: filePath,
+          transferKind: 'audio',
+        );
+      } else {
+        msgs[idx] = bubble.copyWith(
+          text: durationText ?? bubble.text,
+          isSentByMe: false,
+          timestamp: DateTime.now(),
+          imagePath: filePath,
+          isTransferring: false,
+          transferKind: 'audio',
+        );
+      }
     } else {
       msgs.insert(
         0,
         MessageModel(
-          id: Uuid().v4(),
+          id: senderId ?? Uuid().v4(),
           text: durationText ?? '0:00',
           isSentByMe: false,
           timestamp: DateTime.now(),
@@ -3531,11 +3732,14 @@ class ChatController extends Notifier<ChatState>
     final meta = _pendingIncomingFileMeta;
     _pendingIncomingFileMeta = null;
     var name = 'file';
+    String? senderId;
     if (meta != null && meta.isNotEmpty) {
       try {
-        name = _sanitizeFileName(
-          (jsonDecode(meta)['name'] as String?) ?? name,
-        );
+        final decoded = jsonDecode(meta);
+        name = _sanitizeFileName((decoded['name'] as String?) ?? name);
+        // Sender-minted id (see _handleIncomingAudio).
+        final rawId = decoded['id'];
+        if (rawId is String && rawId.isNotEmpty) senderId = rawId;
       } catch (_) {
         name = _sanitizeFileName(meta);
       }
@@ -3573,20 +3777,45 @@ class ChatController extends Notifier<ChatState>
             m.isTransferring && m.transferKind == 'bytes' && !m.isSentByMe,
       );
     }
-    if (idx != -1) {
-      msgs[idx] = msgs[idx].copyWith(
+    final existingIdx =
+        senderId == null ? -1 : msgs.indexWhere((m) => m.id == senderId);
+    if (existingIdx != -1) {
+      // The sync path already materialized this message (possibly as a
+      // placeholder): fill its file and drop the local transfer bubble.
+      msgs[existingIdx] = msgs[existingIdx].copyWith(
         text: caption,
-        isSentByMe: false,
-        timestamp: DateTime.now(),
         imagePath: filePath,
         isTransferring: false,
         transferKind: 'file',
       );
+      if (idx != -1) msgs.removeAt(idx);
+    } else if (idx != -1) {
+      final bubble = msgs[idx];
+      if (senderId != null && bubble.id != senderId) {
+        // Finalize under the sender's id (see _handleIncomingAudio).
+        msgs[idx] = MessageModel(
+          id: senderId,
+          text: caption,
+          isSentByMe: false,
+          timestamp: DateTime.now(),
+          imagePath: filePath,
+          transferKind: 'file',
+        );
+      } else {
+        msgs[idx] = bubble.copyWith(
+          text: caption,
+          isSentByMe: false,
+          timestamp: DateTime.now(),
+          imagePath: filePath,
+          isTransferring: false,
+          transferKind: 'file',
+        );
+      }
     } else {
       msgs.insert(
         0,
         MessageModel(
-          id: Uuid().v4(),
+          id: senderId ?? Uuid().v4(),
           text: caption,
           isSentByMe: false,
           timestamp: DateTime.now(),

@@ -36,9 +36,14 @@ class FakeBtService extends BtClassicService {
   /// address guard did (or did not) reach the service.
   bool connectCalled = false;
 
+  /// Every address passed to [connect], in order — lets tests assert the
+  /// session-reconnect sequence (fast stored dial, then the scan match).
+  final List<String> connectAddresses = [];
+
   @override
   Future<void> connect(String address, {String? uuid}) async {
     connectCalled = true;
+    connectAddresses.add(address);
   }
 
   /// Number of [disconnect] calls — lets tests assert teardown paths.

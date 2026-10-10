@@ -486,7 +486,12 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
   }
 
   Future<bool> connectToSessionPeer({required String? address, String? name}) async {
-    if (address == null || address.isEmpty) {
+    final uid = (address ?? '').trim();
+    final target = (name ?? '').trim();
+    // A name-only search is legitimate: a cross-transport pick from a chat
+    // that never learned this peer's Nearby uid arrives address-less, and
+    // the search then matches by name (the endpoint's display name).
+    if (uid.isEmpty && target.isEmpty) {
       state = state.copyWith(lastConnectError: _t('noDeviceAddressMessage'));
       return false;
     }
@@ -523,7 +528,10 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       }
     }
 
-    final search = await _discoverSessionPeer(uid: address, name: name);
+    final search = await _discoverSessionPeer(
+      uid: uid,
+      name: target.isEmpty ? null : target,
+    );
     if (state.isConnected) return true;
     final match = search.match;
     if (match != null) {

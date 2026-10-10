@@ -262,5 +262,83 @@ void main() {
       expect(ChatSessionModel.shouldReplaceDisplayName('Same', 'Same'), isFalse);
       expect(ChatSessionModel.shouldReplaceDisplayName('Same', '  '), isFalse);
     });
+
+    test('per-transport addresses round-trip through toJson/fromJson', () {
+      final session = ChatSessionModel(
+        id: 'sess-1',
+        name: 'Galaxy J7 Prime',
+        createdAt: DateTime(2026, 10, 10),
+        updatedAt: DateTime(2026, 10, 10),
+        messages: const [],
+        device: const {'name': 'Galaxy J7 Prime', 'address': '36:8a:7b:b4:5b:9e'},
+        transport: ChatSessionModel.transportWifiDirect,
+        deviceAddresses: const {
+          'wfd': '36:8a:7b:b4:5b:9e',
+          'bt': '34:8A:7B:B4:5B:9D',
+        },
+      );
+
+      final restored = ChatSessionModel.fromJson(session.toJson());
+      expect(restored.addressFor('bt'), '34:8A:7B:B4:5B:9D');
+      expect(restored.addressFor('wfd'), '36:8a:7b:b4:5b:9e');
+      expect(restored.addressFor('nearby'), isNull);
+    });
+
+    test(
+        'recordingPeerAddress adds/updates one entry and no-ops on no change',
+        () {
+      final session = ChatSessionModel(
+        id: 'sess-1',
+        name: 'PeerOne',
+        createdAt: DateTime(2026, 10, 10),
+        updatedAt: DateTime(2026, 10, 10),
+        messages: const [],
+        device: const {},
+        transport: ChatSessionModel.transportBluetooth,
+      );
+
+      final learned = session.recordingPeerAddress('bt', 'AA:BB:CC:DD:EE:FF');
+      expect(learned.addressFor('bt'), 'AA:BB:CC:DD:EE:FF');
+      // A second transport's entry does not disturb the first.
+      final both = learned.recordingPeerAddress('wfd', '66:55:44:33:22:11');
+      expect(both.addressFor('bt'), 'AA:BB:CC:DD:EE:FF');
+      expect(both.addressFor('wfd'), '66:55:44:33:22:11');
+      // No change → the SAME instance (no useless save scheduling).
+      expect(
+        identical(both.recordingPeerAddress('bt', 'AA:BB:CC:DD:EE:FF'), both),
+        isTrue,
+      );
+      expect(
+        identical(session.recordingPeerAddress('bt', '  '), session),
+        isTrue,
+      );
+    });
+
+    test('reboundTo refreshes the map entry for the live transport only', () {
+      final session = ChatSessionModel(
+        id: '36:8a:7b:b4:5b:9e',
+        name: 'Galaxy J7 Prime',
+        createdAt: DateTime(2026, 10, 10),
+        updatedAt: DateTime(2026, 10, 10),
+        messages: const [],
+        device: const {'name': 'Galaxy J7 Prime', 'address': '36:8a:7b:b4:5b:9e'},
+        transport: ChatSessionModel.transportWifiDirect,
+        deviceAddresses: const {'wfd': '36:8a:7b:b4:5b:9e'},
+      );
+
+      final rebound = session.reboundTo(
+        newId: '34:8A:7B:B4:5B:9D',
+        address: '34:8A:7B:B4:5B:9D',
+        peerName: 'Galaxy J7 Prime',
+        transport: ChatSessionModel.transportBluetooth,
+      );
+
+      // BOTH addresses survive the channel switch: the wfd entry from the
+      // stored row, the bt entry learned from the live link.
+      expect(rebound.addressFor('wfd'), '36:8a:7b:b4:5b:9e');
+      expect(rebound.addressFor('bt'), '34:8A:7B:B4:5B:9D');
+      expect(rebound.device['address'], '34:8A:7B:B4:5B:9D');
+      expect(rebound.transport, ChatSessionModel.transportBluetooth);
+    });
   });
 }

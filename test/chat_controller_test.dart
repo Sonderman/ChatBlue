@@ -28,6 +28,7 @@ ChatSessionModel sessionFixture({
   List<MessageModel> messages = const [],
   String? transport = ChatSessionModel.transportBluetooth,
   Map<String, dynamic>? device,
+  Map<String, String> deviceAddresses = const {},
 }) =>
     ChatSessionModel(
       id: id,
@@ -37,6 +38,7 @@ ChatSessionModel sessionFixture({
       messages: List.of(messages),
       device: device ?? {'name': name, 'address': 'AA:BB:CC:DD:EE:FF'},
       transport: transport,
+      deviceAddresses: deviceAddresses,
     );
 
 void main() {
@@ -355,6 +357,11 @@ void main() {
       expect(stored!.messages, hasLength(30),
           reason: 'the re-key must move every stored message');
       expect(await repo.getAllSessionsMeta(), hasLength(1));
+      // Per-transport addresses: the re-key keeps the Wi‑Fi Direct era's
+      // p2p address AND learns the live Bluetooth MAC — a later pick of
+      // either transport dials its own entry.
+      expect(stored.addressFor('wfd'), 'be:57:7a:fe:d5:a0');
+      expect(stored.addressFor('bt'), 'DC:6A:E7:41:74:E6');
 
       // A send persists on top — and the history stays intact.
       controller.textController.text = 'hello again';
@@ -1000,6 +1007,283 @@ void main() {
       await pumpEventQueue();
       expect(dialed, isTrue);
       expect(other.dialSettledReads, 1);
+    });
+  });
+
+  group('per-transport peer addresses', () {
+    test('the live link address is recorded into the session map and '
+        'persisted', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      binding.deviceKey = '11:22:33:44:55:66';
+      binding.deviceName = 'PeerOne';
+      binding.emitConnection(true);
+      await pumpEventQueue();
+
+      expect(stateOf(c, arg).chatSession.addressFor('bt'), '11:22:33:44:55:66',
+          reason: 'a live link teaches the peer\'s address on its channel');
+
+      // The debounced save carries the map into the store.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final stored =
+          await SessionRepository(defaultDb!).loadSessionMeta('sess-1');
+      expect(stored!.addressFor('bt'), '11:22:33:44:55:66');
+    });
+
+    test('the classic reconnect prefers the per-transport map entry over the '
+        'single stored address', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(
+          device: const {'name': 'PeerOne', 'address': 'DD:DD:DD:DD:DD:DD'},
+          deviceAddresses: const {'bt': 'AA:BB:CC:DD:EE:FF'},
+        ),
+      );
+      final controller = open(c, arg);
+      await pumpEventQueue();
+
+      await controller.connectToCurrentSession();
+      await pumpEventQueue();
+      expect(binding.connectCalls, [
+        (address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      ]);
+    });
+  });
+
+  group('deferred-download fetch & transfer identity', () {
+    test('an incoming voice adopts the sender-minted id', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_AUDIO@@{"duration":"0:18","id":"voice-id-1"}',
+        kind: 'text',
+      );
+      binding.emitData(Uint8List.fromList([1, 2, 3, 4]), '', kind: 'bytes');
+      // The persist runs on a compute isolate: condition-poll until the row
+      // lands (pumpEventQueue only drains microtasks and races the isolate).
+      for (var i = 0; i < 50; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        if (stateOf(c, arg).messages.any((m) => m.id == 'voice-id-1')) break;
+      }
+      final m =
+          stateOf(c, arg).messages.firstWhere((m) => m.id == 'voice-id-1');
+      expect(m.transferKind, 'audio');
+      expect(m.text, '0:18');
+      expect(m.isSentByMe, isFalse);
+      expect(m.imagePath, isNotNull);
+    });
+
+    test('a fetch with a diverged id is served by the content fallback',
+        () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final tmp = File(
+        '${Directory.systemTemp.path}/cb_fetch_'
+        '${DateTime.now().microsecondsSinceEpoch}.m4a',
+      )..writeAsBytesSync(List.filled(297, 7));
+      addTearDown(() {
+        if (tmp.existsSync()) tmp.deleteSync();
+      });
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(messages: [
+          MessageModel(
+            id: 'own-id',
+            text: '0:18',
+            isSentByMe: true,
+            timestamp: DateTime.now(),
+            imagePath: tmp.path,
+            transferKind: 'audio',
+            delivery: MessageModel.deliveryDelivered,
+          ),
+        ]),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      // The requester's replica carries a DIFFERENT id (the divergence this
+      // repairs): the id lookup misses, the content keys resolve it.
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"fetch","id":"peer-side-id",'
+            '"kind":"audio","caption":"0:18","size":297}',
+        kind: 'text',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      await pumpEventQueue();
+      expect(
+        binding.sentMessages.any((s) => s.contains('"type":"download"')),
+        isTrue,
+        reason: 'the held file must be served despite the id mismatch',
+      );
+
+      // A size that matches nothing still misses (the fallback is exact).
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"fetch","id":"peer-side-id-2",'
+            '"kind":"audio","caption":"0:18","size":298}',
+        kind: 'text',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      await pumpEventQueue();
+      expect(
+        binding.sentMessages.any((s) => s.contains('"type":"fetchMiss"')),
+        isTrue,
+      );
+    });
+
+    test('a sent file announces its id and the row keeps it', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final tmp = File(
+        '${Directory.systemTemp.path}/cb_send_'
+        '${DateTime.now().microsecondsSinceEpoch}.txt',
+      )..writeAsBytesSync(List.filled(64, 3));
+      addTearDown(() {
+        if (tmp.existsSync()) tmp.deleteSync();
+      });
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      final controller = open(c, arg);
+      await pumpEventQueue();
+      binding.deviceKey = 'AA:BB:CC:DD:EE:FF';
+      binding.emitConnection(true);
+      await pumpEventQueue();
+
+      await controller.sendFile(tmp.path, name: 'notes.txt');
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      await pumpEventQueue();
+
+      final anon = binding.sentMessages.firstWhere(
+        (s) => s.startsWith('@@CHATBLUE_FILE@@'),
+      );
+      final decoded =
+          jsonDecode(anon.substring('@@CHATBLUE_FILE@@'.length)) as Map;
+      final id = decoded['id'] as String;
+      expect(id, isNotEmpty,
+          reason: 'the announcement must carry the sender-minted id so the '
+              'receiver adopts it');
+
+      // The transfer's final progress event mints + finalizes the bubble
+      // UNDER the announced id.
+      binding.emitProgress(
+        direction: 'out',
+        current: 64,
+        total: 64,
+        kind: 'bytes',
+      );
+      await pumpEventQueue();
+      final row = stateOf(c, arg).messages.firstWhere((m) => m.id == id);
+      expect(row.transferKind, 'file');
+      expect(row.delivery, MessageModel.deliverySent);
+    });
+
+    test('a fetch request carries the content repair keys', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(messages: [
+          MessageModel(
+            id: 'ph-1',
+            text: '0:18',
+            isSentByMe: false,
+            timestamp: DateTime.now(),
+            remoteMediaSize: 297,
+            transferKind: 'audio',
+          ),
+        ]),
+      );
+      final controller = open(c, arg);
+      await pumpEventQueue();
+      binding.deviceKey = 'AA:BB:CC:DD:EE:FF';
+      binding.emitConnection(true);
+      await pumpEventQueue();
+
+      final placeholder =
+          stateOf(c, arg).messages.firstWhere((m) => m.id == 'ph-1');
+      await controller.downloadMedia(placeholder);
+      await pumpEventQueue();
+
+      final fetch = binding.sentMessages.firstWhere(
+        (s) => s.contains('"type":"fetch"'),
+      );
+      final decoded =
+          jsonDecode(fetch.substring('@@CHATBLUE_SYNC@@'.length)) as Map;
+      expect(decoded['id'], 'ph-1');
+      expect(decoded['kind'], 'audio');
+      expect(decoded['caption'], '0:18');
+      expect(decoded['size'], 297);
+    });
+
+    test('a diverged download fills the LOCAL placeholder by content',
+        () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(messages: [
+          MessageModel(
+            id: 'local-1',
+            text: '0:18',
+            isSentByMe: true,
+            timestamp: DateTime(2026, 10, 10, 22, 54),
+            remoteMediaSize: 297,
+            transferKind: 'audio',
+            delivery: MessageModel.deliveryDelivered,
+          ),
+        ]),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      // The served download carries the PEER's id (the divergence): the
+      // completion must resolve the local placeholder by content — kind +
+      // caption + payload size — and fill IT (local id kept).
+      final payload = base64Encode(List.filled(297, 9));
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"download","messages":[{"id":'
+            '"remote-side-id","text":"0:18","sentByMe":false,'
+            '"timestamp":"2026-10-10T22:54:47.000","type":"audio",'
+            '"bytes":"$payload"}]}',
+        kind: 'text',
+      );
+      for (var i = 0; i < 50; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        final m = stateOf(c, arg).messages.firstWhere((m) => m.id == 'local-1');
+        if (m.imagePath != null) break;
+      }
+      final filled =
+          stateOf(c, arg).messages.firstWhere((m) => m.id == 'local-1');
+      expect(filled.imagePath, isNotNull,
+          reason: 'the fetched bytes must land on the local placeholder even '
+              'though the entry id differs');
+      expect(filled.hasRemoteMedia, isFalse);
+      expect(filled.isTransferring, isFalse);
+      expect(filled.delivery, MessageModel.deliveryDelivered,
+          reason: 'the fetched file must not erase the delivery tick');
+      expect(stateOf(c, arg).messages, hasLength(1),
+          reason: 'no duplicate bubble may appear for the fetched file');
     });
   });
 

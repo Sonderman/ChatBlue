@@ -33,6 +33,8 @@ void main() {
   File legacyFile({required int version, bool withV2Columns = false}) {
     final file = File('${dir.path}/legacy_v$version.sqlite');
     final extra = withV2Columns ? ', origin TEXT, origin_seq INTEGER' : '';
+    // v4 added the message `delivery` column; later versions carry it too.
+    final delivery = version >= 4 ? ', delivery TEXT' : '';
     final raw = sqlite3.open(file.path);
     raw.execute('''
       CREATE TABLE sessions (
@@ -59,7 +61,7 @@ void main() {
         transfer_kind TEXT,
         is_transferring INTEGER NOT NULL DEFAULT 0,
         transfer_current INTEGER,
-        transfer_total INTEGER$extra,
+        transfer_total INTEGER$extra$delivery,
         PRIMARY KEY (id)
       )
     ''');
@@ -146,6 +148,35 @@ void main() {
     await (db.update(db.messages)..where((t) => t.id.equals('m1')))
         .write(const MessagesCompanion(delivery: Value('sent')));
     expect((await db.select(db.messages).getSingle()).delivery, 'sent');
+
+    await db.close();
+  });
+
+  test(
+      'migrates a shipped v4 file in place: data preserved, the '
+      'device_addresses column added', () async {
+    final file = legacyFile(version: 4);
+    final db = AppDatabase(NativeDatabase(file));
+
+    // No rebuild: every pre-existing row survives the upgrade.
+    expect(await db.select(db.sessions).get(), hasLength(1));
+    final rows = await db.select(db.messages).get();
+    expect(rows, hasLength(1));
+    expect(rows.single.content, 'old');
+    expect(rows.single.delivery, isNull);
+
+    // The new column exists and is writable through the generated
+    // companion; migrated rows read back as NULL (the repository seeds the
+    // map from the legacy single address at read time).
+    expect((await db.select(db.sessions).getSingle()).deviceAddresses, isNull);
+    await (db.update(db.sessions)..where((t) => t.id.equals('stale')))
+        .write(const SessionsCompanion(
+      deviceAddresses: Value('{"bt":"AA:BB:CC:DD:EE:FF"}'),
+    ));
+    expect(
+      (await db.select(db.sessions).getSingle()).deviceAddresses,
+      '{"bt":"AA:BB:CC:DD:EE:FF"}',
+    );
 
     await db.close();
   });

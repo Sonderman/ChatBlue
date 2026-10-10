@@ -1,3 +1,4 @@
+import 'package:chatblue/core/services/cache_cleaner.dart';
 import 'package:chatblue/data/db/app_database.dart';
 import 'package:chatblue/data/session_repository.dart';
 import 'package:chatblue/data/settings_repository.dart';
@@ -95,6 +96,13 @@ final appDatabaseProvider = Provider<AppDatabase>(
 /// Sohbet verisi deposu (drift). Tüm chat kodu bu provider üzerinden erişir.
 final sessionRepositoryProvider = Provider<SessionRepository>(
   (ref) => SessionRepository(ref.watch(appDatabaseProvider)),
+);
+
+/// Cache cleaner (Settings → Clear cache): yerel medya kopyalarını siler,
+/// balonları yeniden indirilebilir placeholder'a çevirir, temp dizini
+/// boşaltır. Sohbet geçmişine ve ayarlara dokunmaz.
+final cacheCleanerProvider = Provider<CacheCleaner>(
+  (ref) => CacheCleaner(ref.watch(sessionRepositoryProvider)),
 );
 
 /// Installed package info (versionName + versionCode). The About screen

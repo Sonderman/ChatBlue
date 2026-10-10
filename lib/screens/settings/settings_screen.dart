@@ -3,8 +3,12 @@
 // renders with the proper theme even when shown as a standalone tab.
 
 import 'package:chatblue/config.dart';
+import 'package:chatblue/core/format_utils.dart';
+import 'package:chatblue/core/services/cache_cleaner.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
 import 'package:chatblue/providers/app_providers.dart';
+import 'package:chatblue/screens/chat_ui/connection_notice.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -136,6 +140,40 @@ class SettingsScreen extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 24),
+          _SectionLabel(l10n.storageSection),
+          const SizedBox(height: 8),
+          _settingsCard(
+            scheme: scheme,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.cleaning_services_outlined,
+                        color: scheme.primary),
+                    const SizedBox(width: 10),
+                    Text(
+                      l10n.clearCacheTitle,
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  l10n.clearCacheHint,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                ),
+                const SizedBox(height: 12),
+                const Align(
+                  alignment: Alignment.centerRight,
+                  child: _ClearCacheButton(),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
           _SectionLabel(l10n.aboutSection),
           const SizedBox(height: 8),
           _settingsCard(
@@ -198,6 +236,98 @@ class _SectionLabel extends StatelessWidget {
             fontWeight: FontWeight.w700,
             letterSpacing: 1.1,
           ),
+    );
+  }
+}
+
+/// "Clear cache" action: confirmation dialog → cleanup pass → result card.
+/// Busy while running (the pass can touch many files); the outcome is
+/// reported through the app's standard notice card.
+class _ClearCacheButton extends ConsumerStatefulWidget {
+  const _ClearCacheButton();
+
+  @override
+  ConsumerState<_ClearCacheButton> createState() => _ClearCacheButtonState();
+}
+
+class _ClearCacheButtonState extends ConsumerState<_ClearCacheButton> {
+  bool _busy = false;
+
+  Future<void> _confirmAndClear() async {
+    final l10n = AppLocalizations.of(context)!;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.clearCacheConfirmTitle),
+        content: Text(l10n.clearCacheConfirmBody),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(l10n.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(l10n.clearAction),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _busy = true);
+    CacheClearResult? result;
+    try {
+      result = await ref.read(cacheCleanerProvider).clearCache();
+    } catch (e) {
+      if (kDebugMode) debugPrint('Clear cache failed: $e');
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+
+    if (result == null) {
+      ConnectionNotice.show(
+        title: l10n.clearCacheFailedTitle,
+        message: l10n.clearCacheFailedMessage,
+        icon: Icons.error_outline,
+        accent: Colors.redAccent,
+      );
+      return;
+    }
+
+    // The files just deleted must not stay cached as decoded bitmaps.
+    PaintingBinding.instance.imageCache
+      ..clear()
+      ..clearLiveImages();
+
+    final freed = result.freedBytes;
+    ConnectionNotice.show(
+      title: l10n.clearCacheDoneTitle,
+      message: freed > 0
+          ? l10n.clearCacheFreedMessage(formatFileSize(freed))
+          : l10n.clearCacheNothingMessage,
+      icon: Icons.check_circle,
+      accent: Colors.green,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final scheme = Theme.of(context).colorScheme;
+    return FilledButton.tonalIcon(
+      onPressed: _busy ? null : _confirmAndClear,
+      style: FilledButton.styleFrom(foregroundColor: scheme.error),
+      icon: _busy
+          ? SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: scheme.error,
+              ),
+            )
+          : const Icon(Icons.delete_sweep_outlined, size: 18),
+      label: Text(l10n.clearAction),
     );
   }
 }

@@ -27,10 +27,18 @@ void main() {
       service = FakeBtService();
     });
 
-    ProviderContainer container() => ProviderContainer(
+    ProviderContainer container({
+      Duration? sessionScanWindow,
+      Duration? sessionScanPoll,
+    }) =>
+        ProviderContainer(
           overrides: [
             btTransportProvider.overrideWith(
-              () => BtTransportNotifier(service: service),
+              () => BtTransportNotifier(
+                service: service,
+                sessionScanWindow: sessionScanWindow,
+                sessionScanPoll: sessionScanPoll,
+              ),
             ),
             appLocalizationsProvider.overrideWithValue(AppLocalizationsEn()),
           ],
@@ -555,6 +563,106 @@ void main() {
 
       service.liveRssi = null; // platform without a live read
       expect(await notifier.getLiveRssi(), isNull);
+    });
+
+    test(
+        'session reconnect heals a dead stored address via the scan match '
+        '(the per-transport map\'s bootstrap)', () async {
+      final c = container(
+        sessionScanWindow: const Duration(seconds: 3),
+        sessionScanPoll: const Duration(milliseconds: 50),
+      );
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(btTransportProvider.notifier);
+      // The stored value is a Wi‑Fi Direct p2p MAC (learned over the other
+      // transport): it has a MAC's shape but native rejects it — the fast
+      // dial dies instantly and the flow falls back to a scan + match.
+      final future = notifier.connectToSessionPeer(
+        address: '36:8a:7b:b4:5b:9e',
+        name: 'Galaxy J7 Prime',
+      );
+      await pumpEventQueue();
+      expect(service.connectAddresses, ['36:8a:7b:b4:5b:9e']);
+      service.onSocketError?.call(
+        'Invalid Bluetooth address: 36:8a:7b:b4:5b:9e',
+      );
+      await pumpEventQueue();
+
+      // The fallback scan runs; the peer surfaces with its REAL MAC.
+      service.onScanStarted?.call();
+      service.onDeviceFound?.call(
+        BtDeviceInfo(address: '34:8A:7B:B4:5B:9D', name: 'Galaxy J7 Prime'),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(service.connectAddresses,
+          ['36:8a:7b:b4:5b:9e', '34:8A:7B:B4:5B:9D'],
+          reason: 'the scan match must dial the LIVE address, not the '
+              'rejected stored one');
+
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: '34:8A:7B:B4:5B:9D', name: 'Galaxy J7 Prime'),
+      );
+      expect(await future, isTrue);
+    });
+
+    test('session reconnect scans by name when no stored address is known',
+        () async {
+      final c = container(
+        sessionScanWindow: const Duration(seconds: 3),
+        sessionScanPoll: const Duration(milliseconds: 50),
+      );
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(btTransportProvider.notifier);
+      final future = notifier.connectToSessionPeer(
+        address: null,
+        name: 'Galaxy J7 Prime',
+      );
+      await pumpEventQueue();
+      expect(service.connectAddresses, isEmpty,
+          reason: 'nothing dialable was known — no blind dial');
+
+      service.onScanStarted?.call();
+      // Noise first: only the normalized name match may win.
+      service.onDeviceFound?.call(
+        BtDeviceInfo(address: '11:11:11:11:11:11', name: 'TV'),
+      );
+      service.onDeviceFound?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'galaxy j7 prime'),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(service.connectAddresses, ['AA:BB:CC:DD:EE:FF']);
+
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'galaxy j7 prime'),
+      );
+      expect(await future, isTrue);
+    });
+
+    test('the session scan is bounded: no match reports the generic failure',
+        () async {
+      final c = container(
+        sessionScanWindow: const Duration(milliseconds: 350),
+        sessionScanPoll: const Duration(milliseconds: 50),
+      );
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(btTransportProvider.notifier);
+      final ok = await notifier.connectToSessionPeer(
+        address: null,
+        name: 'Ghost',
+      );
+      expect(ok, isFalse);
+      expect(
+        c.read(btTransportProvider).lastConnectError,
+        AppLocalizationsEn().couldNotConnectMessage,
+      );
+      expect(c.read(btTransportProvider).isScanning, isFalse,
+          reason: 'the fallback scan must stop itself');
     });
   });
 

@@ -1,5 +1,6 @@
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
+import 'package:chatblue/l10n/app_localizations_en.dart';
 import 'package:chatblue/screens/chat_ui/chat_ui.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -65,5 +66,37 @@ void main() {
       contains('Delivered'),
     );
     handle.dispose();
+  });
+
+  testWidgets('a size-less deferred media row renders the bare download hint',
+      (tester) async {
+    // The dead-path repair sentinel: unknown size (0) must not read "0 B".
+    await pumpBubble(
+      tester,
+      MessageModel(
+        id: 'a1',
+        text: '0:18',
+        isSentByMe: false,
+        timestamp: DateTime(2026, 10, 10, 22, 54),
+        remoteMediaSize: 0,
+        transferKind: 'audio',
+      ),
+    );
+    expect(find.text(AppLocalizationsEn().downloadMediaHint), findsOneWidget);
+    expect(find.textContaining('0 B'), findsNothing);
+
+    // A known size keeps the sized caption.
+    await pumpBubble(
+      tester,
+      MessageModel(
+        id: 'a2',
+        text: '0:18',
+        isSentByMe: false,
+        timestamp: DateTime(2026, 10, 10, 22, 54),
+        remoteMediaSize: 297,
+        transferKind: 'audio',
+      ),
+    );
+    expect(find.textContaining('297 B •'), findsOneWidget);
   });
 }

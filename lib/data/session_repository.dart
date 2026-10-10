@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/data/db/app_database.dart';
@@ -184,6 +186,15 @@ class SessionRepository {
     return (await query.get()).isNotEmpty;
   }
 
+  /// Every message across all sessions that still references a local media
+  /// file — the cache cleaner's work list (Settings → Clear cache).
+  Future<List<MessageModel>> messagesWithLocalMedia() async {
+    final rows = await (_db.select(_db.messages)
+          ..where((t) => t.imagePath.isNotNull()))
+        .get();
+    return rows.map(_messageFromRow).toList();
+  }
+
   // --------------------------------------------------------------- writes
 
   /// Persists the full session state (row + message list) in one
@@ -257,6 +268,25 @@ class SessionRepository {
         .go();
   }
 
+  /// Turns media messages into deferred-download placeholders: drops the
+  /// local file reference, records the byte size so the bubble can re-fetch
+  /// the file from the peer, and clears any stale in-transfer flag. One
+  /// transaction for the batch — the cache cleaner resets every local
+  /// media row in a single pass.
+  Future<void> markMediaAsRemote(List<({String id, int size})> resets) =>
+      _db.transaction(() async {
+        for (final r in resets) {
+          await (_db.update(_db.messages)..where((t) => t.id.equals(r.id)))
+              .write(
+            MessagesCompanion(
+              imagePath: const Value<String?>(null),
+              remoteMediaSize: Value(r.size),
+              isTransferring: const Value(false),
+            ),
+          );
+        }
+      });
+
   /// Utility parity with the old service (debug/QA resets).
   Future<void> clearAllChatSessions() async {
     await _db.delete(_db.messages).go();
@@ -273,6 +303,9 @@ class SessionRepository {
         transport: Value(s.transport),
         deviceName: Value(s.device['name']?.toString()),
         deviceAddress: Value(s.device['address']?.toString()),
+        deviceAddresses: Value(
+          s.deviceAddresses.isEmpty ? null : jsonEncode(s.deviceAddresses),
+        ),
       );
 
   MessagesCompanion _messageCompanion(
@@ -310,7 +343,37 @@ class SessionRepository {
           'address': row.deviceAddress,
         },
         transport: row.transport,
+        deviceAddresses: _decodeAddresses(row),
       );
+
+  /// Per-transport addresses of a session row: the stored JSON map, with
+  /// the legacy single [SessionRow.deviceAddress] seeded as the entry for
+  /// [SessionRow.transport] when missing (rows written before the column
+  /// existed — and the steady-state mirror the write path keeps).
+  static Map<String, String> _decodeAddresses(SessionRow row) {
+    final map = <String, String>{};
+    final raw = row.deviceAddresses;
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          for (final e in decoded.entries) {
+            final v = e.value;
+            if (v is String && v.isNotEmpty) map[e.key.toString()] = v;
+          }
+        }
+      } catch (_) {
+        // Malformed JSON (hand-edited file): fall through to the legacy
+        // seed — one bad row must not break every read.
+      }
+    }
+    final kind = row.transport;
+    final legacy = row.deviceAddress;
+    if (kind != null && kind.isNotEmpty && legacy != null && legacy.isNotEmpty) {
+      map.putIfAbsent(kind, () => legacy);
+    }
+    return map;
+  }
 
   MessageModel _messageFromRow(MessageRow row) => MessageModel(
         id: row.id,

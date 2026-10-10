@@ -1145,7 +1145,14 @@ class ChatMessageBubble extends StatelessWidget {
                 Icon(Icons.download_rounded, size: 16, color: iconColor),
               const SizedBox(width: 6),
               Text(
-                busy ? l10n.downloadingLabel : '${_formatMediaSize(size)} • ${l10n.downloadMediaHint}',
+                busy
+                    ? l10n.downloadingLabel
+                    // A dead-path repair row carries an UNKNOWN size (0
+                    // sentinel): show the bare tap hint instead of a
+                    // misleading "0 B".
+                    : (size > 0
+                        ? '${_formatMediaSize(size)} • ${l10n.downloadMediaHint}'
+                        : l10n.downloadMediaHint),
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
@@ -1164,6 +1171,45 @@ class ChatMessageBubble extends StatelessWidget {
   /// Compact human size for the download placeholder ("2.4 MB").
   String _formatMediaSize(int bytes) => formatFileSize(bytes);
 
+  /// Fallback for an image bubble whose file no longer exists: the file
+  /// can vanish under a live bubble (system cleaners, the cache-cleanup
+  /// pass), and painting that through the codec would throw and log
+  /// "Exception caught by image resource service". A calm placeholder is
+  /// the honest rendering — the DB row itself is a re-downloadable
+  /// placeholder after the cleanup pass, so this only shows for files
+  /// deleted outside the app.
+  Widget _missingImagePlaceholder(BuildContext context, ChatPalette p, bool mine) {
+    final l10n = AppLocalizations.of(context)!;
+    return Container(
+      width: 180,
+      height: 110,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: mine ? Colors.white.withValues(alpha: 0.12) : p.bubbleIn,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.broken_image_outlined,
+            size: 26,
+            color: mine ? Colors.white.withValues(alpha: 0.8) : p.muted,
+          ),
+          const SizedBox(height: 6),
+          Text(
+            l10n.mediaUnavailableLabel,
+            style: TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+              color: mine ? Colors.white.withValues(alpha: 0.85) : p.muted,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Image thumbnail bubble with progress bar while transferring.
   Widget _imageBubble(BuildContext context, ChatPalette p, bool mine, bool showProgress) {
     return GestureDetector(
@@ -1180,7 +1226,17 @@ class ChatMessageBubble extends StatelessWidget {
             borderRadius: BorderRadius.circular(14),
             child: ConstrainedBox(
               constraints: BoxConstraints(maxWidth: 60.w, maxHeight: 32.h),
-              child: Image.file(File(message.imagePath!), fit: BoxFit.cover),
+              child: Image.file(
+                File(message.imagePath!),
+                fit: BoxFit.cover,
+                // The file can vanish under a live bubble (system cleaners,
+                // the cache-cleanup pass): degrade to an explicit
+                // placeholder — without this the codec throws and the
+                // framework logs "Exception caught by image resource
+                // service" while the bubble renders blank.
+                errorBuilder: (_, _, _) =>
+                    _missingImagePlaceholder(context, p, mine),
+              ),
             ),
           ),
           if (showProgress) ...[
@@ -1990,7 +2046,30 @@ class ChatImagePreviewScreen extends StatelessWidget {
         ],
       ),
       body: Center(
-        child: InteractiveViewer(child: Image.file(File(path), fit: BoxFit.contain)),
+        child: InteractiveViewer(
+          child: Image.file(
+            File(path),
+            fit: BoxFit.contain,
+            // The file can be deleted while this route is open (system
+            // cleaners, the cache-cleanup pass): show an explicit message
+            // instead of the codec exception.
+            errorBuilder: (_, _, _) => Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.broken_image_outlined, size: 44, color: p.muted),
+                const SizedBox(height: 10),
+                Text(
+                  l10n.mediaUnavailableLabel,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: p.messageText.withValues(alpha: 0.85),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

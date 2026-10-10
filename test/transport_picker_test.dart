@@ -56,7 +56,10 @@ void main() {
         ],
       );
 
-  ChatSessionModel session() => ChatSessionModel(
+  ChatSessionModel session({
+    Map<String, String> deviceAddresses = const {},
+  }) =>
+      ChatSessionModel(
         id: 'sess-1',
         name: 'PeerOne',
         createdAt: DateTime.now(),
@@ -64,6 +67,7 @@ void main() {
         messages: const [],
         device: const {'name': 'PeerOne', 'address': 'AA:BB:CC:DD:EE:FF'},
         transport: ChatSessionModel.transportBluetooth,
+        deviceAddresses: deviceAddresses,
       );
 
   Future<ChatController> pumpChat(
@@ -182,8 +186,12 @@ void main() {
     wfdBinding.holdConnect!.complete();
     await tester.pumpAndSettle();
 
+    // No Wi‑Fi Direct address was ever learned for this peer: the target
+    // transport receives NO address and discovers the peer by name instead
+    // (the old code handed over the single stored address — a value of the
+    // OTHER transport's scheme, which a Bluetooth dial then rejected).
     expect(wfdBinding.connectCalls, [
-      (address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      (address: null, name: 'PeerOne'),
     ]);
     expect(btBinding.connectCalls, isEmpty);
     // The fake reports no link and nothing pending: the failure notice.
@@ -191,6 +199,32 @@ void main() {
 
     // Cancel the notice's auto-dismiss timer inside the body: the pending
     // timer invariant runs before tearDown.
+    ConnectionNotice.dismiss();
+    await tester.pump();
+  });
+
+  testWidgets(
+      'a known per-transport address is handed to the target transport',
+      (tester) async {
+    final c = container();
+    addTearDown(c.dispose);
+    final arg = ChatOpenArg(
+      transport: ChatSessionModel.transportBluetooth,
+      session: session(deviceAddresses: const {'wfd': '11:22:33:44:55:66'}),
+    );
+    await pumpChat(tester, c, arg);
+
+    await openPicker(tester);
+    await tester.tap(find.text('Wi-Fi'));
+    await tester.pumpAndSettle();
+
+    // The learned Wi‑Fi Direct address rides to the target transport — no
+    // discovery needed for it.
+    expect(wfdBinding.connectCalls, [
+      (address: '11:22:33:44:55:66', name: 'PeerOne'),
+    ]);
+
+    // Cancel the notice's auto-dismiss timer inside the body.
     ConnectionNotice.dismiss();
     await tester.pump();
   });

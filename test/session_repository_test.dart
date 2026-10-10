@@ -2,6 +2,7 @@ import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/data/db/app_database.dart';
 import 'package:chatblue/data/session_repository.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -51,6 +52,7 @@ void main() {
     List<MessageModel>? messages,
     String? transport = 'bt',
     Map<String, dynamic>? device,
+    Map<String, String> deviceAddresses = const {},
   }) =>
       ChatSessionModel(
         id: id,
@@ -60,6 +62,7 @@ void main() {
         messages: messages ?? [message()],
         device: device ?? {'name': name, 'address': 'AA:BB:CC:DD:EE:FF'},
         transport: transport,
+        deviceAddresses: deviceAddresses,
       );
 
   test('save -> load round-trips every message field', () async {
@@ -375,5 +378,30 @@ void main() {
     expect(meta.device['address'], 'AA:BB:CC:DD:EE:FF');
     expect(meta.messages, isEmpty);
     expect(await repo.loadSessionMeta('missing'), isNull);
+  });
+
+  test('per-transport addresses round-trip; legacy rows seed the map from '
+      'the single stored address', () async {
+    await repo.saveChatSession(session(
+      transport: 'wfd',
+      device: const {'name': 'Galaxy J7 Prime', 'address': '36:8a:7b:b4:5b:9e'},
+      deviceAddresses: const {
+        'wfd': '36:8a:7b:b4:5b:9e',
+        'bt': '34:8A:7B:B4:5B:9D',
+      },
+    ));
+
+    final loaded = await repo.loadChatSession('peer-1');
+    expect(loaded!.addressFor('bt'), '34:8A:7B:B4:5B:9D');
+    expect(loaded.addressFor('wfd'), '36:8a:7b:b4:5b:9e');
+
+    // A row written BEFORE the column existed (v4 format): the single
+    // stored address serves as the entry for the session's transport.
+    await (db.update(db.sessions)..where((t) => t.id.equals('peer-1')))
+        .write(const SessionsCompanion(deviceAddresses: Value<String?>(null)));
+    final legacy = await repo.loadChatSession('peer-1');
+    expect(legacy!.addressFor('wfd'), '36:8a:7b:b4:5b:9e',
+        reason: 'the legacy single address seeds its transport entry');
+    expect(legacy.addressFor('bt'), isNull);
   });
 }

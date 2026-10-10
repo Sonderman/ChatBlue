@@ -36,6 +36,14 @@ class Sessions extends Table {
 
   TextColumn get deviceAddress => text().nullable()();
 
+  /// Per-transport peer addresses as a JSON map (e.g.
+  /// {"bt":"34:8A:7B:B4:5B:9D","wfd":"36:8a:7b:b4:5b:9e"}): the same peer
+  /// has a different address per radio, and the chat's transport picker
+  /// dials the target transport with ITS entry. Null on rows written before
+  /// the column existed — the single [deviceAddress] then serves as the
+  /// entry for [transport] (see SessionRepository._decodeAddresses).
+  TextColumn get deviceAddresses => text().nullable()();
+
   @override
   Set<Column> get primaryKey => {id};
 }

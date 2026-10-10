@@ -13,21 +13,24 @@ part 'app_database.g.dart';
 /// its one-time importers were removed in P3). The schema mirrors the old
 /// Hive layout (see tables.dart).
 ///
-/// [schemaVersion] 4: v3 is the first SHIPPED schema; v4 adds the messages
-/// `delivery` column (outgoing delivery ticks). Every version from 3 on
-/// migrates stepwise and PRESERVES data — a device upgrade must never lose
-/// chat history. Versions 1–2 only ever existed on test devices via the
-/// abandoned `migration/riverpod-drift-nearby` experiment (v2 added the
-/// sync-identity columns); a pre-existing file at those versions is REBUILT
-/// from scratch when opened instead — pre-release contents are disposable
-/// and the rebuild clears `app_settings`.
+/// [schemaVersion] 5: v3 is the first SHIPPED schema; v4 adds the messages
+/// `delivery` column (outgoing delivery ticks); v5 adds the sessions
+/// `device_addresses` column (per-transport peer addresses — Bluetooth MAC
+/// / Wi‑Fi Direct p2p address — so the chat's transport picker can dial the
+/// chosen channel directly). Every version from 3 on migrates stepwise and
+/// PRESERVES data — a device upgrade must never lose chat history. Versions
+/// 1–2 only ever existed on test devices via the abandoned
+/// `migration/riverpod-drift-nearby` experiment (v2 added the sync-identity
+/// columns); a pre-existing file at those versions is REBUILT from scratch
+/// when opened instead — pre-release contents are disposable and the
+/// rebuild clears `app_settings`.
 @DriftDatabase(tables: [Sessions, Messages, AppSettings])
 class AppDatabase extends _$AppDatabase {
   AppDatabase(super.executor);
 
   /// Bump together with a migration step below on every schema change.
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -39,11 +42,17 @@ class AppDatabase extends _$AppDatabase {
         // upgrades and downgrades alike (there is no separate handler).
         onUpgrade: (m, from, to) async {
           // Shipped schemas (v3+) migrate STEPWISE, preserving all data:
-          // 3 → 4 adds the message `delivery` column. Never rebuild here —
-          // a shipped file carries real conversations.
+          // 3 → 4 adds the message `delivery` column; 4 → 5 adds the
+          // sessions `device_addresses` column (existing rows keep their
+          // single address — the repository treats it as the entry for the
+          // session's transport). Never rebuild here — a shipped file
+          // carries real conversations.
           if (from >= 3) {
             if (from < 4) {
               await m.addColumn(messages, messages.delivery);
+            }
+            if (from < 5) {
+              await m.addColumn(sessions, sessions.deviceAddresses);
             }
             return;
           }

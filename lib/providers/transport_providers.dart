@@ -35,6 +35,8 @@ String transportKeyToL10n(
       return l10n.connectionDeclinedByYouMessage;
     case 'noDeviceAddressMessage':
       return l10n.noDeviceAddressMessage;
+    case 'couldNotConnectMessage':
+      return l10n.couldNotConnectMessage;
     case 'invalidBtAddressMessage':
       return l10n.invalidBtAddressMessage;
     case 'wifiOffTitle':
@@ -127,9 +129,30 @@ class BtTransportState {
 class BtTransportNotifier extends Notifier<BtTransportState> {
   /// Test hook: inject a fake service instead of the real platform-channel
   /// backed one. Null in production (the real service is created in build).
-  BtTransportNotifier({BtClassicService? service}) : _serviceOverride = service;
+  /// [sessionScanWindow] bounds the session-reconnect scan fallback and
+  /// [sessionScanPoll] is its match-poll cadence (tests shrink both).
+  BtTransportNotifier({
+    BtClassicService? service,
+    Duration? sessionScanWindow,
+    Duration? sessionScanPoll,
+  })  : _serviceOverride = service,
+        _sessionScanWindow = sessionScanWindow ?? const Duration(seconds: 12),
+        _sessionScanPoll = sessionScanPoll ?? const Duration(milliseconds: 400);
 
   final BtClassicService? _serviceOverride;
+  final Duration _sessionScanWindow;
+  final Duration _sessionScanPoll;
+
+  /// Dial generation counter: bumped by [cancelPendingConnect] so a
+  /// cancelled session reconnect (the fast dial's wait, or the scan
+  /// fallback running behind it) aborts instead of dialing behind the
+  /// user's back.
+  int _dialEpoch = 0;
+
+  /// During a session reconnect the scan-error CARD is suppressed: its
+  /// reason reaches the caller through lastConnectError instead (the same
+  /// suppression the Wi‑Fi Direct session search uses).
+  bool _suppressScanErrors = false;
 
   /// Context'siz çeviri: güncel locale'in l10n kaynağından okur.
   String _t(String key, {Map<String, String>? params}) =>
@@ -259,6 +282,13 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
       }
       _clearScanTimers();
       state = state.copyWith(isScanning: false, scanResults: const []);
+      if (_suppressScanErrors) {
+        // A session reconnect owns the outcome: its reason reaches the
+        // caller through lastConnectError instead of a scan-error card
+        // (the same suppression the Wi‑Fi Direct session search uses).
+        state = state.copyWith(lastConnectError: message);
+        return;
+      }
       _showNotice('scanErrorTitle', message, icon: Icons.error_outline);
     };
 
@@ -706,16 +736,99 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     }
   }
 
-  Future<bool> connectToSessionPeer({required String? address, String? name}) {
-    if (address == null || address.isEmpty) {
-      state = state.copyWith(
-        lastConnectError: _t('noDeviceAddressMessage'),
-        clearLastConnectError: false,
-      );
-      return Future<bool>.value(false);
+  Future<bool> connectToSessionPeer(
+      {required String? address, String? name}) async {
+    final stored = (address ?? '').trim();
+    final target = (name ?? '').trim();
+    if (stored.isEmpty && target.isEmpty) {
+      state = state.copyWith(lastConnectError: _t('noDeviceAddressMessage'));
+      return false;
     }
-    return connectToPeer(address);
+    // Fast path: a stored address of Bluetooth form (same-transport era —
+    // or the per-transport store left by an earlier Bluetooth link) dials
+    // directly; a known MAC needs no discovery — the peer's accept loop is
+    // enough even when the device is not discoverable at all.
+    if (stored.isNotEmpty && _btAddressPattern.hasMatch(stored)) {
+      final epoch = _dialEpoch;
+      final ok = await connectToPeer(stored);
+      if (ok || state.isConnected || isAwaitingAcceptance) return ok;
+      if (_dialEpoch != epoch) return false; // cancelled by the user
+      // Dead dial. The stored address can be stale — or belong to ANOTHER
+      // transport: a Wi‑Fi Direct p2p MAC has a MAC's shape yet is not
+      // dialable over Bluetooth at all, which is exactly what a
+      // cross-transport pick used to hand over before the per-transport
+      // address map. Both heal the same way the Wi‑Fi Direct / Nearby
+      // session reconnects do: find the peer by NAME in a scan and dial
+      // the live address it yields.
+      if (state.lastConnectError == _t('connectionDeclinedMessage')) {
+        // A real decline is the peer's decision — never re-dial behind it.
+        return false;
+      }
+      if (target.isEmpty) return false;
+      return _scanAndDialByName(target);
+    }
+    // No usable stored address (the first cross-transport pick, before any
+    // Bluetooth link taught us the peer's MAC): the scan is the only
+    // source of a dialable address.
+    if (target.isEmpty) {
+      state = state.copyWith(lastConnectError: _t('noDeviceAddressMessage'));
+      return false;
+    }
+    return _scanAndDialByName(target);
   }
+
+  /// Discovery fallback of the session reconnect: scans (the Bluetooth list
+  /// fills near-instantly) and dials the peer whose broadcast name matches
+  /// [name] — the Bluetooth counterpart of the Wi‑Fi Direct / Nearby
+  /// session searches. Bounded by [_sessionScanWindow] so the connecting
+  /// panel can never hang; a user cancel (cancelPendingConnect) aborts it
+  /// through the dial epoch.
+  Future<bool> _scanAndDialByName(String name) async {
+    final target = _normalizeScanName(name);
+    if (target.isEmpty) return false;
+    final epoch = _dialEpoch;
+    // Drop the previous attempt's failure reason: it described a dial that
+    // is no longer the attempt in flight.
+    state = state.copyWith(clearLastConnectError: true);
+    _suppressScanErrors = true;
+    try {
+      await startScan();
+      final deadline = DateTime.now().add(_sessionScanWindow);
+      while (DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(_sessionScanPoll);
+        if (_dialEpoch != epoch) return false; // cancelled meanwhile
+        if (state.isConnected) return true;
+        if (!state.isScanning && state.lastConnectError != null) {
+          // The scan itself died (permission/OEM refusal): its reason is
+          // the outcome — waiting out the window adds nothing.
+          return false;
+        }
+        for (final d in state.scanResults) {
+          if (_normalizeScanName(d.name ?? '') != target) continue;
+          await stopScan();
+          if (_dialEpoch != epoch) return false;
+          if (kDebugMode && showDebugLogs) {
+            debugPrint('Session scan matched "$name" at ${d.address}');
+          }
+          return await connectToPeer(d.address);
+        }
+      }
+      state = state.copyWith(
+        lastConnectError:
+            state.lastConnectError ?? _t('couldNotConnectMessage'),
+      );
+      return false;
+    } finally {
+      _suppressScanErrors = false;
+      if (state.isScanning) await stopScan();
+    }
+  }
+
+  /// Name key for the session-scan match: case- and punctuation-insensitive
+  /// ("Galaxy J7 Prime" ≡ "galaxyj7prime") — the same peer-merge name
+  /// normalization the chat controller uses.
+  static String _normalizeScanName(String value) =>
+      value.toLowerCase().replaceAll(RegExp('[^a-z0-9]'), '');
 
   Future<void> disconnectFromDevice() async {
     if (state.isConnected) {
@@ -742,6 +855,10 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   /// wait resolves as a cancellation — screens skip the failure snackbar)
   /// and closes the attempt so a late accept cannot land a link.
   Future<void> cancelPendingConnect() async {
+    // Aborts any in-flight session reconnect: the dial wait below is
+    // settled, and a scan fallback running behind it checks the epoch
+    // before dialing the match it found.
+    _dialEpoch++;
     _settleDial();
     // A self-cancel is NOT a peer decline: drop the awaiting-acceptance
     // marker BEFORE our own disconnect — the socket-disconnect handler
