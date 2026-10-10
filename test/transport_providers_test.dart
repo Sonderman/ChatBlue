@@ -252,6 +252,35 @@ void main() {
     });
 
     test(
+        'self-cancel while awaiting acceptance stays silent — the disconnect '
+        'it triggers must not read as a peer decline', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(btTransportProvider.notifier);
+      final connectFuture = notifier.connectToPeer('AA:BB:CC:DD:EE:FF');
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      );
+      expect(await connectFuture, isTrue);
+      expect(notifier.isAwaitingAcceptance, isTrue);
+
+      // The DIALER cancels its own pending request: the native disconnect
+      // that follows emits the usual 'manual' event — OUR teardown, not the
+      // peer's answer.
+      await notifier.cancelPendingConnect();
+      expect(service.disconnectCalls, 1);
+      service.onSocketDisconnected?.call('manual');
+      await pumpEventQueue();
+
+      expect(notifier.isAwaitingAcceptance, isFalse);
+      expect(c.read(btTransportProvider).lastConnectError, isNull,
+          reason: 'the self-cancel masqueraded as a peer decline — the '
+              'cancelling device would show the "peer declined" notice');
+    });
+
+    test(
         'a dropped link clears the bound device: the next dial binds ITS '
         'peer, never the previous one (device-reported: Redmi→J7 opened the '
         'POCO chat)', () async {
@@ -594,6 +623,36 @@ void main() {
         WdPeerInfo(deviceAddress: 'p2p-1', deviceName: 'Redmi'),
       );
       expect(notifier.isAwaitingAcceptance, isTrue);
+    });
+
+    test(
+        'self-cancel while awaiting acceptance stays silent — the disconnect '
+        'it triggers must not read as a peer decline', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(wdTransportProvider.notifier);
+      service.wifiEnabled = true;
+      final connectFuture = notifier.connectToPeer('p2p-1');
+      service.onSocketConnected?.call(
+        WdPeerInfo(deviceAddress: 'p2p-1', deviceName: 'Redmi'),
+      );
+      expect(await connectFuture, isTrue);
+      expect(notifier.isAwaitingAcceptance, isTrue);
+
+      // The DIALER cancels its own pending request: the native disconnect
+      // that follows emits the usual 'manual' event — OUR teardown, not the
+      // peer's answer.
+      await notifier.cancelPendingConnect();
+      expect(service.disconnectCalls, 1);
+      service.onSocketDisconnected?.call('manual');
+      await pumpEventQueue();
+
+      expect(notifier.isAwaitingAcceptance, isFalse);
+      expect(c.read(wdTransportProvider).lastConnectError, isNull,
+          reason: 'the self-cancel masqueraded as a peer decline — the '
+              'cancelling device would show the "peer declined" notice');
     });
 
     test(

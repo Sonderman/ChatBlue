@@ -127,6 +127,8 @@ class NearbyPlatformChannel {
   /// Socket events yield:
   /// - { 'event': 'initiated', 'data': {endpointId, endpointName, uid, incoming, authDigits} }
   /// - { 'event': 'connected', 'data': {endpointId, endpointName, uid} }
+  /// - { 'event': 'bandwidth', 'data': {quality: int} } (0=unknown, 1=low,
+  ///   2=medium, 3=high — GMS BandwidthInfo.Quality)
   /// - { 'event': 'rejected', 'data': {endpointId} }
   /// - { 'event': 'disconnected', 'reason': String }
   /// - { 'event': 'data', 'kind': 'text'|'bytes', 'bytes': Uint8List, 'string': String }

@@ -687,6 +687,13 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   /// and closes the attempt so a late accept cannot land a link.
   Future<void> cancelPendingConnect() async {
     _settleDial();
+    // A self-cancel is NOT a peer decline: drop the awaiting-acceptance
+    // marker BEFORE our own disconnect — the socket-disconnect handler
+    // reads `_pendingAccept` as "the peer answered" and would otherwise
+    // raise the wrong "peer declined" notice on the cancelling device
+    // (device-reported).
+    _pendingAccept = false;
+    _pendingRemote = null;
     final c = _pendingConnectCompleter;
     _pendingConnectCompleter = null;
     await _service.disconnect();
@@ -1667,6 +1674,13 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   /// and closes the attempt so a late accept cannot land a link.
   Future<void> cancelPendingConnect() async {
     _settleDial();
+    // A self-cancel is NOT a peer decline: drop the awaiting-acceptance
+    // marker BEFORE our own disconnect — the socket-disconnect handler
+    // reads `_pendingAccept` as "the peer answered" and would otherwise
+    // raise the wrong "peer declined" notice on the cancelling device
+    // (device-reported).
+    _pendingAccept = false;
+    _pendingRemote = null;
     final c = _pendingConnectCompleter;
     _pendingConnectCompleter = null;
     await _service.disconnect();

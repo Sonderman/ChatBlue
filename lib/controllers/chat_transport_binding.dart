@@ -29,6 +29,11 @@ abstract interface class ChatTransportBinding {
   /// transport/platform exposes none.
   Future<int?> getLiveRssi();
 
+  /// Coarse live link-quality code for the quality panel (Nearby
+  /// Connections only — GMS bandwidth-change events; null while
+  /// disconnected or on transports whose platform exposes no such metric).
+  int? get linkQuality;
+
   String get transportType;
   bool get isAwaitingAcceptance;
   String? get lastConnectError;
@@ -151,6 +156,9 @@ class _BtChatBinding extends _BindingBase implements ChatTransportBinding {
       _ref.read(btTransportProvider.notifier).getLiveRssi();
 
   @override
+  int? get linkQuality => null;
+
+  @override
   String get transportType =>
       _ref.read(btTransportProvider.notifier).transportType;
 
@@ -254,6 +262,9 @@ class _WdChatBinding extends _BindingBase implements ChatTransportBinding {
       _ref.read(wdTransportProvider.notifier).getLiveRssi();
 
   @override
+  int? get linkQuality => null;
+
+  @override
   String get transportType =>
       _ref.read(wdTransportProvider.notifier).transportType;
 
@@ -351,6 +362,10 @@ class _NearbyChatBinding extends _BindingBase implements ChatTransportBinding {
 
   @override
   Future<int?> getLiveRssi() async => null;
+
+  @override
+  int? get linkQuality =>
+      _ref.read(nearbyTransportProvider.notifier).linkQuality;
 
   @override
   String get transportType =>

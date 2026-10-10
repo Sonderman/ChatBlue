@@ -475,10 +475,11 @@ class ChatSyncBanner extends StatelessWidget {
 }
 
 /// Collapsible connection-quality strip: link type + state, uptime, live
-/// traffic counters/rate and — on Bluetooth — the dial-time scan RSSI.
-/// Visibility lives in [ChatState.linkPanelVisible] (the app bar icon
-/// toggles it; the preference is persisted); when hidden it renders
-/// nothing and its 1 s ticker is stopped.
+/// traffic counters/rate, the dial-time scan RSSI (Bluetooth) and the GMS
+/// bandwidth-quality reading (Nearby). Visibility lives in
+/// [ChatState.linkPanelVisible] (the app bar icon toggles it; the
+/// preference is persisted); when hidden it renders nothing and its 1 s
+/// ticker is stopped.
 class ChatLinkPanel extends StatefulWidget {
   const ChatLinkPanel({super.key, required this.state, required this.controller});
 
@@ -549,6 +550,21 @@ class _ChatLinkPanelState extends State<ChatLinkPanel> {
     }
   }
 
+  /// GMS bandwidth-quality code → localized word (codes verified against
+  /// play-services-nearby 19.5.1: 0 unknown, 1 low, 2 medium, 3 high).
+  String _qualityWord(AppLocalizations l10n, int quality) {
+    switch (quality) {
+      case 3:
+        return l10n.linkQualityHigh;
+      case 2:
+        return l10n.linkQualityMedium;
+      case 1:
+        return l10n.linkQualityLow;
+      default:
+        return l10n.linkQualityUnknown;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (!widget.state.linkPanelVisible) return const SizedBox.shrink();
@@ -576,6 +592,14 @@ class _ChatLinkPanelState extends State<ChatLinkPanel> {
                 : peerRssi == null
                     ? null
                     : '${l10n.signalLabel}: $peerRssi dBm ${l10n.peerReadingTag}';
+    // Nearby's only official link metric: GMS bandwidth quality — coarse
+    // (0 unknown / 1 low / 2 medium / 3 high) and event-driven; the code
+    // stays 0 (unknown) until the first change event of the connection
+    // arrives.
+    final quality = controller.linkQuality;
+    final String? qualityText = !connected || quality == null
+        ? null
+        : '${l10n.linkQualityLabel}: ${_qualityWord(l10n, quality)}';
     final linkLabel = switch (controller.transportKind) {
       'wfd' => l10n.wifiTab,
       'nearby' => l10n.nearbyTab,
@@ -634,7 +658,8 @@ class _ChatLinkPanelState extends State<ChatLinkPanel> {
                       '↑ ${formatFileSize(stats.bytesOut)}  '
                       '↓ ${formatFileSize(stats.bytesIn)}  ·  '
                       '${rate > 0 ? '${formatFileSize(rate.round())}/s' : '—'}'
-                      '${rssiText == null ? '' : '  ·  $rssiText'}',
+                      '${rssiText == null ? '' : '  ·  $rssiText'}'
+                      '${qualityText == null ? '' : '  ·  $qualityText'}',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(fontSize: 11, color: p.muted),

@@ -14,6 +14,7 @@ import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.AdvertisingOptions
+import com.google.android.gms.nearby.connection.BandwidthInfo
 import com.google.android.gms.nearby.connection.ConnectionInfo
 import com.google.android.gms.nearby.connection.ConnectionLifecycleCallback
 import com.google.android.gms.nearby.connection.ConnectionResolution
@@ -97,6 +98,10 @@ class NearbyManager(private val context: Context) {
     private var onConnectionRejected: ((String) -> Unit)? = null
     private var onSocketDisconnected: ((String) -> Unit)? = null
 
+    /// GMS bandwidth-quality changes (codes 0..3 — the API's ONLY link
+    /// metric; Nearby Connections exposes no RSSI anywhere).
+    private var onBandwidth: ((Int) -> Unit)? = null
+
     private var onBytesReceived: ((ByteArray) -> Unit)? = null
     private var onTextReceived: ((String) -> Unit)? = null
     private var onTransferProgress: ((String, Int, Int, String) -> Unit)? = null
@@ -137,11 +142,13 @@ class NearbyManager(private val context: Context) {
         onConnected: ((Map<String, Any?>) -> Unit)?,
         onRejected: ((String) -> Unit)?,
         onDisconnected: ((String) -> Unit)?,
+        onBandwidth: ((Int) -> Unit)?,
     ) {
         this.onConnectionInitiated = onInitiated
         this.onSocketConnected = onConnected
         this.onConnectionRejected = onRejected
         this.onSocketDisconnected = onDisconnected
+        this.onBandwidth = onBandwidth
     }
 
     fun setPayloadCallbacks(
@@ -420,6 +427,15 @@ class NearbyManager(private val context: Context) {
                 }
                 onConnectionRejected?.invoke(endpointId)
             }
+        }
+
+        /// GMS reports the link's bandwidth quality here whenever it changes
+        /// — the ONLY public quality metric on this API (no RSSI exists on
+        /// Nearby Connections). Codes: 0=UNKNOWN, 1=LOW, 2=MEDIUM, 3=HIGH
+        /// (BandwidthInfo.Quality, play-services-nearby 19.5.1).
+        override fun onBandwidthChanged(endpointId: String, bandwidthInfo: BandwidthInfo) {
+            val quality = runCatching { bandwidthInfo.quality }.getOrDefault(0)
+            this@NearbyManager.onBandwidth?.invoke(quality)
         }
 
         override fun onDisconnected(endpointId: String) {

@@ -20,7 +20,8 @@ enum ConnectingOutcome { done, cancelled }
 /// [onCancel] then runs to abort the attempt (best effort).
 ///
 /// [qualityLabel] is an optional caller-supplied line (e.g. the BT scan
-/// RSSI): Nearby's API exposes no signal metric, so it is null there.
+/// RSSI): Nearby's bandwidth-quality events only start after the connection
+/// is up, so no dial-time metric exists there — it is null.
 Future<ConnectingOutcome> showConnectingPanel({
   required BuildContext context,
   required Future<void> Function() connect,

@@ -65,6 +65,11 @@ class FakeChatBinding implements ChatTransportBinding {
   @override
   int? get connectedDeviceRssi => deviceRssi;
 
+  int? linkQualityValue;
+
+  @override
+  int? get linkQuality => linkQualityValue;
+
   int? liveRssi;
 
   @override
@@ -1630,6 +1635,27 @@ void main() {
       );
       await pumpEventQueue();
       expect(controller.peerReportedRssi, -54);
+    });
+
+    test('linkQuality delegates to the binding (Nearby bandwidth metric)',
+        () async {
+      final b = FakeChatBinding(transport: ChatSessionModel.transportNearby)
+        ..connected = true
+        ..linkQualityValue = 3;
+      final c = container(b: b);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportNearby,
+        session: sessionFixture(transport: ChatSessionModel.transportNearby),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+      final controller = c.read(chatControllerProvider(arg).notifier);
+      expect(controller.linkQuality, 3);
+
+      b.linkQualityValue = null;
+      expect(controller.linkQuality, isNull,
+          reason: 'transports without a quality metric expose null');
     });
   });
 

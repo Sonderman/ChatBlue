@@ -805,9 +805,14 @@ class ChatController extends Notifier<ChatState>
   }
 
   /// Quality-panel data: uptime clock of the current link, traffic counters
-  /// and — Bluetooth only — the dial-time scan RSSI.
+  /// and the per-transport signal metrics (BT dial-time scan RSSI, Nearby
+  /// GMS bandwidth quality).
   DateTime? get connectedSince => _connectedSince;
   int? get connectedDeviceRssi => _binding.connectedDeviceRssi;
+
+  /// Coarse link-quality code for the quality panel (Nearby Connections
+  /// only — GMS bandwidth-change events; null on the other transports).
+  int? get linkQuality => _binding.linkQuality;
 
   /// RSSI the peer shared over the sync channel (the accepting side has no
   /// local reading — no platform API exists for a connected RFCOMM link).

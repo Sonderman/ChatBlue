@@ -35,6 +35,11 @@ class NearbyService {
   void Function(NearbyPeerInfo peer)? onSocketConnected;
   void Function(String endpointId)? onConnectionRejected;
   void Function(String reason)? onSocketDisconnected;
+
+  /// GMS bandwidth-quality changes — the API's only link metric (there is
+  /// no RSSI anywhere in Nearby Connections). Codes: 0=unknown, 1=low,
+  /// 2=medium, 3=high (BandwidthInfo.Quality).
+  void Function(int quality)? onBandwidthChanged;
   void Function(Uint8List bytes, String text, {required String kind})? onSocketData;
   void Function({
     required String direction,
@@ -274,6 +279,14 @@ class NearbyService {
               kind: kind,
             );
             break;
+          case 'bandwidth':
+            final Map data = (event['data'] as Map? ?? <String, dynamic>{});
+            final int quality = (data['quality'] as int?) ?? 0;
+            onBandwidthChanged?.call(quality);
+            _socketEventsController.add(
+              NearbySocketEvent.bandwidth(quality: quality),
+            );
+            break;
         }
       },
       onError: (Object error) {
@@ -365,7 +378,7 @@ class NearbyScanEvent {
   final String? endpointId;
 }
 
-enum NearbySocketEventType { initiated, connected, rejected, disconnected, data }
+enum NearbySocketEventType { initiated, connected, rejected, disconnected, data, bandwidth }
 
 class NearbySocketEvent {
   NearbySocketEvent._({
@@ -377,6 +390,7 @@ class NearbySocketEvent {
     this.reason,
     this.bytes,
     this.text,
+    this.quality,
   });
 
   final NearbySocketEventType type;
@@ -387,6 +401,10 @@ class NearbySocketEvent {
   final String? reason;
   final Uint8List? bytes;
   final String? text;
+
+  /// Bandwidth-quality code when [type] is [NearbySocketEventType.bandwidth]
+  /// (0=unknown, 1=low, 2=medium, 3=high).
+  final int? quality;
 
   factory NearbySocketEvent.initiated({
     required NearbyPeerInfo peer,
@@ -411,4 +429,7 @@ class NearbySocketEvent {
 
   factory NearbySocketEvent.data({required Uint8List bytes, required String text}) =>
       NearbySocketEvent._(type: NearbySocketEventType.data, bytes: bytes, text: text);
+
+  factory NearbySocketEvent.bandwidth({required int quality}) =>
+      NearbySocketEvent._(type: NearbySocketEventType.bandwidth, quality: quality);
 }

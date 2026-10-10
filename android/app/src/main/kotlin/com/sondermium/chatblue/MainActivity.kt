@@ -699,6 +699,13 @@ class MainActivity : FlutterActivity() {
             },
             onDisconnected = { reason ->
                 runOnUiThread { njSocketEventSink?.success(mapOf("event" to "disconnected", "reason" to reason)) }
+            },
+            onBandwidth = { quality ->
+                runOnUiThread {
+                    njSocketEventSink?.success(
+                        mapOf("event" to "bandwidth", "data" to mapOf("quality" to quality))
+                    )
+                }
             }
         )
 

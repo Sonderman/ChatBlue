@@ -256,6 +256,26 @@ void main() {
       expect(c.read(nearbyTransportProvider).isConnected, isFalse);
     });
 
+    test('a self-cancelled dial stays silent when its rejection lands (no '
+        'declined reason)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(nearbyTransportProvider.notifier);
+      final pending = notifier.connectToPeer('ep-9');
+      await pumpEventQueue();
+
+      await notifier.cancelPendingConnect();
+      expect(await pending, isFalse);
+
+      // GMS may still deliver the request's termination; the cancelled dial
+      // owns that outcome — it must never surface as a peer decline.
+      service.onConnectionRejected?.call('ep-9');
+      await pumpEventQueue();
+      expect(c.read(nearbyTransportProvider).lastConnectError, isNull);
+    });
+
     test('outgoing connect: initiated(incoming=false) never shows a banner; '
         'connected resolves and keys the session on the uid', () async {
       final c = container();
@@ -464,6 +484,39 @@ void main() {
         NearbyPeerInfo.fromMap({'endpointId': 'x', 'uid': 'u1'}).uid,
         'u1',
       );
+    });
+
+    test('GMS bandwidth events drive the link-quality code; a disconnect '
+        'clears it so it cannot leak into the next link', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(nearbyTransportProvider.notifier);
+      // Not connected: nothing to show yet.
+      expect(notifier.linkQuality, isNull);
+
+      final connectFuture = notifier.connectToPeer('ep-1');
+      await pumpEventQueue();
+      service.onSocketConnected?.call(
+        NearbyPeerInfo(endpointId: 'ep-1', endpointName: 'Redmi', uid: 'uid-1'),
+      );
+      await connectFuture;
+
+      // Connected, before any GMS event: unknown (0) — the panel must
+      // never invent a reading.
+      expect(notifier.linkQuality, 0);
+
+      service.onBandwidthChanged?.call(3);
+      expect(notifier.linkQuality, 3);
+      expect(c.read(nearbyTransportProvider).linkQuality, 3);
+
+      service.onBandwidthChanged?.call(2);
+      expect(notifier.linkQuality, 2);
+
+      service.onSocketDisconnected?.call('peer left');
+      expect(notifier.linkQuality, isNull);
+      expect(c.read(nearbyTransportProvider).linkQuality, 0);
     });
 
     test('sends only while connected', () async {

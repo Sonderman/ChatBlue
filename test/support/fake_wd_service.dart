@@ -51,8 +51,13 @@ class FakeWdService extends WifiDirectService {
   @override
   Future<void> connect(String deviceAddress) async {}
 
+  /// Number of [disconnect] calls — lets tests assert teardown paths.
+  int disconnectCalls = 0;
+
   @override
-  Future<void> disconnect() async {}
+  Future<void> disconnect() async {
+    disconnectCalls++;
+  }
 
   @override
   Future<bool> isConnected() async => false;

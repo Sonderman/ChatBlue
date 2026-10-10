@@ -27,6 +27,7 @@ class NearbyTransportState {
     this.isWifiOn = true,
     this.peers = const [],
     this.connectedPeer,
+    this.linkQuality = 0,
     this.lastDisconnectReason,
     this.lastConnectError,
   });
@@ -55,6 +56,12 @@ class NearbyTransportState {
   final bool isWifiOn;
   final List<NearbyPeerInfo> peers;
   final NearbyPeerInfo? connectedPeer;
+
+  /// Coarse link-quality code from GMS bandwidth events (0=unknown,
+  /// 1=low, 2=medium, 3=high — BandwidthInfo.Quality). 0 until the first
+  /// change event of a connection arrives.
+  final int linkQuality;
+
   final String? lastDisconnectReason;
   final String? lastConnectError;
 
@@ -71,6 +78,7 @@ class NearbyTransportState {
     List<NearbyPeerInfo>? peers,
     NearbyPeerInfo? connectedPeer,
     bool clearConnectedPeer = false,
+    int? linkQuality,
     String? lastDisconnectReason,
     bool clearLastDisconnectReason = false,
     String? lastConnectError,
@@ -92,6 +100,7 @@ class NearbyTransportState {
       peers: peers ?? this.peers,
       connectedPeer:
           clearConnectedPeer ? null : (connectedPeer ?? this.connectedPeer),
+      linkQuality: linkQuality ?? this.linkQuality,
       lastDisconnectReason: clearLastDisconnectReason
           ? null
           : (lastDisconnectReason ?? this.lastDisconnectReason),
@@ -197,6 +206,11 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
   String? get connectedDeviceId => state.connectedPeer?.uid;
   String? get connectedDeviceName => state.connectedPeer?.endpointName;
   String get transportType => 'nearby';
+
+  /// Coarse link-quality code while connected (null when the link is down):
+  /// GMS reports it through bandwidth-change events — this transport's only
+  /// link metric. 0 (unknown) until the first event of a connection lands.
+  int? get linkQuality => state.isConnected ? state.linkQuality : null;
 
   /// Decline feedback — the themed notice card. One owner per outcome:
   /// raised only by the dialer's main rejection handler and the declining
@@ -792,6 +806,13 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
     _service.onSocketData = _dispatchSocketData;
     _service.onConnectionInitiated = _handleConnectionInitiated;
 
+    _service.onBandwidthChanged = (quality) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Nearby link quality: $quality');
+      }
+      state = state.copyWith(linkQuality: quality);
+    };
+
     _service.onSocketConnected = (peer) {
       _settleDial();
       if (_cancelledEndpointId != null &&
@@ -805,7 +826,9 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       if (kDebugMode && showDebugLogs) {
         debugPrint('Nearby connected: ${peer.endpointName} (${peer.endpointId})');
       }
-      state = state.copyWith(isConnected: true);
+      // A fresh connection starts with an unknown quality: a stale code
+      // from the previous link must never leak through.
+      state = state.copyWith(isConnected: true, linkQuality: 0);
       state = state.copyWith(peers: const []);
       state = state.copyWith(isScanning: false);
       state = state.copyWith(connectedPeer: peer);
@@ -833,7 +856,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
     _service.onSocketDisconnected = (reason) {
       _settleDial();
       final bool wasConnected = state.isConnected;
-      state = state.copyWith(isConnected: false);
+      state = state.copyWith(isConnected: false, linkQuality: 0);
       ConnectionRequestBanner.dismiss();
       _pendingAccept = false;
       if (kDebugMode && showDebugLogs) {
@@ -848,7 +871,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
   Future<void> disconnectFromDevice() async {
     if (state.isConnected) {
       await _service.disconnect();
-      state = state.copyWith(isConnected: false);
+      state = state.copyWith(isConnected: false, linkQuality: 0);
     }
   }
 
