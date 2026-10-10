@@ -109,7 +109,13 @@ void main() {
     expect(filtered.map((s) => s.id).toList(), ['a']);
   });
 
-  test('message order survives identical timestamps', () async {
+  test('identical timestamps round-trip in the deterministic id order',
+      () async {
+    // The tiebreak is `id DESC` alongside `timestamp DESC`: the read order
+    // matches the keyset pagination predicate exactly, so identical-
+    // timestamp messages can neither be skipped nor repeated across pages.
+    // `seq` (the legacy write index) is no longer authoritative — windowed
+    // upserts cannot maintain global positions.
     final t = DateTime(2026, 10, 6, 12);
     await repo.saveChatSession(session(messages: [
       message(id: 'm1', text: 'first', timestamp: t),
@@ -119,7 +125,7 @@ void main() {
 
     final loaded = await repo.loadChatSession('peer-1');
     expect(loaded!.messages.map((m) => m.text).toList(),
-        ['first', 'second', 'third']);
+        ['third', 'second', 'first']);
   });
 
   test('save replaces the stored message list (removals are dropped)',
@@ -208,5 +214,166 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 50));
     await repo.saveChatSession(session(id: 'w1'));
     await emissions;
+  });
+
+  // ── Paged reads / windowed writes (chat message window) ────────────────
+
+  test('loadRecentMessages returns the newest N, newest-first', () async {
+    final base = DateTime(2026, 10, 6, 12);
+    await repo.saveChatSession(session(messages: [
+      for (var i = 0; i < 25; i++)
+        message(
+          id: 'm$i',
+          text: 'msg $i',
+          timestamp: base.add(Duration(minutes: i)),
+        ),
+    ]));
+
+    final page = await repo.loadRecentMessages('peer-1', limit: 20);
+    expect(page, hasLength(20));
+    expect(page.first.text, 'msg 24');
+    expect(page.last.text, 'msg 5');
+  });
+
+  test('loadMessagesBefore pages strictly older than the keyset cursor',
+      () async {
+    final base = DateTime(2026, 10, 6, 12);
+    await repo.saveChatSession(session(messages: [
+      message(
+          id: 'm5',
+          text: 'newest',
+          timestamp: base.add(const Duration(minutes: 5))),
+      message(
+          id: 'm4',
+          text: 'tie-b',
+          timestamp: base.add(const Duration(minutes: 3))),
+      message(
+          id: 'm3',
+          text: 'tie-a',
+          timestamp: base.add(const Duration(minutes: 3))),
+      message(id: 'm2', text: 'mid', timestamp: base),
+      message(id: 'm1', text: 'oldest', timestamp: base),
+    ]));
+
+    // Store read order: m5, m4, m3, m2, m1 (identical timestamps by id DESC).
+    final all = await repo.loadRecentMessages('peer-1', limit: 10);
+    expect(all.map((m) => m.id).toList(), ['m5', 'm4', 'm3', 'm2', 'm1']);
+
+    // Keyset page strictly older than m3: the same-timestamp m4 (larger id)
+    // stays out; m2/m1 come in.
+    final page = await repo.loadMessagesBefore(
+      'peer-1',
+      before: base.add(const Duration(minutes: 3)),
+      beforeId: 'm3',
+      limit: 2,
+    );
+    expect(page.map((m) => m.id).toList(), ['m2', 'm1']);
+
+    // Legacy row without an id: timestamp-only comparison (<= cursor).
+    final fallback = await repo.loadMessagesBefore(
+      'peer-1',
+      before: base.add(const Duration(minutes: 3)),
+      limit: 10,
+    );
+    expect(fallback.map((m) => m.id).toList(), ['m4', 'm3', 'm2', 'm1']);
+  });
+
+  test('saveChatSessionWindow upserts the window without deleting older rows',
+      () async {
+    final base = DateTime(2026, 10, 6, 12);
+    final all = [
+      for (var i = 30; i >= 1; i--)
+        message(
+          id: 'm$i',
+          text: 'msg $i',
+          timestamp: base.add(Duration(minutes: i)),
+        ),
+    ];
+    await repo.saveChatSession(session(messages: all));
+
+    // A window save carrying only the newest three, with one row edited.
+    await repo.saveChatSessionWindow(session(
+      name: 'Redmi 2',
+      messages: [
+        all[0].copyWith(text: 'msg 30 (edited)'),
+        all[1],
+        all[2],
+      ],
+    ));
+
+    final loaded = await repo.loadChatSession('peer-1');
+    expect(loaded!.name, 'Redmi 2');
+    expect(loaded.messages, hasLength(30),
+        reason: 'the unloaded part of the history must survive');
+    expect(loaded.messages.first.text, 'msg 30 (edited)');
+    expect(loaded.messages[1].id, 'm29');
+  });
+
+  test('deleteMessageRow removes one row; clearSessionMessages one session',
+      () async {
+    await repo.saveChatSession(session(id: 'a', messages: [
+      message(id: 'a1'),
+      message(id: 'a2', timestamp: DateTime(2026, 10, 6, 12, 5)),
+    ]));
+    await repo.saveChatSession(
+        session(id: 'b', messages: [message(id: 'b1')]));
+
+    await repo.deleteMessageRow('a1');
+    var a = await repo.loadChatSession('a');
+    expect(a!.messages.map((m) => m.id).toList(), ['a2']);
+
+    await repo.clearSessionMessages('a');
+    a = await repo.loadChatSession('a');
+    expect(a!.messages, isEmpty);
+    final b = await repo.loadChatSession('b');
+    expect(b!.messages, hasLength(1), reason: 'other sessions are untouched');
+  });
+
+  test('hasMessageNear matches text+direction within the tolerance window',
+      () async {
+    final t = DateTime(2026, 10, 6, 12);
+    await repo.saveChatSession(session(messages: [
+      message(id: 'm1', text: 'hello', isSentByMe: false, timestamp: t),
+    ]));
+
+    expect(
+        await repo.hasMessageNear('peer-1',
+            text: 'hello',
+            isSentByMe: false,
+            timestamp: t.add(const Duration(seconds: 9))),
+        isTrue);
+    expect(
+        await repo.hasMessageNear('peer-1',
+            text: 'hello',
+            isSentByMe: false,
+            timestamp: t.add(const Duration(seconds: 11))),
+        isFalse);
+    expect(
+        await repo.hasMessageNear('peer-1',
+            text: 'hello', isSentByMe: true, timestamp: t),
+        isFalse);
+    expect(
+        await repo.hasMessageNear('peer-1',
+            text: 'other', isSentByMe: false, timestamp: t),
+        isFalse);
+    expect(
+        await repo.hasMessageNear('peer-2',
+            text: 'hello', isSentByMe: false, timestamp: t),
+        isFalse);
+  });
+
+  test('meta reads return session rows without their messages', () async {
+    await repo.saveChatSession(
+        session(id: 'a', messages: [message(id: 'a1')]));
+
+    final metas = await repo.getAllSessionsMeta();
+    expect(metas.single.id, 'a');
+    expect(metas.single.messages, isEmpty);
+
+    final meta = await repo.loadSessionMeta('a');
+    expect(meta!.name, 'Redmi');
+    expect(meta.device['address'], 'AA:BB:CC:DD:EE:FF');
+    expect(meta.messages, isEmpty);
+    expect(await repo.loadSessionMeta('missing'), isNull);
   });
 }

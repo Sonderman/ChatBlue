@@ -97,13 +97,17 @@ class ChatSessionModel {
   /// address"). With this, the address always belongs to the scheme of the
   /// transport the session is tagged with.
   ///
-  /// [address] overrides the stored one only when non-null and non-empty
-  /// (pass null to keep the old value); [peerName], when it is a usable
-  /// upgrade, refreshes the display name — the title and the device name —
-  /// so a stale raw model code heals to the peer's real name on reconnect
-  /// (and a display name is never downgraded); [transport] is the channel in
-  /// use now.
+  /// [newId] re-keys the session under the computed session key (the
+  /// re-key + adopt path: a matched row from another transport era moves
+  /// under the key the live connection computes, so later opens hit it
+  /// directly); null or empty keeps the current id. [address] overrides the
+  /// stored one only when non-null and non-empty (pass null to keep the old
+  /// value); [peerName], when it is a usable upgrade, refreshes the display
+  /// name — the title and the device name — so a stale raw model code heals
+  /// to the peer's real name on reconnect (and a display name is never
+  /// downgraded); [transport] is the channel in use now.
   ChatSessionModel reboundTo({
+    String? newId,
     String? address,
     String? peerName,
     required String transport,
@@ -117,7 +121,7 @@ class ChatSessionModel {
             ? stored
             : (live.isNotEmpty ? live : null));
     return ChatSessionModel(
-      id: id,
+      id: (newId != null && newId.isNotEmpty) ? newId : id,
       name: upgrade ? live : name,
       createdAt: createdAt,
       updatedAt: updatedAt,

@@ -129,6 +129,43 @@ void main() {
       expect(rebound.messages, isEmpty);
     });
 
+    test('reboundTo re-keys the session when the computed key changes', () {
+      final session = ChatSessionModel(
+        id: 'uid-1',
+        name: 'Redmi Note 10 Pro',
+        createdAt: DateTime(2026, 10, 8, 0, 0),
+        updatedAt: DateTime(2026, 10, 8, 0, 5),
+        messages: const [],
+        device: {'name': 'Redmi Note 10 Pro', 'address': 'uid-1'},
+        transport: ChatSessionModel.transportWifiDirect,
+      );
+
+      final rebound = session.reboundTo(
+        newId: 'DC:6A:E7:41:74:E6',
+        address: 'DC:6A:E7:41:74:E6',
+        peerName: 'Redmi Note 10 Pro',
+        transport: ChatSessionModel.transportBluetooth,
+      );
+
+      expect(rebound.id, 'DC:6A:E7:41:74:E6');
+      expect(rebound.device['address'], 'DC:6A:E7:41:74:E6');
+
+      // No new key — or an empty one — keeps the current id.
+      expect(
+        session.reboundTo(transport: ChatSessionModel.transportBluetooth).id,
+        'uid-1',
+      );
+      expect(
+        session
+            .reboundTo(
+              newId: '',
+              transport: ChatSessionModel.transportBluetooth,
+            )
+            .id,
+        'uid-1',
+      );
+    });
+
     test('reboundTo keeps the old address when no live one is available', () {
       final session = ChatSessionModel(
         id: 'addr-2',

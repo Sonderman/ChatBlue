@@ -292,6 +292,94 @@ void main() {
       final stored = await repo.loadChatSession('uid-1');
       expect(stored!.messages.map((m) => m.id).toList(), ['m-wfd', 'm-bt']);
     });
+
+    test(
+        'a re-keyed open moves the history under the computed key — nothing '
+        'is wiped', () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(() async {
+        await pumpEventQueue();
+        await database.close();
+      });
+      final repo = SessionRepository(database);
+      // Stored under the peer's stable uid (created over Wi‑Fi Direct),
+      // carrying a full history.
+      final base = DateTime(2026, 10, 6, 12);
+      await repo.saveChatSession(
+        sessionFixture(
+          id: 'uid-1',
+          name: 'Redmi Note 10 Pro',
+          transport: ChatSessionModel.transportWifiDirect,
+          device: {'name': 'Redmi Note 10 Pro', 'address': 'be:57:7a:fe:d5:a0'},
+          messages: [
+            for (var i = 29; i >= 0; i--)
+              MessageModel(
+                id: 'm$i',
+                text: 'msg $i',
+                isSentByMe: i.isEven,
+                timestamp: base.add(Duration(minutes: i)),
+              ),
+          ],
+        ),
+      );
+
+      // A Bluetooth reconnect: the wire carries no uid, so the computed key
+      // is the MAC — a miss that matches the stored row by name. The re-key
+      // must MOVE the row (id + full history) under the MAC: a rebound that
+      // kept the old id made the save and the delete below target the SAME
+      // row — session and history wiped, the chat open empty.
+      binding.deviceKey = 'DC:6A:E7:41:74:E6';
+      binding.deviceName = 'Redmi Note 10 Pro';
+      binding.emitConnection(true);
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      final controller = open(c, arg);
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
+
+      // The open re-keys the row under the MAC and shows the stored window.
+      var state = stateOf(c, arg);
+      expect(state.chatSession.id, 'DC:6A:E7:41:74:E6',
+          reason: 'the session moves under the computed key (re-key)');
+      expect(state.messages, hasLength(20),
+          reason: 'the stored history must survive the re-key');
+      expect(state.messages.first.text, 'msg 29');
+      expect(state.hasMoreOlder, isTrue);
+
+      // The stored row moved: old key gone, full history under the new one,
+      // and no split row was left behind.
+      expect(await repo.loadChatSession('uid-1'), isNull);
+      var stored = await repo.loadChatSession('DC:6A:E7:41:74:E6');
+      expect(stored!.messages, hasLength(30),
+          reason: 'the re-key must move every stored message');
+      expect(await repo.getAllSessionsMeta(), hasLength(1));
+
+      // A send persists on top — and the history stays intact.
+      controller.textController.text = 'hello again';
+      controller.sendTextMessage();
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      await pumpEventQueue();
+      stored = await repo.loadChatSession('DC:6A:E7:41:74:E6');
+      expect(stored!.messages, hasLength(31));
+      expect(stored.messages.first.text, 'hello again');
+
+      // A later reconnect hits the moved row directly — window from the
+      // store, no further re-key.
+      controller.close();
+      c.dispose();
+      await pumpEventQueue();
+
+      final c2 = container(database: database);
+      addTearDown(c2.dispose);
+      final arg2 = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      open(c2, arg2);
+      await pumpEventQueue();
+      state = stateOf(c2, arg2);
+      expect(state.chatSession.id, 'DC:6A:E7:41:74:E6');
+      expect(state.messages, hasLength(20));
+    });
   });
 
   group('send queue', () {
@@ -2450,6 +2538,260 @@ void main() {
               'is added a second time (device-reported duplicate bubbles)');
 
       await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+  });
+
+  group('paged history', () {
+    /// Seeds [count] stored messages (oldest → newest, minute-spaced) under
+    /// the fixture session key.
+    Future<void> seedHistory(AppDatabase database, {required int count}) async {
+      final base = DateTime(2026, 10, 6, 12);
+      await SessionRepository(database).saveChatSession(
+        sessionFixture(
+          id: 'AA:BB:CC:DD:EE:FF',
+          messages: [
+            for (var i = count - 1; i >= 0; i--)
+              MessageModel(
+                id: 'm$i',
+                text: 'msg $i',
+                isSentByMe: i.isEven,
+                timestamp: base.add(Duration(minutes: i)),
+              ),
+          ],
+        ),
+      );
+    }
+
+    test('a transport open loads only the newest 20 messages', () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      await seedHistory(database, count: 30);
+
+      binding.deviceKey = 'AA:BB:CC:DD:EE:FF';
+      binding.deviceName = 'PeerOne';
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      open(c, arg);
+      await pumpEventQueue();
+
+      final state = stateOf(c, arg);
+      expect(state.messages, hasLength(20));
+      expect(state.messages.first.text, 'msg 29'); // newest first
+      expect(state.messages.last.text, 'msg 10');
+      expect(state.hasMoreOlder, isTrue);
+    });
+
+    test('a seeded open slices to the newest 20 and reports more', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final base = DateTime(2026, 10, 6, 12);
+      final seed = sessionFixture(
+        messages: [
+          for (var i = 29; i >= 0; i--)
+            MessageModel(
+              id: 'm$i',
+              text: 'msg $i',
+              isSentByMe: i.isEven,
+              timestamp: base.add(Duration(minutes: i)),
+            ),
+        ],
+      );
+      final arg = ChatOpenArg(transport: seed.transportKind, session: seed);
+      open(c, arg);
+      await pumpEventQueue();
+
+      final state = stateOf(c, arg);
+      expect(state.messages, hasLength(20));
+      expect(state.messages.first.text, 'msg 29');
+      expect(state.hasMoreOlder, isTrue);
+    });
+
+    test('loadOlderMessages appends +5 pages until the history is exhausted',
+        () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      await seedHistory(database, count: 30);
+
+      binding.deviceKey = 'AA:BB:CC:DD:EE:FF';
+      binding.deviceName = 'PeerOne';
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      final controller = open(c, arg);
+      await pumpEventQueue();
+      expect(stateOf(c, arg).messages, hasLength(20));
+
+      await controller.loadOlderMessages();
+      expect(stateOf(c, arg).messages, hasLength(25));
+      expect(stateOf(c, arg).messages.last.text, 'msg 5');
+      expect(stateOf(c, arg).hasMoreOlder, isTrue);
+
+      await controller.loadOlderMessages();
+      expect(stateOf(c, arg).messages, hasLength(30));
+      expect(stateOf(c, arg).messages.last.text, 'msg 0');
+      expect(stateOf(c, arg).hasMoreOlder, isFalse);
+
+      // Exhausted: further calls are no-ops.
+      await controller.loadOlderMessages();
+      expect(stateOf(c, arg).messages, hasLength(30));
+    });
+
+    test('a history that fits the window never reports more', () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      await seedHistory(database, count: 5);
+
+      binding.deviceKey = 'AA:BB:CC:DD:EE:FF';
+      binding.deviceName = 'PeerOne';
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      final controller = open(c, arg);
+      await pumpEventQueue();
+
+      expect(stateOf(c, arg).messages, hasLength(5));
+      expect(stateOf(c, arg).hasMoreOlder, isFalse);
+      await controller.loadOlderMessages();
+      expect(stateOf(c, arg).messages, hasLength(5));
+    });
+
+    test('a windowed save keeps the unloaded history and upserts a send',
+        () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final repo = SessionRepository(database);
+      await seedHistory(database, count: 30);
+
+      binding.deviceKey = 'AA:BB:CC:DD:EE:FF';
+      binding.deviceName = 'PeerOne';
+      binding.emitConnection(true);
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      final controller = open(c, arg);
+      await pumpEventQueue();
+
+      controller.textController.text = 'fresh send';
+      controller.sendTextMessage();
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      await pumpEventQueue();
+
+      final stored = await repo.loadChatSession('AA:BB:CC:DD:EE:FF');
+      expect(stored!.messages, hasLength(31),
+          reason: 'the 30 stored messages plus the fresh send');
+      expect(stored.messages.first.text, 'fresh send');
+      expect(stateOf(c, arg).messages, hasLength(21));
+    });
+
+    test('deleteMessage removes the stored row explicitly', () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final repo = SessionRepository(database);
+      await seedHistory(database, count: 30);
+
+      binding.deviceKey = 'AA:BB:CC:DD:EE:FF';
+      binding.deviceName = 'PeerOne';
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      final controller = open(c, arg);
+      await pumpEventQueue();
+
+      final victim = stateOf(c, arg).messages[3]; // 'msg 26'
+      controller.deleteMessage(victim.id);
+      await pumpEventQueue();
+
+      final stored = await repo.loadChatSession('AA:BB:CC:DD:EE:FF');
+      expect(stored!.messages, hasLength(29));
+      expect(stored.messages.any((m) => m.id == victim.id), isFalse);
+      expect(stateOf(c, arg).messages, hasLength(19));
+    });
+
+    test('clearConversation empties the store but keeps the session',
+        () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final repo = SessionRepository(database);
+      await seedHistory(database, count: 25);
+
+      binding.deviceKey = 'AA:BB:CC:DD:EE:FF';
+      binding.deviceName = 'PeerOne';
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      final controller = open(c, arg);
+      await pumpEventQueue();
+
+      await controller.clearConversation();
+      expect(stateOf(c, arg).messages, isEmpty);
+      expect(stateOf(c, arg).hasMoreOlder, isFalse);
+
+      final stored = await repo.loadChatSession('AA:BB:CC:DD:EE:FF');
+      expect(stored, isNotNull);
+      expect(stored!.messages, isEmpty);
+    });
+
+    test('a re-served message below the window is not integrated twice',
+        () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final repo = SessionRepository(database);
+      await seedHistory(database, count: 30);
+
+      binding.deviceKey = 'AA:BB:CC:DD:EE:FF';
+      binding.deviceName = 'PeerOne';
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      open(c, arg);
+      await pumpEventQueue();
+      expect(stateOf(c, arg).messages, hasLength(20));
+
+      // The peer re-serves its copy of 'msg 2' — far below the loaded
+      // window. Same text + direction + timestamp: the DB-side dedup must
+      // skip it (the in-memory window alone used to cover the history).
+      final base = DateTime(2026, 10, 6, 12);
+      final dupe = jsonEncode({
+        'type': 'message',
+        'messages': [
+          {
+            'id': 'dup-copy',
+            'text': 'msg 2',
+            // Peer saw it as incoming → flips to ours: sent by me.
+            'sentByMe': false,
+            'timestamp':
+                base.add(const Duration(minutes: 2)).toIso8601String(),
+          },
+        ],
+      });
+      binding.emitData(Uint8List(0), '@@CHATBLUE_SYNC@@$dupe', kind: 'text');
+      await pumpEventQueue();
+
+      final stored = await repo.loadChatSession('AA:BB:CC:DD:EE:FF');
+      expect(stored!.messages, hasLength(30), reason: 'no duplicate row');
+      expect(stateOf(c, arg).messages, hasLength(20));
+
+      // Control: a genuinely new synced text IS integrated and persisted.
+      final fresh = jsonEncode({
+        'type': 'message',
+        'messages': [
+          {
+            'id': 'fresh-1',
+            'text': 'brand new from peer',
+            'sentByMe': true,
+            'timestamp': DateTime.now().toIso8601String(),
+          },
+        ],
+      });
+      binding.emitData(Uint8List(0), '@@CHATBLUE_SYNC@@$fresh', kind: 'text');
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      await pumpEventQueue();
+
+      final after = await repo.loadChatSession('AA:BB:CC:DD:EE:FF');
+      expect(after!.messages, hasLength(31));
+      expect(stateOf(c, arg).messages.first.text, 'brand new from peer');
     });
   });
 }

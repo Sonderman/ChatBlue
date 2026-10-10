@@ -164,5 +164,6 @@
   "connectMethodTitle": "Bağlantı yöntemini seç",
   "btConnectHint": "Wi‑Fi gerekmez · daha yavaş",
   "wfdConnectHint": "Hızlı · doğrudan Wi‑Fi bağlantısı",
-  "nearbyConnectHint": "Hızlı · Google Play hizmetleri üzerinden"
+  "nearbyConnectHint": "Hızlı · Google Play hizmetleri üzerinden",
+  "dateYesterday": "Dün"
 }

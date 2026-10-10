@@ -164,5 +164,6 @@
   "connectMethodTitle": "Choose connection method",
   "btConnectHint": "No Wi‑Fi needed · slower",
   "wfdConnectHint": "Fast · direct Wi‑Fi link",
-  "nearbyConnectHint": "Fast · via Google Play services"
+  "nearbyConnectHint": "Fast · via Google Play services",
+  "dateYesterday": "Yesterday"
 }

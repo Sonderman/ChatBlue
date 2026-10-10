@@ -24,8 +24,10 @@ import 'package:chatblue/providers/chat_controller.dart';
 import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
+import 'package:intl/intl.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:sizer/sizer.dart';
 
@@ -675,25 +677,317 @@ class _ChatLinkPanelState extends State<ChatLinkPanel> {
   }
 }
 
+// ── Day separators ─────────────────────────────────────────────────────────
+
+/// One row of the paged message list: a message bubble or a day separator.
+sealed class _ChatListEntry {
+  const _ChatListEntry();
+
+  /// Day label this row belongs to — null for today's rows (recent content
+  /// is intentionally unlabelled: labels appear once the conversation
+  /// reaches beyond the last 24 hours). Drives the pinned top chip.
+  String? get dayLabel;
+}
+
+class _MessageEntry extends _ChatListEntry {
+  const _MessageEntry(this.message, this.messageIndex, this.dayLabel);
+
+  final MessageModel message;
+
+  /// Index in [ChatState.messages] — the load-more trigger keys on it so
+  /// interleaved separators cannot shift the threshold.
+  final int messageIndex;
+
+  @override
+  final String? dayLabel;
+}
+
+class _DateEntry extends _ChatListEntry {
+  const _DateEntry(this.dayLabel);
+
+  @override
+  final String dayLabel;
+}
+
+/// Calendar day (local) of a timestamp — the separator grouping key.
+DateTime _dayOf(DateTime timestamp) {
+  final local = timestamp.toLocal();
+  return DateTime(local.year, local.month, local.day);
+}
+
+bool _sameCalendarDay(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;
+
+/// Day separator label: null for TODAY (recent content stays unlabelled — a
+/// label appears once the conversation reaches beyond the last 24 hours),
+/// "Dün"/"Yesterday" for calendar-yesterday, a full localized date before
+/// that. Falls back to the English date format when the locale's intl date
+/// data is unavailable (the app's localization delegates initialize it).
+String? _dayLabel(DateTime day, AppLocalizations l10n, String localeName) {
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  if (_sameCalendarDay(day, today)) return null;
+  final yesterday = DateTime(today.year, today.month, today.day - 1);
+  if (_sameCalendarDay(day, yesterday)) return l10n.dateYesterday;
+  try {
+    return DateFormat.yMMMMd(localeName).format(day);
+  } catch (_) {
+    return DateFormat.yMMMMd('en').format(day);
+  }
+}
+
 /// Reverse chronological message list driving the shared controller state.
-class ChatMessageList extends StatelessWidget {
+/// Messages are grouped by calendar day: every day older than today carries
+/// a day separator (an independent centered pill above the day's messages),
+/// and a pinned chip at the top of the list mirrors the day currently at
+/// the top of the viewport.
+class ChatMessageList extends StatefulWidget {
   const ChatMessageList({super.key, required this.state, required this.controller});
 
   final ChatState state;
   final ChatController controller;
 
+  /// Test hook: the pinned (sticky) day chip — present only while a day
+  /// older than today tops the viewport and no inline separator is there.
+  static const Key stickyDateChipKey =
+      ValueKey<String>('chatStickyDateChip');
+
+  @override
+  State<ChatMessageList> createState() => _ChatMessageListState();
+}
+
+class _ChatMessageListState extends State<ChatMessageList> {
+  /// The scaffold insets the body's SafeArea by the FULL app bar height
+  /// (`extendBodyBehindAppBar` makes `MediaQuery.padding.top` cover the
+  /// toolbar as well — `max(status bar, app bar)` in the scaffold layout),
+  /// so the list already starts below the app bar; only a small breathing
+  /// gap is needed at the content's top end.
+  static const double _topInset = 8.0;
+
+  final GlobalKey _listKey = GlobalKey();
+  final ValueNotifier<String?> _stickyLabel = ValueNotifier<String?>(null);
+
+  List<_ChatListEntry> _entries = const [];
+
+  @override
+  void dispose() {
+    _stickyLabel.dispose();
+    super.dispose();
+  }
+
+  /// Splits the newest-first window into bubble rows and day separators. A
+  /// separator is inserted AFTER its day group's oldest message (array
+  /// order) — visually it sits at the top edge of that day's block, above
+  /// the day it labels. Today's group is never labelled; a partially-loaded
+  /// oldest day shows its separator at the loaded edge, moving up as older
+  /// pages arrive.
+  List<_ChatListEntry> _buildEntries(BuildContext context) {
+    final messages = widget.state.messages;
+    final l10n = AppLocalizations.of(context)!;
+    final localeName = Localizations.localeOf(context).toString();
+    final labelsByDay = <DateTime, String?>{};
+    String? labelFor(DateTime day) =>
+        labelsByDay.putIfAbsent(day, () => _dayLabel(day, l10n, localeName));
+
+    final entries = <_ChatListEntry>[];
+    for (var i = 0; i < messages.length; i++) {
+      final message = messages[i];
+      final day = _dayOf(message.timestamp);
+      final label = labelFor(day);
+      entries.add(_MessageEntry(message, i, label));
+      final bool oldestOfDay = i == messages.length - 1 ||
+          !_sameCalendarDay(_dayOf(messages[i + 1].timestamp), day);
+      if (oldestOfDay && label != null) {
+        entries.add(_DateEntry(label));
+      }
+    }
+    return entries;
+  }
+
+  /// Recomputes the pinned chip from the CURRENT layout: the label of the
+  /// topmost visible row. Fail-open — any unexpected render state hides the
+  /// chip instead of throwing mid-scroll.
+  void _refreshStickyLabel() {
+    if (!mounted) return;
+    final label = _computeStickyLabel();
+    if (_stickyLabel.value != label) {
+      _stickyLabel.value = label;
+    }
+  }
+
+  bool _stickyRefreshScheduled = false;
+
+  /// Coalesced refresh for build/scroll signals. Scroll notifications can
+  /// arrive DURING layout (a content-size correction after a page loads),
+  /// where notifying the builder synchronously would trip "build scheduled
+  /// during frame" — the refresh is deferred to the end of the frame.
+  void _scheduleStickyRefresh() {
+    if (_stickyRefreshScheduled) return;
+    _stickyRefreshScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _stickyRefreshScheduled = false;
+      if (mounted) _refreshStickyLabel();
+    });
+    if (!WidgetsBinding.instance.hasScheduledFrame) {
+      WidgetsBinding.instance.scheduleFrame();
+    }
+  }
+
+  String? _computeStickyLabel() {
+    try {
+      final RenderObject? root = _listKey.currentContext?.findRenderObject();
+      if (root == null) return null;
+      RenderSliverMultiBoxAdaptor? sliver;
+      void visit(RenderObject child) {
+        if (sliver != null) return;
+        if (child is RenderSliverMultiBoxAdaptor) {
+          sliver = child;
+          return;
+        }
+        child.visitChildren(visit);
+      }
+
+      visit(root);
+      final s = sliver;
+      if (s == null || !s.attached) return null;
+
+      // The viewport's visible range in the sliver's own coordinates.
+      final double start = s.constraints.scrollOffset;
+      final double end = start + s.constraints.remainingPaintExtent;
+
+      _ChatListEntry? topmost;
+      var child = s.firstChild;
+      while (child != null) {
+        final pd = child.parentData;
+        if (pd is! SliverMultiBoxAdaptorParentData) break;
+        final int? index = pd.index;
+        final double? offset = pd.layoutOffset;
+        if (index == null || offset == null || offset >= end) break;
+        if (offset + child.size.height > start && index < _entries.length) {
+          // Keep walking: the LAST row overlapping the viewport is the
+          // topmost visible one.
+          topmost = _entries[index];
+        }
+        child = s.childAfter(child);
+      }
+      // An inline separator at the very top of the screen already carries
+      // this label — the pin would only draw it a second time.
+      if (topmost is _DateEntry) return null;
+      return topmost?.dayLabel;
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    // The app bar floats above the canvas (extendBodyBehindAppBar). The
-    // body sits inside a SafeArea that already consumes the status bar
-    // inset, so the list only needs the app bar's 64 px toolbar height plus
-    // a small breathing gap to start below it.
-    const topInset = 72.0;
-    return ListView.builder(
-      reverse: true,
-      padding: EdgeInsets.fromLTRB(10, topInset, 10, 8),
-      itemCount: state.messages.length,
-      itemBuilder: (context, index) => ChatMessageBubble(message: state.messages[index], controller: controller),
+    final state = widget.state;
+    _entries = _buildEntries(context);
+    // Layout (and therefore the pinned chip) settles after this frame.
+    _scheduleStickyRefresh();
+
+    return Stack(
+      children: [
+        NotificationListener<ScrollNotification>(
+          onNotification: (notification) {
+            // Pure scrolling does not rebuild the list: refresh the pin for
+            // each notification batch (coalesced to the end of the frame —
+            // notifications can arrive mid-layout).
+            _scheduleStickyRefresh();
+            return false;
+          },
+          child: ListView.builder(
+            key: _listKey,
+            reverse: true,
+            padding: const EdgeInsets.fromLTRB(10, _topInset, 10, 8),
+            itemCount: _entries.length,
+            itemBuilder: (context, index) {
+              final entry = _entries[index];
+              if (entry is _DateEntry) {
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Align(
+                    alignment: Alignment.center,
+                    child: _ChatDateChip(label: entry.dayLabel),
+                  ),
+                );
+              }
+              final message = entry as _MessageEntry;
+              // Load-more trigger: pulls the next older page once the build
+              // window reaches within `olderPrefetchBuffer` messages of the
+              // oldest loaded one — on the initial 20-message window that is
+              // the 15th message (keyed on the MESSAGE index: interleaved
+              // separators must not shift the threshold). Deferred to a
+              // microtask: the fetch writes provider state, which must never
+              // happen during build/layout (the guard inside
+              // `loadOlderMessages` collapses the burst into one call).
+              if (state.hasMoreOlder &&
+                  message.messageIndex >=
+                      state.messages.length -
+                          1 -
+                          ChatController.olderPrefetchBuffer) {
+                scheduleMicrotask(widget.controller.loadOlderMessages);
+              }
+              return ChatMessageBubble(
+                message: message.message,
+                controller: widget.controller,
+              );
+            },
+          ),
+        ),
+        Positioned(
+          // A small breathing gap below the list-area top — the list already
+          // sits below the app bar (and below the connection panel / sync
+          // banner when those occupy the top), so a fixed offset is enough.
+          top: 6,
+          left: 0,
+          right: 0,
+          child: IgnorePointer(
+            child: ValueListenableBuilder<String?>(
+              valueListenable: _stickyLabel,
+              builder: (context, label, _) {
+                if (label == null) return const SizedBox.shrink();
+                return Center(
+                  child: _ChatDateChip(
+                    key: ChatMessageList.stickyDateChipKey,
+                    label: label,
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Day separator pill — an independent centered bubble between message
+/// groups ("Dün"/"Yesterday", a full localized date). Also used as the
+/// pinned top chip.
+class _ChatDateChip extends StatelessWidget {
+  const _ChatDateChip({super.key, required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = ChatPalette.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+      decoration: BoxDecoration(
+        color: p.bar,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: p.border),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          color: p.muted,
+        ),
+      ),
     );
   }
 }

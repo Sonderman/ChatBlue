@@ -56,14 +56,28 @@ class AppDatabase extends _$AppDatabase {
         beforeOpen: (details) async {
           // Message rows cascade when a session is deleted.
           await customStatement('PRAGMA foreign_keys = ON');
+          // Installs created before the paged reads get the timestamp index
+          // here; idempotent (the create path builds both indexes).
+          await customStatement(
+            'CREATE INDEX IF NOT EXISTS idx_messages_session_ts '
+            'ON messages (session_id, timestamp)',
+          );
         },
       );
 
-  /// Session-scoped message reads filter by FK and read in seq order.
-  Future<void> _createMessageIndex() => customStatement(
-        'CREATE INDEX IF NOT EXISTS idx_messages_session_seq '
-        'ON messages (session_id, seq)',
-      );
+  /// Session-scoped message reads: the windowed/paged loads order by
+  /// timestamp (newest first) — the primary path; the seq index stays for
+  /// the legacy full reads.
+  Future<void> _createMessageIndex() async {
+    await customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_messages_session_seq '
+      'ON messages (session_id, seq)',
+    );
+    await customStatement(
+      'CREATE INDEX IF NOT EXISTS idx_messages_session_ts '
+      'ON messages (session_id, timestamp)',
+    );
+  }
 
   /// Drops every table this store ever created (children first; the FK
   /// pragma is off during migrations, and `IF EXISTS` keeps this safe on

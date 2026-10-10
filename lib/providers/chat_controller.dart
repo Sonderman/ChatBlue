@@ -183,6 +183,7 @@ class ChatState {
     this.recordSeconds = 0,
     this.isConnected = false,
     this.linkPanelVisible = false,
+    this.hasMoreOlder = false,
     this.outgoingTransfer,
     this.incomingTransfer,
   });
@@ -213,6 +214,11 @@ class ChatState {
   /// default hidden — the app bar icon toggles it).
   final bool linkPanelVisible;
 
+  /// True while older messages still exist below the loaded window — the
+  /// message list's load-more trigger reads it (see
+  /// [ChatController.loadOlderMessages]).
+  final bool hasMoreOlder;
+
   final TransferState? outgoingTransfer;
   final TransferState? incomingTransfer;
 
@@ -234,6 +240,7 @@ class ChatState {
     int? recordSeconds,
     bool? isConnected,
     bool? linkPanelVisible,
+    bool? hasMoreOlder,
     Object? outgoingTransfer = _sentinel,
     Object? incomingTransfer = _sentinel,
   }) {
@@ -248,6 +255,7 @@ class ChatState {
       recordSeconds: recordSeconds ?? this.recordSeconds,
       isConnected: isConnected ?? this.isConnected,
       linkPanelVisible: linkPanelVisible ?? this.linkPanelVisible,
+      hasMoreOlder: hasMoreOlder ?? this.hasMoreOlder,
       outgoingTransfer: identical(outgoingTransfer, _sentinel)
           ? this.outgoingTransfer
           : outgoingTransfer as TransferState?,
@@ -470,6 +478,11 @@ class ChatController extends Notifier<ChatState>
   bool _openedAsFreshSession = false;
   bool _lateMergeDone = false;
 
+  /// True while an older page is being fetched — the message list's
+  /// load-more trigger fires per built item, so this guard collapses the
+  /// burst into a single fetch.
+  bool _loadingOlder = false;
+
   // Serializes outgoing sends: while a byte transfer (image) is in flight,
   // any further text/image send is queued and only dispatched once the
   // current transfer completes. This keeps the wire order FIFO and prevents
@@ -498,6 +511,18 @@ class ChatController extends Notifier<ChatState>
   /// packets for the thin progress bar under the app bar (plain messages
   /// are far smaller).
   static const int _syncProgressThreshold = 4 * 1024;
+
+  // ── Paged message history ──────────────────────────────────────────────
+  /// Messages loaded into the visible window when a chat opens.
+  static const int initialMessageWindow = 20;
+
+  /// Older messages fetched per load-more step (the window grows upward).
+  static const int olderPageSize = 5;
+
+  /// Load-more trigger: the message list pulls the next older page when the
+  /// build window reaches within this many messages of the oldest loaded
+  /// one — with the initial 20-message window that is the 15th message.
+  static const int olderPrefetchBuffer = 5;
 
   // ── Deferred media download (sync placeholders) ────────────────────────
   // Large media syncs as a placeholder only (kind + size); the file is
@@ -582,9 +607,18 @@ class ChatController extends Notifier<ChatState>
     // returns — running it inline hits the uninitialized-provider assert.
     Future.microtask(() => _open(seeded: argSession != null));
 
+    // Paged open: the visible window is the newest slice of the history. A
+    // seeded (home-list) open already carries the stored list — slice it
+    // here; a transport-reconstructed open loads its window from the store
+    // in `_open`, BEFORE the callbacks are wired (a live frame must never
+    // be overwritten by the window write).
+    final List<MessageModel> initialWindow =
+        argSession == null ? const [] : _windowSlice(argSession.messages);
     return ChatState(
       chatSession: session,
-      messages: session.messages,
+      messages: initialWindow,
+      hasMoreOlder: argSession != null &&
+          argSession.messages.length > initialWindow.length,
       isConnected: _binding.isConnected,
       linkPanelVisible: panelVisible,
     );
@@ -597,7 +631,7 @@ class ChatController extends Notifier<ChatState>
   Future<void> _open({required bool seeded}) async {
     if (!seeded) {
       final repo = _repo;
-      var session = await repo.loadChatSession(_seedKey!);
+      var session = await repo.loadSessionMeta(_seedKey!);
       session ??= await _findExistingSessionForPeer();
       if (kDebugMode) {
         debugPrint(
@@ -623,10 +657,9 @@ class ChatController extends Notifier<ChatState>
                 rebound.transport != session.transport ||
                 rebound.name != session.name ||
                 rebound.device['name'] != session.device['name'];
-        state = state.copyWith(
-          chatSession: rebound,
-          messages: rebound.messages,
-        );
+        // The state carries only session meta here; the visible window
+        // fills via loadRecentMessages (both paths load it below).
+        state = state.copyWith(chatSession: rebound);
         // A direct hit skips the miss-path peer search: a same-peer row
         // from another transport era (e.g. a BT-era row beside this WFD
         // row) would stay split — and the two devices could then open
@@ -642,18 +675,26 @@ class ChatController extends Notifier<ChatState>
         // Re-key + adopt: move the matched session under the computed key so
         // future opens hit it directly (no repeated merge search), and use
         // the re-keyed instance — `chatSession.id` is final, so the session
-        // is re-created with the new id; the nested message objects are
-        // reused as-is. The stored identity is re-bound to the CURRENT
-        // connection (device address + transport tag).
+        // is re-created with the new id (`reboundTo`'s `newId`); the nested
+        // message objects are reused as-is. The stored identity is re-bound
+        // to the CURRENT connection (device address + transport tag). The
+        // search loaded session META rows only: the re-created row needs the
+        // FULL message list (the full-state rewrite below carries it), and
+        // the visible window fills from the store afterwards.
+        session = await repo.loadChatSession(session.id) ?? session;
+        if (_closed) return;
         final rebound = session.reboundTo(
+          // THE re-key: the full-state save below moves every message row
+          // under this key (PK conflict-update) before the old row is
+          // deleted — a rebound that kept the old id would make the save
+          // and the delete target the SAME row, wiping the session and its
+          // history (FK cascade).
+          newId: _seedKey!,
           address: _seedMacUsable ? _binding.connectedDeviceKey : null,
           peerName: _binding.connectedDeviceName,
           transport: _binding.transportType,
         );
-        state = state.copyWith(
-          chatSession: rebound,
-          messages: rebound.messages,
-        );
+        state = state.copyWith(chatSession: rebound);
         try {
           await repo.saveChatSession(rebound);
           await repo.deleteChatSession(session.id);
@@ -682,6 +723,14 @@ class ChatController extends Notifier<ChatState>
     }
 
     if (_closed) return;
+
+    // Paged open: fill the visible window from the store (a seeded open
+    // already holds its slice). The callbacks are wired AFTER this, so a
+    // live frame can never be overwritten by the window write.
+    if (!seeded) {
+      await _loadInitialWindow(state.chatSession.id);
+      if (_closed) return;
+    }
 
     // Sessions persisted before the transport field existed carry no tag:
     // stamp the transport in use now — the home list both labels and
@@ -730,6 +779,73 @@ class ChatController extends Notifier<ChatState>
     // connection event, so the signal alone would never arm it.
     if (_binding.isConnected) {
       _syncNudgeTimer ??= Timer(syncNudgeDelay, _onSyncNudge);
+    }
+  }
+
+  /// The newest [initialMessageWindow] messages of [full] (a fresh list) —
+  /// the visible window.
+  List<MessageModel> _windowSlice(List<MessageModel> full) =>
+      full.length <= initialMessageWindow
+          ? List.of(full)
+          : full.sublist(0, initialMessageWindow);
+
+  /// Loads the initial visible window: the newest [initialMessageWindow]
+  /// messages (one extra fetched to learn whether older history exists).
+  Future<void> _loadInitialWindow(String sessionId) async {
+    final page = await _repo.loadRecentMessages(
+      sessionId,
+      limit: initialMessageWindow + 1,
+    );
+    if (_closed) return;
+    final hasMore = page.length > initialMessageWindow;
+    final window =
+        hasMore ? page.sublist(0, initialMessageWindow) : page;
+    state = state.copyWith(messages: window, hasMoreOlder: hasMore);
+  }
+
+  /// Loads the next older page of history into the visible window —
+  /// [olderPageSize] messages per call. The message list calls this when
+  /// the user scrolls within [olderPrefetchBuffer] messages of the oldest
+  /// loaded one; a no-op while a page is in flight or when the history is
+  /// exhausted ([ChatState.hasMoreOlder]). Older pages append to the END of
+  /// the newest-first list, so the reverse ListView never jumps.
+  Future<void> loadOlderMessages() async {
+    if (_closed || _loadingOlder || !state.hasMoreOlder) return;
+    final msgs = state.messages;
+    if (msgs.isEmpty) return;
+    final oldest = msgs.last;
+    _loadingOlder = true;
+    try {
+      final older = await _repo.loadMessagesBefore(
+        state.chatSession.id,
+        before: oldest.timestamp,
+        beforeId: oldest.id,
+        limit: olderPageSize + 1,
+      );
+      if (_closed) return;
+      // The keyset query matches the store's read order exactly; the id
+      // filter is a safety net for a legacy row without an id.
+      String keyOf(MessageModel m) =>
+          m.id ??
+          '${m.timestamp.microsecondsSinceEpoch}|${m.isSentByMe}|'
+              '${m.text}|${m.imagePath}';
+      final known = {for (final m in state.messages) keyOf(m)};
+      final fresh = [
+        for (final m in older)
+          if (known.add(keyOf(m))) m,
+      ];
+      final hasMore = fresh.length > olderPageSize;
+      final page = hasMore ? fresh.sublist(0, olderPageSize) : fresh;
+      state = state.copyWith(
+        messages: page.isEmpty ? state.messages : [...state.messages, ...page],
+        hasMoreOlder: hasMore,
+      );
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('Older message load failed: $e');
+      }
+    } finally {
+      _loadingOlder = false;
     }
   }
 
@@ -1101,12 +1217,22 @@ class ChatController extends Notifier<ChatState>
   /// Absorbs a stored session of the SAME peer into the open session: the
   /// message union (identity dedup, newest-first — matching the list
   /// contract everywhere else) persists under the open session's id, and
-  /// the duplicate row is removed.
+  /// the duplicate row is removed. The union runs over the COMPLETE stored
+  /// histories (loaded here on demand): the in-memory list only holds the
+  /// visible window, and the full-state rewrite below must not drop the
+  /// unloaded part.
   Future<void> _absorbPeerSession(ChatSessionModel duplicate) async {
     final session = state.chatSession;
+    final targetFull = await _repo.loadChatSession(session.id);
+    final duplicateFull =
+        await _repo.loadChatSession(duplicate.id) ?? duplicate;
+    if (_closed) return;
     final seen = <String>{};
     final combined = <MessageModel>[];
-    for (final m in [...duplicate.messages, ...state.messages]) {
+    for (final m in [
+      ...duplicateFull.messages,
+      ...(targetFull?.messages ?? state.messages),
+    ]) {
       final k = m.id ??
           '${m.timestamp.microsecondsSinceEpoch}|${m.isSentByMe}|'
               '${m.text}|${m.imagePath}';
@@ -1127,7 +1253,6 @@ class ChatController extends Notifier<ChatState>
       },
       transport: session.transport,
     );
-    state = state.copyWith(chatSession: merged, messages: combined);
     try {
       await _repo.saveChatSession(merged);
       await _repo.deleteChatSession(duplicate.id);
@@ -1142,6 +1267,15 @@ class ChatController extends Notifier<ChatState>
         debugPrint('Peer session merge failed: $e');
       }
     }
+    if (_closed) return;
+    // The state carries the visible window of the merged history.
+    final window = _windowSlice(combined);
+    merged.messages = window;
+    state = state.copyWith(
+      chatSession: merged,
+      messages: window,
+      hasMoreOlder: combined.length > window.length,
+    );
   }
 
   /// Absorbs every stored session that belongs to the CURRENT peer into the
@@ -1176,7 +1310,7 @@ class ChatController extends Notifier<ChatState>
     String? excludeId,
   }) async {
     try {
-      final all = await _repo.getAllChatSessions();
+      final all = await _repo.getAllSessionsMeta();
       final peerMac = _binding.connectedDeviceKey;
       final peerUid = _binding.connectedDeviceId;
       final peerName = _binding.connectedDeviceName;
@@ -1759,6 +1893,9 @@ class ChatController extends Notifier<ChatState>
   /// the hashes we are missing (with the missing count each).
   Future<void> _handleSyncManifest(dynamic itemsRaw) async {
     if (itemsRaw is! List || itemsRaw.isEmpty) return;
+    // Counts over the loaded window (it always covers the newest messages a
+    // manifest can name); a race with paged loading only causes an
+    // over-request, and the apply side dedups against the full store.
     final myCounts = await _localHashCounts(state.messages);
 
     final missing = <Map<String, dynamic>>[];
@@ -2048,6 +2185,18 @@ class ChatController extends Notifier<ChatState>
                       m.imagePath != null &&
                       _fileHash(m.imagePath!) == incomingHash)),
         );
+        if (!alreadyHave) {
+          // The loaded window may not cover the whole history: a copy of
+          // this message may already exist BELOW it (a manifest over-request
+          // re-serves old messages), and integrating it again would
+          // duplicate the row. One indexed existence check.
+          alreadyHave = await _repo.hasMessageNear(
+            state.chatSession.id,
+            text: text,
+            isSentByMe: sentByMe,
+            timestamp: ts,
+          );
+        }
         if (alreadyHave) continue;
 
         // Persist the embedded media to a local file (once, after dedup).
@@ -2494,15 +2643,9 @@ class ChatController extends Notifier<ChatState>
     }
   }
 
-  Future<void> _saveChatSession() async {
-    final session = state.chatSession;
-    session.messages = List.of(state.messages);
-    session.updatedAt = DateTime.now();
-    await _repo.saveChatSession(session);
-  }
-
-  /// Clears the conversation (the old kit's `messages.clear() +
-  /// saveChatSession()` pair as one call — same behavior).
+  /// Clears the conversation: the visible window empties, the stored
+  /// messages are removed explicitly (windowed saves can no longer drop
+  /// them implicitly) and the session row is stamped via the regular save.
   Future<void> clearConversation() async {
     if (_closed) return;
     // Drop any pending debounced write first — a stale snapshot must not
@@ -2510,8 +2653,15 @@ class ChatController extends Notifier<ChatState>
     _saveDebounce?.cancel();
     _saveDebounce = null;
     _pendingSaveSnapshot = null;
-    state = state.copyWith(messages: const []);
-    await _saveChatSession();
+    state = state.copyWith(messages: const [], hasMoreOlder: false);
+    try {
+      await _repo.clearSessionMessages(state.chatSession.id);
+      await _repo.saveChatSessionWindow(_snapshotSession());
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('Chat clear failed: $e');
+      }
+    }
   }
 
   /// Snapshot of the session as of the last scheduled save. Captured
@@ -2538,7 +2688,7 @@ class ChatController extends Notifier<ChatState>
       _pendingSaveSnapshot = null;
       if (snapshot == null) return;
       try {
-        await _repo.saveChatSession(snapshot);
+        await _repo.saveChatSessionWindow(snapshot);
       } catch (e) {
         // Never let a persistence failure vanish silently — it previously
         // made sessions disappear after restart with no trace.
@@ -2556,7 +2706,7 @@ class ChatController extends Notifier<ChatState>
     _saveDebounce = null;
     _pendingSaveSnapshot = null;
     try {
-      await _repo.saveChatSession(snapshot);
+      await _repo.saveChatSessionWindow(snapshot);
     } catch (e) {
       if (kDebugMode) {
         debugPrint('Chat session flush failed: $e');
@@ -2573,7 +2723,7 @@ class ChatController extends Notifier<ChatState>
     }
   }
 
-  /// Removes one of the user's own messages by id (UI + persisted session).
+  /// Removes one of the user's own messages by id (UI + stored row).
   /// Local only: the peer's copy is untouched, so a later history sync may
   /// re-deliver the message.
   void deleteMessage(String? id) {
@@ -2583,7 +2733,22 @@ class ChatController extends Notifier<ChatState>
     if (idx == -1) return;
     msgs.removeAt(idx);
     state = state.copyWith(messages: msgs);
+    // The windowed save is an upsert — a removed message needs an explicit
+    // row delete (the old full rewrite used to drop it implicitly). The
+    // scheduled save is kept too: it replaces any PENDING snapshot taken
+    // before the removal (its late flush would upsert the message back in).
+    unawaited(_deleteStoredMessage(id));
     _scheduleSave();
+  }
+
+  Future<void> _deleteStoredMessage(String id) async {
+    try {
+      await _repo.deleteMessageRow(id);
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('Message delete failed: $e');
+      }
+    }
   }
 
   Future<void> pickAndSendImage() => _pickAndSend(ImageSource.gallery);
