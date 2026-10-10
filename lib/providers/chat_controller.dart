@@ -13,6 +13,7 @@ import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/data/session_repository.dart';
 import 'package:chatblue/data/settings_repository.dart';
 import 'package:chatblue/providers/app_providers.dart';
+import 'package:chatblue/screens/chat_ui/connecting_panel.dart';
 import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:crypto/crypto.dart';
 import 'package:file_picker/file_picker.dart';
@@ -42,7 +43,7 @@ enum _SendKind { text, bytes }
 /// full image transfers (their progress bubbles are driven by transport
 /// progress callbacks while the job is active).
 class _OutgoingJob {
-  _OutgoingJob.text(String this.text)
+  _OutgoingJob.text(String this.text, {this.messageId})
       : kind = _SendKind.text,
         bytes = null,
         imagePath = null,
@@ -55,12 +56,18 @@ class _OutgoingJob {
     this.audioText,
     this.fileName,
   })  : kind = _SendKind.bytes,
-        text = null;
+        text = null,
+        messageId = null;
 
   final _SendKind kind;
   final String? text;
   final Uint8List? bytes;
   final String? imagePath;
+
+  /// Bubble id of a text job's message — lets the send result stamp its
+  /// delivery state (sent / failed). Bytes jobs carry none: their progress
+  /// bubble is identified at finalize time.
+  final String? messageId;
 
   /// When set, the transferred bytes are a voice recording and the bubble
   /// finalizes as an audio message with this duration caption.
@@ -335,6 +342,11 @@ class ChatController extends Notifier<ChatState>
   /// may open a beat after ours). Test-overridable like the stall timeout.
   static Duration linkShareRetryDelay = const Duration(milliseconds: 2500);
 
+  /// One-shot safety re-delivery window: if no peer manifest arrived this
+  /// long after connecting, both first passes may have raced — re-deliver
+  /// the manifest + reading once (see [_redeliverManifestAndReading]).
+  static Duration syncNudgeDelay = const Duration(seconds: 10);
+
   /// Cadence of the live-read re-share while connected (Wi‑Fi Direct client
   /// side): the peer's "(peer reading)" tracks the real link instead of a
   /// frozen snapshot. Test-overridable like the other timeouts.
@@ -399,6 +411,29 @@ class ChatController extends Notifier<ChatState>
   /// announcement/bytes pair, so files are blocked for it.
   int? _peerPv;
 
+  // ── Delivery ticks (pending → sent → delivered) ────────────────────────
+  // The receiver confirms received peer messages with batched `ack` sync
+  // frames carrying content fingerprints; the sender flips matching
+  // outgoing messages to `delivered`. The same matching also runs against
+  // the peer's sync manifest as a backstop — an ack frame lost with a
+  // dropped link still heals on the next (re)connection.
+  final Set<String> _pendingAckFps = <String>{};
+  final Map<String, String> _deliveryFpCache = <String, String>{};
+  Timer? _ackFlushTimer;
+
+  /// Batch window before queued receiver acks go out as one `ack` frame
+  /// (a history burst acks once, not per message). Test-overridable.
+  @visibleForTesting
+  static Duration ackFlushDelay = const Duration(milliseconds: 400);
+
+  /// Undelivered outgoing messages examined per ack/manifest batch — caps
+  /// the file reads behind media fingerprints.
+  static const int _deliveryMatchScanCap = 20;
+
+  /// Hard cap on one ack batch: flush early past this (the frame should
+  /// stay far below the sync-progress banner threshold).
+  static const int _ackBatchCap = 200;
+
   /// Scan-time RSSI the peer shared over the sync channel (the accepting
   /// side never scanned, so this is the only reading it can show).
   int? _peerReportedRssi;
@@ -410,6 +445,23 @@ class ChatController extends Notifier<ChatState>
   /// Periodic re-share of the LIVE link reading while connected — Wi‑Fi
   /// Direct client side only (the side that has a readback).
   Timer? _linkShareTicker;
+
+  /// The peer's manifest arrived on this connection — the frame is only
+  /// sent after the peer's callback wiring, so it doubles as their
+  /// readiness signal (and silences the nudge).
+  bool _receivedPeerManifest = false;
+
+  /// Manifest + reading were re-delivered once on this connection (see
+  /// [_redeliverManifestAndReading]) — bounds the exchange, no ping-pong.
+  bool _redeliveredManifest = false;
+
+  /// The exact manifest frame last sent on this connection — re-delivered
+  /// verbatim (no re-hash) when the first pass may have missed the peer.
+  String? _lastManifestFrame;
+
+  /// One-shot safety net for the (rare) case where BOTH first passes raced
+  /// and no manifest arrived at either side.
+  Timer? _syncNudgeTimer;
 
   // True when this chat open created a BRAND-NEW session because the peer
   // identity was not (fully) known yet (rotated MAC / identity frame still
@@ -673,6 +725,12 @@ class ChatController extends Notifier<ChatState>
     // a connection (home -> chat -> Connect button) get the sync as soon as
     // the socket comes up. A drop re-arms the sync (connection signal).
     Future.microtask(_sendHistorySync);
+    // Safety net for the first-pass race (see syncNudgeDelay): arm here too,
+    // not only on the connection signal — a scan-flow chat opens AFTER the
+    // connection event, so the signal alone would never arm it.
+    if (_binding.isConnected) {
+      _syncNudgeTimer ??= Timer(syncNudgeDelay, _onSyncNudge);
+    }
   }
 
   /// Idempotent full teardown — the old `onClose` body exactly. Runs
@@ -703,6 +761,11 @@ class ChatController extends Notifier<ChatState>
     _linkShareRetry = null;
     _linkShareTicker?.cancel();
     _linkShareTicker = null;
+    _syncNudgeTimer?.cancel();
+    _syncNudgeTimer = null;
+    _ackFlushTimer?.cancel();
+    _ackFlushTimer = null;
+    _pendingAckFps.clear();
     _incomingStallTimer?.cancel();
     _incomingStallTimer = null;
     _outgoingStallTimer?.cancel();
@@ -751,6 +814,7 @@ class ChatController extends Notifier<ChatState>
     state = state.copyWith(isConnected: connected);
     if (connected) {
       _connectedSince = DateTime.now();
+      _syncNudgeTimer ??= Timer(syncNudgeDelay, _onSyncNudge);
       _sendHistorySync();
       // Re-share on every (re)connection: the reading is per-link.
       unawaited(_sharePeerSignal());
@@ -758,6 +822,11 @@ class ChatController extends Notifier<ChatState>
       _connectedSince = null;
       _peerReportedRssi = null;
       _syncSentForSession = false;
+      _receivedPeerManifest = false;
+      _redeliveredManifest = false;
+      _lastManifestFrame = null;
+      _syncNudgeTimer?.cancel();
+      _syncNudgeTimer = null;
       // The live-reading ticker describes the link that just died — stop
       // it and forget the last pushed value; the next connection restarts
       // both.
@@ -768,6 +837,11 @@ class ChatController extends Notifier<ChatState>
       // this clear the next connection's first bytes frame misroutes.
       _pendingAudioMeta = null;
       _pendingIncomingFileMeta = null;
+      // Queued acks describe a link that just died — nothing to answer on
+      // anymore; a re-encounter re-acks.
+      _ackFlushTimer?.cancel();
+      _ackFlushTimer = null;
+      _pendingAckFps.clear();
       // A dropped link kills any in-flight byte transfer: resolve its
       // bubble now instead of leaving it stuck at its last reading.
       _failActiveTransfers();
@@ -887,6 +961,85 @@ class ChatController extends Notifier<ChatState>
         accent: Colors.amber,
       );
     }
+  }
+
+  /// Connects to this chat's peer over [kind] — the transport picker's
+  /// entry point. The current transport delegates to the classic reconnect
+  /// ([connectToCurrentSession]); another transport runs THAT transport's
+  /// session-reconnect flow (discovery + match, with its own device-picker
+  /// fallback) behind the cancellable connecting panel. On success the
+  /// target transport pushes its own chat screen, and the session
+  /// reconciliation merges both channels into one conversation.
+  Future<void> connectViaTransport(String kind, BuildContext context) async {
+    if (_closed || state.isConnected || state.isConnecting) return;
+    if (kind == _arg.transport) {
+      await connectToCurrentSession();
+      return;
+    }
+    final address = state.chatSession.device['address'] as String?;
+    final name = state.chatSession.name;
+    final target = ref.read(chatBindingProvider(kind));
+    final l10n = ref.read(appLocalizationsProvider);
+    final outcome = await showConnectingPanel(
+      context: context,
+      deviceName: name,
+      // The panel closes when the dial stops (this closure resolves); the
+      // outcome reporting below reads the TARGET transport's live state.
+      connect: () async {
+        await dialTransportPeer(kind, address: address, name: name);
+      },
+      onCancel: target.cancelPendingConnect,
+    );
+    if (_closed || outcome == ConnectingOutcome.cancelled) return;
+    // Mirror the scan screens' outcome reporting against the TARGET
+    // transport: only a genuinely dead attempt (no link, nothing pending)
+    // reports failure; a live link still awaiting the peer's acceptance
+    // gets the waiting notice; a decline is already surfaced by the
+    // target's own notice card — never stack a second one on it.
+    final connected = target.isConnected;
+    final awaiting = target.isAwaitingAcceptance;
+    final declined = target.lastConnectError == l10n.connectionDeclinedMessage;
+    if (!connected && !declined) {
+      if (!awaiting) {
+        _showNotice(
+          l10n.couldNotConnectTitle,
+          target.lastConnectError ?? l10n.couldNotConnectMessage,
+          icon: Icons.error_outline,
+        );
+      } else {
+        _showNotice(
+          l10n.waitingAcceptanceTitle,
+          l10n.waitingAcceptanceMessage,
+          icon: Icons.hourglass_top,
+          accent: Colors.amber,
+        );
+      }
+    }
+  }
+
+  /// Dials the stored peer over [kind] through that transport's binding:
+  /// its session-reconnect flow (discovery + match + connect), then waits
+  /// until the dial settles (acceptance / rejection / drop / cancel) — the
+  /// same sequence the scan screens run. Returns the dial result (null when
+  /// the attempt threw). Kept UI-free so the cross-transport flow is
+  /// testable without a widget tree.
+  @visibleForTesting
+  Future<bool?> dialTransportPeer(
+    String kind, {
+    required String? address,
+    required String? name,
+  }) async {
+    final target = ref.read(chatBindingProvider(kind));
+    bool ok;
+    try {
+      ok = await target.connectToSessionPeer(address: address, name: name);
+    } catch (e) {
+      if (kDebugMode) debugPrint('Cross-transport connect failed: $e');
+      return null;
+    }
+    if (!ok && !target.isAwaitingAcceptance) return ok;
+    await target.dialSettled;
+    return ok;
   }
 
   /// Applies a peer-reported device name (WFD sockets carry no name on the
@@ -1137,6 +1290,8 @@ class ChatController extends Notifier<ChatState>
         if (_closed) return;
         state = state.copyWith(messages: msgs);
         _scheduleSave();
+        // Confirm receipt back to the peer: its bubble flips to delivered.
+        _queueDeliveryAck(_textDeliveryFp(text));
       }
     });
 
@@ -1227,6 +1382,135 @@ class ChatController extends Notifier<ChatState>
     return _binding.sendBytes(bytes);
   }
 
+  // ── Delivery fingerprints & the ack exchange ───────────────────────────
+  //
+  // The receiver confirms every peer message it stores with a content
+  // fingerprint batched into an `ack` sync frame; the sender flips matching
+  // outgoing bubbles to `delivered`. Fingerprints are content-based and
+  // identical on both ends by construction: text → `d:t:<sha256(text)>`,
+  // media → `d:m:<sha256(exact stored bytes)>` (the stored media copy IS
+  // the wire copy — the byte-identity invariant the image pipeline keeps).
+
+  /// Receiver fingerprint of a text message.
+  String _textDeliveryFp(String text) =>
+      'd:t:${sha256.convert(utf8.encode(text)).toString()}';
+
+  /// Receiver fingerprint of a media message (exact stored bytes).
+  String _mediaDeliveryFp(Uint8List bytes) =>
+      'd:m:${sha256.convert(bytes).toString()}';
+
+  /// Sets the delivery state of the message with [id] (no-op without one).
+  /// Never downgrades a delivered message and skips same-state writes.
+  void _markDelivery(String? id, String status) {
+    if (_closed || id == null) return;
+    final msgs = List.of(state.messages);
+    final idx = msgs.indexWhere((m) => m.id == id);
+    if (idx == -1) return;
+    final cur = msgs[idx];
+    if (cur.delivery == status ||
+        cur.delivery == MessageModel.deliveryDelivered) {
+      return;
+    }
+    msgs[idx] = cur.copyWith(delivery: status);
+    state = state.copyWith(messages: msgs);
+    _scheduleSave();
+  }
+
+  /// Queues a receipt confirmation for one received peer message. Acks are
+  /// batched ([ackFlushDelay]) into a single `ack` frame — syncing ten
+  /// messages acks once. Set semantics dedupe fingerprints.
+  void _queueDeliveryAck(String fp) {
+    if (_closed) return;
+    _pendingAckFps.add(fp);
+    // A very large batch (long history sync) flushes early: the frame must
+    // stay far below the sync-progress banner threshold.
+    if (_pendingAckFps.length >= _ackBatchCap) {
+      _flushDeliveryAcks();
+      return;
+    }
+    _ackFlushTimer ??= Timer(ackFlushDelay, _flushDeliveryAcks);
+  }
+
+  void _flushDeliveryAcks() {
+    _ackFlushTimer?.cancel();
+    _ackFlushTimer = null;
+    if (_pendingAckFps.isEmpty) return;
+    final items = _pendingAckFps.toList();
+    _pendingAckFps.clear();
+    if (_closed || !_binding.isConnected) return; // no socket to answer on
+    // Rides outside the user send queue, like every other sync frame.
+    _sendText(
+      _syncPrefix + jsonEncode({'type': 'ack', 'items': items}),
+    );
+  }
+
+  /// Applies an incoming `ack` batch: the peer stored these fingerprints →
+  /// matching outgoing messages flip to `delivered`.
+  Future<void> _applyDeliveryAcks(dynamic itemsRaw) async {
+    if (itemsRaw is! List || itemsRaw.isEmpty) return;
+    final fps = itemsRaw.whereType<String>().toSet();
+    if (fps.isEmpty) return;
+    await _markDeliveredMatching(fps);
+  }
+
+  /// Marks outgoing messages delivered when one of their fingerprints is in
+  /// [hashes]. Text matches by the text fingerprint (cheap); media by the
+  /// stored-bytes fingerprint with a lazy per-message hash cache. Async
+  /// file reads run against a snapshot and the final write re-reads the
+  /// list, applying by id — a live frame landing mid-scan is never
+  /// clobbered.
+  Future<void> _markDeliveredMatching(Set<String> hashes) async {
+    if (_closed) return;
+    final snapshot = List.of(state.messages);
+    final matched = <String>{};
+    var examined = 0;
+    for (final m in snapshot) {
+      if (examined >= _deliveryMatchScanCap) break;
+      if (!m.isSentByMe ||
+          m.isTransferring ||
+          m.delivery == MessageModel.deliveryDelivered) {
+        continue;
+      }
+      examined++;
+      final textHash = sha256.convert(utf8.encode(m.text)).toString();
+      if (hashes.contains('d:t:$textHash')) {
+        if (m.id != null) matched.add(m.id!);
+        continue;
+      }
+      final path = m.imagePath;
+      if (path == null || path.isEmpty) continue;
+      final cacheKey = m.id ?? 'p:$path';
+      var mediaHash = _deliveryFpCache[cacheKey];
+      if (mediaHash == null) {
+        try {
+          mediaHash = sha256.convert(await File(path).readAsBytes()).toString();
+          _deliveryFpCache[cacheKey] = mediaHash;
+        } catch (_) {
+          continue; // unreadable file: keep the message as sent
+        }
+      }
+      if (hashes.contains('d:m:$mediaHash')) {
+        if (m.id != null) matched.add(m.id!);
+      }
+    }
+    if (_closed || matched.isEmpty) return;
+    final msgs = List.of(state.messages);
+    var changed = false;
+    for (var i = 0; i < msgs.length; i++) {
+      final m = msgs[i];
+      if (m.id != null &&
+          matched.contains(m.id) &&
+          m.delivery != MessageModel.deliveryDelivered) {
+        msgs[i] = m.copyWith(delivery: MessageModel.deliveryDelivered);
+        changed = true;
+      }
+    }
+    if (changed) {
+      state = state.copyWith(messages: msgs);
+      _scheduleSave();
+    }
+  }
+
   /// Sends the sync **manifest** — a light SHA-256 digest of the last
   /// [_syncHistoryCount] messages (what the peer may need) — as a single
   /// small packet. The peer compares it against its own set and only
@@ -1257,19 +1541,20 @@ class ChatController extends Notifier<ChatState>
 
     // Sync traffic rides OUTSIDE the user send queue: live messages are
     // never blocked behind sync packets (the single socket still orders
-    // frames FIFO natively).
-    _sendText(
-      _syncPrefix +
-          jsonEncode({
-            'type': 'manifest',
-            // Data-plane protocol version: absent on pre-versioning builds
-            // (read as v1). A mismatch against the peer's is logged.
-            'pv': syncProtocolVersion,
-            'items': [
-              for (final e in counts.entries) {'h': e.key, 'n': e.value},
-            ],
-          }),
-    );
+    // frames FIFO natively). The exact frame is kept so a re-delivery
+    // (see _redeliverManifestAndReading) costs no re-hash.
+    final frame = _syncPrefix +
+        jsonEncode({
+          'type': 'manifest',
+          // Data-plane protocol version: absent on pre-versioning builds
+          // (read as v1). A mismatch against the peer's is logged.
+          'pv': syncProtocolVersion,
+          'items': [
+            for (final e in counts.entries) {'h': e.key, 'n': e.value},
+          ],
+        });
+    _lastManifestFrame = frame;
+    _sendText(frame);
   }
 
   /// Asks the peer for the media file behind a placeholder bubble.
@@ -1392,6 +1677,28 @@ class ChatController extends Notifier<ChatState>
     });
   }
 
+  /// One-shot safety net (see [syncNudgeDelay]): a live peer's manifest
+  /// should have arrived by now — its absence means both first passes may
+  /// have raced, so re-deliver once.
+  void _onSyncNudge() {
+    _syncNudgeTimer = null;
+    if (_closed || !state.isConnected) return;
+    if (_receivedPeerManifest) return;
+    _redeliverManifestAndReading();
+  }
+
+  /// Re-delivers our manifest frame (verbatim — the peer's pull heals from
+  /// its diff) and our reading, at most once per connection. Fired by the
+  /// peer's first manifest (their readiness signal) or the nudge safety
+  /// net; the once-guard keeps the exchange bounded (no ping-pong).
+  void _redeliverManifestAndReading() {
+    if (_closed || _redeliveredManifest) return;
+    _redeliveredManifest = true;
+    final frame = _lastManifestFrame;
+    if (frame != null) _sendText(frame);
+    unawaited(_sharePeerSignal());
+  }
+
   /// Dispatches an incoming sync packet by its `type`:
   /// - `manifest`  → compare against local messages, request what's missing
   /// - `request`   → send the requested messages (as `message` packets)
@@ -1403,6 +1710,10 @@ class ChatController extends Notifier<ChatState>
   ///   Bluetooth; the client side's live readback on Wi‑Fi Direct), pushed
   ///   for the quality panel (older builds ignore the unknown type via
   ///   their `default:`).
+  /// - `ack`       → the peer confirmed it stored the listed message
+  ///   fingerprints — matching outgoing bubbles flip to `delivered` (the
+  ///   delivery-tick confirmation; unknown to older builds, which ignore
+  ///   it via `default:` and simply stay on single ticks).
   Future<void> _applyHistorySync(String payload) async {
     try {
       final decoded = jsonDecode(payload);
@@ -1412,6 +1723,13 @@ class ChatController extends Notifier<ChatState>
         case 'message':
           await _applySyncMessages(decoded['messages']);
         case 'manifest':
+          _receivedPeerManifest = true;
+          // Their manifest exists only once their callback wiring is done —
+          // it doubles as their readiness signal. Our first pass can race a
+          // slow peer (device-reported: the receiver's panel showed no
+          // signal because both our frames landed pre-wiring), so respond
+          // once with our manifest + reading.
+          _redeliverManifestAndReading();
           _logPeerProtocolVersion(decoded['pv']);
           await _handleSyncManifest(decoded['items']);
         case 'request':
@@ -1427,6 +1745,8 @@ class ChatController extends Notifier<ChatState>
           if (rssi != null && rssi >= -100 && rssi <= -1) {
             _peerReportedRssi = rssi;
           }
+        case 'ack':
+          await _applyDeliveryAcks(decoded['items']);
         default:
           break;
       }
@@ -1673,6 +1993,16 @@ class ChatController extends Notifier<ChatState>
         final int? incomingHash =
             mediaBytes == null ? null : _quickHash(mediaBytes);
 
+        // Confirm receipt back to the peer — media by the exact persisted
+        // bytes, everything else by the text (placeholder entries included:
+        // their text IS the peer's caption). Queued even for duplicates: a
+        // re-serve after a lost ack must still flip the sender's tick.
+        if (mediaBytes != null) {
+          _queueDeliveryAck(_mediaDeliveryFp(mediaBytes));
+        } else {
+          _queueDeliveryAck(_textDeliveryFp(text));
+        }
+
         // Deferred-download completion: an entry that carries the media of
         // a message we already hold as a placeholder (same id, no file yet)
         // is not a duplicate — it is the file we asked for. Fill the bubble
@@ -1901,6 +2231,8 @@ class ChatController extends Notifier<ChatState>
     }
     state = state.copyWith(messages: msgs);
     _scheduleSave();
+    // Receipt confirmation back to the sender (exact persisted bytes).
+    _queueDeliveryAck(_mediaDeliveryFp(bytes));
   }
 
   void _updateOutgoingProgress(TransferState transfer) {
@@ -1955,6 +2287,9 @@ class ChatController extends Notifier<ChatState>
         transferKind: audioText != null
             ? 'audio'
             : (fileText != null ? 'file' : 'bytes'),
+        // The write loop reached the final byte: handed to the socket. The
+        // peer's ack upgrades this to delivered later.
+        delivery: MessageModel.deliverySent,
       );
       finalized = true;
       _sendingImagePath = null;
@@ -2096,6 +2431,7 @@ class ChatController extends Notifier<ChatState>
           ? l10n.fileSendFailed
           : (wasAudio ? l10n.audioSendFailed : l10n.imageSendFailed),
       isTransferring: false,
+      delivery: MessageModel.deliveryFailed,
     );
     state = state.copyWith(messages: msgs);
     _scheduleSave();
@@ -2121,6 +2457,9 @@ class ChatController extends Notifier<ChatState>
       transferTotal: state.total,
       isTransferring: true,
       transferKind: 'bytes',
+      // Only outgoing transfers carry a delivery state (incoming messages
+      // need none — their arrival is self-evident).
+      delivery: isSentByMe ? MessageModel.deliveryPending : null,
     );
   }
 
@@ -2134,21 +2473,24 @@ class ChatController extends Notifier<ChatState>
     if (state.isConnected) {
       final text = textController.text;
       // Show the bubble immediately (user feedback); the actual write is
-      // serialized behind any in-flight transfer.
+      // serialized behind any in-flight transfer. The bubble starts
+      // `pending` and flips to `sent` when the socket write completes.
+      final id = Uuid().v4();
       final msgs = List.of(state.messages);
       msgs.insert(
         0,
         MessageModel(
-          id: Uuid().v4(),
+          id: id,
           text: text,
           isSentByMe: true,
           timestamp: DateTime.now(),
+          delivery: MessageModel.deliveryPending,
         ),
       );
       state = state.copyWith(messages: msgs);
       _scheduleSave();
       textController.clear();
-      _enqueueSend(_OutgoingJob.text(text));
+      _enqueueSend(_OutgoingJob.text(text, messageId: id));
     }
   }
 
@@ -2655,19 +2997,21 @@ class ChatController extends Notifier<ChatState>
       lng: lng,
       accuracyMeters: accuracyMeters,
     );
+    final id = Uuid().v4();
     final msgs = List.of(state.messages);
     msgs.insert(
       0,
       MessageModel(
-        id: Uuid().v4(),
+        id: id,
         text: text,
         isSentByMe: true,
         timestamp: DateTime.now(),
+        delivery: MessageModel.deliveryPending,
       ),
     );
     state = state.copyWith(messages: msgs);
     _scheduleSave();
-    _enqueueSend(_OutgoingJob.text(text));
+    _enqueueSend(_OutgoingJob.text(text, messageId: id));
   }
 
   /// Adds a send job and starts draining the queue when idle.
@@ -2717,6 +3061,9 @@ class ChatController extends Notifier<ChatState>
         await _sendBytesFrame(job.bytes!);
       } else {
         await _sendText(job.text!);
+        // The socket write completed — the message is on its way; the
+        // peer's ack upgrades it to `delivered` later.
+        _markDelivery(job.messageId, MessageModel.deliverySent);
       }
     } catch (_) {
       // A thrown send resolves the transfer through the same failure path
@@ -2726,6 +3073,10 @@ class ChatController extends Notifier<ChatState>
       // (index 0) when no progress event had ever arrived.
       if (job.kind == _SendKind.bytes && !_closed) {
         _failOutgoingTransfer();
+      } else if (job.kind == _SendKind.text && !_closed) {
+        // A failed text write used to vanish silently; the bubble's red
+        // alert icon is now the visible outcome.
+        _markDelivery(job.messageId, MessageModel.deliveryFailed);
       }
     }
     // Even when the future completes without any progress events, the next
@@ -3003,6 +3354,8 @@ class ChatController extends Notifier<ChatState>
     }
     state = state.copyWith(messages: msgs);
     _scheduleSave();
+    // Receipt confirmation back to the sender (exact persisted bytes).
+    _queueDeliveryAck(_mediaDeliveryFp(bytes));
   }
 
   /// Processes an incoming file transfer: persists the bytes under the
@@ -3079,5 +3432,7 @@ class ChatController extends Notifier<ChatState>
     }
     state = state.copyWith(messages: msgs);
     _scheduleSave();
+    // Receipt confirmation back to the sender (exact persisted bytes).
+    _queueDeliveryAck(_mediaDeliveryFp(bytes));
   }
 }

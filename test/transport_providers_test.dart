@@ -3,9 +3,12 @@ import 'dart:typed_data';
 
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/core/services/wd_service.dart';
+import 'package:chatblue/data/db/app_database.dart';
+import 'package:chatblue/data/settings_repository.dart';
 import 'package:chatblue/l10n/app_localizations_en.dart';
 import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/providers/transport_providers.dart';
+import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'support/fake_bt_service.dart';
@@ -418,6 +421,114 @@ void main() {
       service.onSocketDisconnected?.call('remote');
       await pumpEventQueue();
       expect(notifier.connectedDeviceRssi, isNull);
+    });
+
+    test(
+        'a scanned reading is reused by a later dial without scan context '
+        '(chat reconnect) and persisted for later runs', () async {
+      final db = AppDatabase(NativeDatabase.memory());
+      SettingsRepository.instance = SettingsRepository(db);
+      await SettingsRepository.instance!.load();
+      addTearDown(() async {
+        SettingsRepository.instance = null;
+        await db.close();
+      });
+
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+      final notifier = c.read(btTransportProvider.notifier);
+
+      // A scan session saw the peer — the dialer's only reading source
+      // (Bluetooth Classic exposes no live link RSSI).
+      await notifier.startScan();
+      service.onScanStarted?.call();
+      service.onDeviceFound?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne', rssi: -61),
+      );
+      await notifier.stopScan();
+      await pumpEventQueue();
+      expect(
+        SettingsRepository.instance!.getString('btRssi:AA:BB:CC:DD:EE:FF'),
+        startsWith('-61|'),
+        reason: 'a scan reading must survive the run (chat reconnects and '
+            'restarts have no scan context of their own)',
+      );
+
+      // The chat's Connect button / transport picker dials the stored MAC
+      // with no scan context: the last reading must ride along.
+      final connectFuture = notifier.connectToSessionPeer(
+        address: 'AA:BB:CC:DD:EE:FF',
+        name: 'PeerOne',
+      );
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      );
+      await connectFuture;
+      service.onSocketData!(Uint8List(0), '@@CHATBLUE_CONNECT@@', kind: 'text');
+      await pumpEventQueue();
+
+      expect(notifier.connectedDeviceRssi, -61,
+          reason: 'without this the BT panel shows NO signal at all on a '
+              'chat reconnect (device-reported)');
+    });
+
+    test('a dial-time reading persists and serves a fresh session reconnect',
+        () async {
+      final db = AppDatabase(NativeDatabase.memory());
+      SettingsRepository.instance = SettingsRepository(db);
+      await SettingsRepository.instance!.load();
+      addTearDown(() async {
+        SettingsRepository.instance = null;
+        await db.close();
+      });
+
+      final c1 = container();
+      addTearDown(c1.dispose);
+      await pumpEventQueue();
+      final n1 = c1.read(btTransportProvider.notifier);
+      final dial = n1.connectToPeer('AA:BB:CC:DD:EE:FF', rssi: -67);
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      );
+      await dial;
+      await pumpEventQueue();
+      expect(
+        SettingsRepository.instance!.getString('btRssi:AA:BB:CC:DD:EE:FF'),
+        startsWith('-67|'),
+      );
+
+      // Fresh container + service = a later app run (restart): the chat's
+      // reconnect has no scan context anywhere — the persisted reading is
+      // the only source that exists.
+      final service2 = FakeBtService();
+      final c2 = ProviderContainer(
+        overrides: [
+          btTransportProvider.overrideWith(
+            () => BtTransportNotifier(service: service2),
+          ),
+          appLocalizationsProvider.overrideWithValue(AppLocalizationsEn()),
+        ],
+      );
+      addTearDown(c2.dispose);
+      await pumpEventQueue();
+      final n2 = c2.read(btTransportProvider.notifier);
+      final dial2 = n2.connectToSessionPeer(
+        address: 'AA:BB:CC:DD:EE:FF',
+        name: 'PeerOne',
+      );
+      service2.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      );
+      await dial2;
+      service2.onSocketData!(
+        Uint8List(0),
+        '@@CHATBLUE_CONNECT@@',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+      expect(n2.connectedDeviceRssi, -67,
+          reason: 'the last known scan reading must survive a restart');
     });
 
     test('getLiveRssi polls the native reading while connected', () async {

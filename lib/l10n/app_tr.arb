@@ -156,5 +156,13 @@
   "signalWeak": "Zayıf",
   "signalFair": "Orta",
   "signalGood": "İyi",
-  "signalStrong": "Güçlü"
+  "signalStrong": "Güçlü",
+  "messageQueuedLabel": "Gönderim bekliyor",
+  "messageSentLabel": "Gönderildi",
+  "messageDeliveredLabel": "İletildi",
+  "messageFailedLabel": "Gönderilemedi",
+  "connectMethodTitle": "Bağlantı yöntemini seç",
+  "btConnectHint": "Wi‑Fi gerekmez · daha yavaş",
+  "wfdConnectHint": "Hızlı · doğrudan Wi‑Fi bağlantısı",
+  "nearbyConnectHint": "Hızlı · Google Play hizmetleri üzerinden"
 }

@@ -13,7 +13,7 @@ const appVersion = '1.0.1';
 /// Bump on ANY wire-format change: the sync manifest carries it and both
 /// sides log the peer's version, so two phones running different builds can
 /// be identified as incompatible from the logs in one line.
-const syncProtocolVersion = 2;
+const syncProtocolVersion = 3;
 
 // Debug builds log init failures so device issues are diagnosable;
 // release builds stay silent.

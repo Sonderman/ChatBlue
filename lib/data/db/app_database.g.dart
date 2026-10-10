@@ -624,6 +624,17 @@ class $MessagesTable extends Messages
     type: DriftSqlType.int,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _deliveryMeta = const VerificationMeta(
+    'delivery',
+  );
+  @override
+  late final GeneratedColumn<String> delivery = GeneratedColumn<String>(
+    'delivery',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -638,6 +649,7 @@ class $MessagesTable extends Messages
     isTransferring,
     transferCurrent,
     transferTotal,
+    delivery,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -742,6 +754,12 @@ class $MessagesTable extends Messages
         ),
       );
     }
+    if (data.containsKey('delivery')) {
+      context.handle(
+        _deliveryMeta,
+        delivery.isAcceptableOrUnknown(data['delivery']!, _deliveryMeta),
+      );
+    }
     return context;
   }
 
@@ -801,6 +819,10 @@ class $MessagesTable extends Messages
         DriftSqlType.int,
         data['${effectivePrefix}transfer_total'],
       ),
+      delivery: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}delivery'],
+      ),
     );
   }
 
@@ -838,6 +860,11 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
   final bool isTransferring;
   final int? transferCurrent;
   final int? transferTotal;
+
+  /// Delivery state of an OUTGOING message (null for incoming messages and
+  /// pre-tick legacy rows): 'pending' | 'sent' | 'delivered' | 'failed' —
+  /// see MessageModel.delivery / the chat controller.
+  final String? delivery;
   const MessageRow({
     required this.id,
     required this.sessionId,
@@ -851,6 +878,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     required this.isTransferring,
     this.transferCurrent,
     this.transferTotal,
+    this.delivery,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -881,6 +909,9 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     if (!nullToAbsent || transferTotal != null) {
       map['transfer_total'] = Variable<int>(transferTotal);
     }
+    if (!nullToAbsent || delivery != null) {
+      map['delivery'] = Variable<String>(delivery);
+    }
     return map;
   }
 
@@ -908,6 +939,9 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       transferTotal: transferTotal == null && nullToAbsent
           ? const Value.absent()
           : Value(transferTotal),
+      delivery: delivery == null && nullToAbsent
+          ? const Value.absent()
+          : Value(delivery),
     );
   }
 
@@ -929,6 +963,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       isTransferring: serializer.fromJson<bool>(json['isTransferring']),
       transferCurrent: serializer.fromJson<int?>(json['transferCurrent']),
       transferTotal: serializer.fromJson<int?>(json['transferTotal']),
+      delivery: serializer.fromJson<String?>(json['delivery']),
     );
   }
   @override
@@ -947,6 +982,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       'isTransferring': serializer.toJson<bool>(isTransferring),
       'transferCurrent': serializer.toJson<int?>(transferCurrent),
       'transferTotal': serializer.toJson<int?>(transferTotal),
+      'delivery': serializer.toJson<String?>(delivery),
     };
   }
 
@@ -963,6 +999,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     bool? isTransferring,
     Value<int?> transferCurrent = const Value.absent(),
     Value<int?> transferTotal = const Value.absent(),
+    Value<String?> delivery = const Value.absent(),
   }) => MessageRow(
     id: id ?? this.id,
     sessionId: sessionId ?? this.sessionId,
@@ -982,6 +1019,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     transferTotal: transferTotal.present
         ? transferTotal.value
         : this.transferTotal,
+    delivery: delivery.present ? delivery.value : this.delivery,
   );
   MessageRow copyWithCompanion(MessagesCompanion data) {
     return MessageRow(
@@ -1009,6 +1047,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
       transferTotal: data.transferTotal.present
           ? data.transferTotal.value
           : this.transferTotal,
+      delivery: data.delivery.present ? data.delivery.value : this.delivery,
     );
   }
 
@@ -1026,7 +1065,8 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
           ..write('transferKind: $transferKind, ')
           ..write('isTransferring: $isTransferring, ')
           ..write('transferCurrent: $transferCurrent, ')
-          ..write('transferTotal: $transferTotal')
+          ..write('transferTotal: $transferTotal, ')
+          ..write('delivery: $delivery')
           ..write(')'))
         .toString();
   }
@@ -1045,6 +1085,7 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
     isTransferring,
     transferCurrent,
     transferTotal,
+    delivery,
   );
   @override
   bool operator ==(Object other) =>
@@ -1061,7 +1102,8 @@ class MessageRow extends DataClass implements Insertable<MessageRow> {
           other.transferKind == this.transferKind &&
           other.isTransferring == this.isTransferring &&
           other.transferCurrent == this.transferCurrent &&
-          other.transferTotal == this.transferTotal);
+          other.transferTotal == this.transferTotal &&
+          other.delivery == this.delivery);
 }
 
 class MessagesCompanion extends UpdateCompanion<MessageRow> {
@@ -1077,6 +1119,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
   final Value<bool> isTransferring;
   final Value<int?> transferCurrent;
   final Value<int?> transferTotal;
+  final Value<String?> delivery;
   final Value<int> rowid;
   const MessagesCompanion({
     this.id = const Value.absent(),
@@ -1091,6 +1134,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     this.isTransferring = const Value.absent(),
     this.transferCurrent = const Value.absent(),
     this.transferTotal = const Value.absent(),
+    this.delivery = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   MessagesCompanion.insert({
@@ -1106,6 +1150,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     this.isTransferring = const Value.absent(),
     this.transferCurrent = const Value.absent(),
     this.transferTotal = const Value.absent(),
+    this.delivery = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        sessionId = Value(sessionId),
@@ -1126,6 +1171,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     Expression<bool>? isTransferring,
     Expression<int>? transferCurrent,
     Expression<int>? transferTotal,
+    Expression<String>? delivery,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1141,6 +1187,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
       if (isTransferring != null) 'is_transferring': isTransferring,
       if (transferCurrent != null) 'transfer_current': transferCurrent,
       if (transferTotal != null) 'transfer_total': transferTotal,
+      if (delivery != null) 'delivery': delivery,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1158,6 +1205,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     Value<bool>? isTransferring,
     Value<int?>? transferCurrent,
     Value<int?>? transferTotal,
+    Value<String?>? delivery,
     Value<int>? rowid,
   }) {
     return MessagesCompanion(
@@ -1173,6 +1221,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
       isTransferring: isTransferring ?? this.isTransferring,
       transferCurrent: transferCurrent ?? this.transferCurrent,
       transferTotal: transferTotal ?? this.transferTotal,
+      delivery: delivery ?? this.delivery,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1218,6 +1267,9 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
     if (transferTotal.present) {
       map['transfer_total'] = Variable<int>(transferTotal.value);
     }
+    if (delivery.present) {
+      map['delivery'] = Variable<String>(delivery.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1239,6 +1291,7 @@ class MessagesCompanion extends UpdateCompanion<MessageRow> {
           ..write('isTransferring: $isTransferring, ')
           ..write('transferCurrent: $transferCurrent, ')
           ..write('transferTotal: $transferTotal, ')
+          ..write('delivery: $delivery, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1832,6 +1885,7 @@ typedef $$MessagesTableCreateCompanionBuilder = MessagesCompanion Function({
   Value<bool> isTransferring,
   Value<int?> transferCurrent,
   Value<int?> transferTotal,
+  Value<String?> delivery,
   Value<int> rowid,
 });
 typedef $$MessagesTableUpdateCompanionBuilder = MessagesCompanion Function({
@@ -1847,6 +1901,7 @@ typedef $$MessagesTableUpdateCompanionBuilder = MessagesCompanion Function({
   Value<bool> isTransferring,
   Value<int?> transferCurrent,
   Value<int?> transferTotal,
+  Value<String?> delivery,
   Value<int> rowid,
 });
 
@@ -1934,6 +1989,11 @@ class $$MessagesTableFilterComposer
 
   ColumnFilters<int> get transferTotal => $composableBuilder(
     column: $table.transferTotal,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get delivery => $composableBuilder(
+    column: $table.delivery,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -2025,6 +2085,11 @@ class $$MessagesTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get delivery => $composableBuilder(
+    column: $table.delivery,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   $$SessionsTableOrderingComposer get sessionId {
     final $$SessionsTableOrderingComposer composer = $composerBuilder(
       composer: this,
@@ -2103,6 +2168,9 @@ class $$MessagesTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get delivery =>
+      $composableBuilder(column: $table.delivery, builder: (column) => column);
+
   $$SessionsTableAnnotationComposer get sessionId {
     final $$SessionsTableAnnotationComposer composer = $composerBuilder(
       composer: this,
@@ -2167,6 +2235,7 @@ class $$MessagesTableTableManager
                 Value<bool> isTransferring = const Value.absent(),
                 Value<int?> transferCurrent = const Value.absent(),
                 Value<int?> transferTotal = const Value.absent(),
+                Value<String?> delivery = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion(
                 id: id,
@@ -2181,6 +2250,7 @@ class $$MessagesTableTableManager
                 isTransferring: isTransferring,
                 transferCurrent: transferCurrent,
                 transferTotal: transferTotal,
+                delivery: delivery,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -2197,6 +2267,7 @@ class $$MessagesTableTableManager
                 Value<bool> isTransferring = const Value.absent(),
                 Value<int?> transferCurrent = const Value.absent(),
                 Value<int?> transferTotal = const Value.absent(),
+                Value<String?> delivery = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion.insert(
                 id: id,
@@ -2211,6 +2282,7 @@ class $$MessagesTableTableManager
                 isTransferring: isTransferring,
                 transferCurrent: transferCurrent,
                 transferTotal: transferTotal,
+                delivery: delivery,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

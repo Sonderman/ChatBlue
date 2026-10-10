@@ -43,6 +43,14 @@ abstract interface class ChatTransportBinding {
 
   Future<bool> connectToSessionPeer({required String? address, String? name});
   Future<void> disconnectFromDevice();
+
+  /// Waits until the current dial reaches a terminal state (accepted link,
+  /// rejection, drop or cancel) — the connecting panel's close trigger.
+  Future<void> get dialSettled;
+
+  /// Abandons a pending dial (the connecting panel's İptal path); resolves
+  /// the dial wait as a cancellation.
+  Future<void> cancelPendingConnect();
   Future<void> sendMessage(String message);
   Future<void> sendBytes(Uint8List bytes);
   void onChatOpened();
@@ -177,6 +185,14 @@ class _BtChatBinding extends _BindingBase implements ChatTransportBinding {
       _ref.read(btTransportProvider.notifier).disconnectFromDevice();
 
   @override
+  Future<void> get dialSettled =>
+      _ref.read(btTransportProvider.notifier).dialSettled;
+
+  @override
+  Future<void> cancelPendingConnect() =>
+      _ref.read(btTransportProvider.notifier).cancelPendingConnect();
+
+  @override
   Future<void> sendMessage(String message) =>
       _ref.read(btTransportProvider.notifier).sendMessage(message);
 
@@ -283,6 +299,14 @@ class _WdChatBinding extends _BindingBase implements ChatTransportBinding {
       _ref.read(wdTransportProvider.notifier).disconnectFromDevice();
 
   @override
+  Future<void> get dialSettled =>
+      _ref.read(wdTransportProvider.notifier).dialSettled;
+
+  @override
+  Future<void> cancelPendingConnect() =>
+      _ref.read(wdTransportProvider.notifier).cancelPendingConnect();
+
+  @override
   Future<void> sendMessage(String message) =>
       _ref.read(wdTransportProvider.notifier).sendMessage(message);
 
@@ -384,6 +408,14 @@ class _NearbyChatBinding extends _BindingBase implements ChatTransportBinding {
   @override
   Future<void> disconnectFromDevice() =>
       _ref.read(nearbyTransportProvider.notifier).disconnectFromDevice();
+
+  @override
+  Future<void> get dialSettled =>
+      _ref.read(nearbyTransportProvider.notifier).dialSettled;
+
+  @override
+  Future<void> cancelPendingConnect() =>
+      _ref.read(nearbyTransportProvider.notifier).cancelPendingConnect();
 
   @override
   Future<void> sendMessage(String message) =>

@@ -16,6 +16,7 @@ import 'dart:io';
 
 import 'package:auto_size_text/auto_size_text.dart';
 import 'package:chatblue/core/format_utils.dart';
+import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/location_message.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
@@ -762,14 +763,7 @@ class ChatMessageBubble extends StatelessWidget {
             style: TextStyle(height: 1.25, fontSize: 15, color: mine ? Colors.white : p.messageText),
           ),
           const SizedBox(height: 3),
-          Text(
-            formatChatTimestamp(message.timestamp),
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
-            ),
-          ),
+          _MessageMeta(message: message, mine: mine, palette: p),
         ],
       );
     }
@@ -867,14 +861,7 @@ class ChatMessageBubble extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 4),
-          Text(
-            formatChatTimestamp(message.timestamp),
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
-            ),
-          ),
+          _MessageMeta(message: message, mine: mine, palette: p),
         ],
       ),
     );
@@ -911,14 +898,7 @@ class ChatMessageBubble extends StatelessWidget {
             const SizedBox(height: 4),
           ],
           const SizedBox(height: 4),
-          Text(
-            formatChatTimestamp(message.timestamp),
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
-            ),
-          ),
+          _MessageMeta(message: message, mine: mine, palette: p),
         ],
       ),
     );
@@ -1023,14 +1003,7 @@ class ChatMessageBubble extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 4),
-        Text(
-          formatChatTimestamp(message.timestamp),
-          style: TextStyle(
-            fontSize: 10,
-            fontWeight: FontWeight.w600,
-            color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
-          ),
-        ),
+        _MessageMeta(message: message, mine: mine, palette: p),
       ],
     );
   }
@@ -1085,14 +1058,7 @@ class ChatMessageBubble extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 4),
-          Text(
-            formatChatTimestamp(message.timestamp),
-            style: TextStyle(
-              fontSize: 10,
-              fontWeight: FontWeight.w600,
-              color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
-            ),
-          ),
+          _MessageMeta(message: message, mine: mine, palette: p),
         ],
       ),
     );
@@ -1147,14 +1113,7 @@ class ChatMessageBubble extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 4),
-        Text(
-          formatChatTimestamp(message.timestamp),
-          style: TextStyle(
-            fontSize: 10,
-            fontWeight: FontWeight.w600,
-            color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
-          ),
-        ),
+        _MessageMeta(message: message, mine: mine, palette: p),
       ],
     );
   }
@@ -1195,6 +1154,82 @@ class ChatMessageBubble extends StatelessWidget {
         valueColor: AlwaysStoppedAnimation<Color>(p.accent),
       ),
     );
+  }
+}
+
+/// One-line meta under a bubble: the timestamp, plus the delivery ticks for
+/// outgoing messages (see [_DeliveryTicks]).
+class _MessageMeta extends StatelessWidget {
+  const _MessageMeta({
+    required this.message,
+    required this.mine,
+    required this.palette,
+  });
+
+  final MessageModel message;
+  final bool mine;
+  final ChatPalette palette;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          formatChatTimestamp(message.timestamp),
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+            color: mine ? Colors.white.withValues(alpha: 0.75) : palette.muted,
+          ),
+        ),
+        // Ticks on outgoing messages only (the standard convention — a
+        // received message's arrival is self-evident); progress bubbles
+        // are excluded while transferring.
+        if (mine && !message.isTransferring) ...[
+          const SizedBox(width: 4),
+          _DeliveryTicks(message: message),
+        ],
+      ],
+    );
+  }
+}
+
+/// Delivery indicator of an outgoing bubble: ⏱ waiting to send → ✓ written
+/// to the socket → ✓✓ the peer confirmed storage; a failed write shows a
+/// red alert. Legacy rows (state null) fall back to the single tick.
+class _DeliveryTicks extends StatelessWidget {
+  const _DeliveryTicks({required this.message});
+
+  final MessageModel message;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    final (IconData icon, Color color, String label) =
+        switch (message.delivery) {
+      MessageModel.deliveryDelivered => (
+          Icons.done_all,
+          const Color(0xFF9BF0FF),
+          l10n.messageDeliveredLabel,
+        ),
+      MessageModel.deliveryPending => (
+          Icons.schedule,
+          Colors.white.withValues(alpha: 0.75),
+          l10n.messageQueuedLabel,
+        ),
+      MessageModel.deliveryFailed => (
+          Icons.error_outline,
+          const Color(0xFFFFB4AB),
+          l10n.messageFailedLabel,
+        ),
+      _ => (
+          Icons.done,
+          Colors.white.withValues(alpha: 0.75),
+          l10n.messageSentLabel,
+        ),
+    };
+    return Semantics(label: label, child: Icon(icon, size: 14, color: color));
   }
 }
 
@@ -1402,7 +1437,7 @@ class _ConnectBar extends StatelessWidget {
               ),
               child: InkWell(
                 borderRadius: BorderRadius.circular(23),
-                onTap: state.isConnecting ? null : controller.connectToCurrentSession,
+                onTap: state.isConnecting ? null : () => _pickMethod(context),
                 child: Center(
                   child: state.isConnecting
                       ? const SizedBox(
@@ -1426,6 +1461,178 @@ class _ConnectBar extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// Opens the transport picker and runs the chosen connect flow: the
+  /// current transport delegates to the classic session reconnect; another
+  /// transport runs ITS session-reconnect flow (discovery + match, with its
+  /// own device-picker fallback) behind a cancellable connecting panel and
+  /// opens its own chat screen once linked — the session reconciliation
+  /// merges both channels into one conversation.
+  Future<void> _pickMethod(BuildContext context) async {
+    final kind = await showTransportPicker(context);
+    if (kind == null) return;
+    if (!context.mounted) return;
+    await controller.connectViaTransport(kind, context);
+  }
+}
+
+/// Connection-method picker shown by the chat's Connect button: the peer
+/// can be reached over any of the three transports, each with its channel
+/// icon, an accent-tinted medallion and a one-line hint. Returns the chosen
+/// transport id (`ChatSessionModel.transport*`) or null when dismissed.
+Future<String?> showTransportPicker(BuildContext context) {
+  final p = ChatPalette.of(context);
+  final l10n = AppLocalizations.of(context)!;
+  return showModalBottomSheet<String>(
+    context: context,
+    backgroundColor: Colors.transparent,
+    useSafeArea: true,
+    builder: (sheetContext) => Material(
+      color: p.surface,
+      clipBehavior: Clip.antiAlias,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: p.border,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              l10n.connectMethodTitle,
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                color: p.messageText,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _TransportOption(
+              icon: Icons.bluetooth,
+              accent: const Color(0xFF3D8BFF),
+              title: l10n.bluetoothTab,
+              hint: l10n.btConnectHint,
+              palette: p,
+              onTap: () => Navigator.of(sheetContext)
+                  .pop(ChatSessionModel.transportBluetooth),
+            ),
+            const SizedBox(height: 10),
+            _TransportOption(
+              icon: Icons.wifi_tethering,
+              accent: const Color(0xFF00B8D9),
+              title: l10n.wifiTab,
+              hint: l10n.wfdConnectHint,
+              palette: p,
+              onTap: () => Navigator.of(sheetContext)
+                  .pop(ChatSessionModel.transportWifiDirect),
+            ),
+            const SizedBox(height: 10),
+            _TransportOption(
+              icon: Icons.sensors,
+              accent: const Color(0xFF34A853),
+              title: l10n.nearbyTab,
+              hint: l10n.nearbyConnectHint,
+              palette: p,
+              onTap: () => Navigator.of(sheetContext)
+                  .pop(ChatSessionModel.transportNearby),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// One transport row of [showTransportPicker]: tinted icon medallion,
+/// channel name and its one-line hint.
+class _TransportOption extends StatelessWidget {
+  const _TransportOption({
+    required this.icon,
+    required this.accent,
+    required this.title,
+    required this.hint,
+    required this.palette,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final Color accent;
+  final String title;
+  final String hint;
+  final ChatPalette palette;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Ink(
+        decoration: BoxDecoration(
+          color: palette.bar,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: palette.border),
+        ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: accent.withValues(alpha: 0.16),
+                    border: Border.all(color: accent.withValues(alpha: 0.45)),
+                  ),
+                  child: Icon(icon, color: accent, size: 23),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w600,
+                          color: palette.messageText,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        hint,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 11.5, color: palette.muted),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(Icons.chevron_right, color: palette.muted),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

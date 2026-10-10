@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/data/db/app_database.dart';
 import 'package:chatblue/data/session_repository.dart';
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';
@@ -123,5 +124,29 @@ void main() {
 
   test('rebuilds a v1 file from the first import build', () async {
     await expectRebuilt(legacyFile(version: 1));
+  });
+
+  test(
+      'migrates a shipped v3 file in place: data preserved, delivery column added',
+      () async {
+    final file = legacyFile(version: 3);
+    final db = AppDatabase(NativeDatabase(file));
+
+    // No rebuild: every pre-existing row survives the upgrade — a shipped
+    // file carries real conversations.
+    expect(await db.select(db.sessions).get(), hasLength(1));
+    expect(await db.select(db.appSettings).get(), hasLength(1));
+    final rows = await db.select(db.messages).get();
+    expect(rows, hasLength(1));
+    expect(rows.single.content, 'old');
+    // The new column exists and migrated rows read back as null (no ticks
+    // for pre-existing messages — the UI falls back to a single tick).
+    expect(rows.single.delivery, isNull);
+    // The new column is writable through the generated companion.
+    await (db.update(db.messages)..where((t) => t.id.equals('m1')))
+        .write(const MessagesCompanion(delivery: Value('sent')));
+    expect((await db.select(db.messages).getSingle()).delivery, 'sent');
+
+    await db.close();
   });
 }

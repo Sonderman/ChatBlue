@@ -146,6 +146,7 @@ class SessionRepository {
       isTransferring: Value(m.isTransferring),
       transferCurrent: Value(m.transferCurrent),
       transferTotal: Value(m.transferTotal),
+      delivery: Value(m.delivery),
     );
   }
 
@@ -175,5 +176,6 @@ class SessionRepository {
         transferCurrent: row.transferCurrent,
         transferTotal: row.transferTotal,
         transferKind: row.transferKind,
+        delivery: row.delivery,
       );
 }

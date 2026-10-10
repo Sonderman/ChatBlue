@@ -29,6 +29,18 @@ class MessageModel {
   /// ordinary messages and once the file has been downloaded.
   final int? remoteMediaSize;
 
+  /// Delivery state of an OUTGOING message ('pending' → 'sent' →
+  /// 'delivered', or 'failed'); null for incoming messages and for rows
+  /// persisted before the delivery-tick feature. Drives the bubble's tick
+  /// icon (the state machine lives in the chat controller).
+  final String? delivery;
+
+  /// [delivery] state values.
+  static const String deliveryPending = 'pending';
+  static const String deliverySent = 'sent';
+  static const String deliveryDelivered = 'delivered';
+  static const String deliveryFailed = 'failed';
+
   MessageModel({
     this.id,
     required this.text,
@@ -36,6 +48,7 @@ class MessageModel {
     required this.timestamp,
     this.imagePath,
     this.remoteMediaSize,
+    this.delivery,
     this.isTransferring = false,
     this.transferCurrent,
     this.transferTotal,
@@ -63,6 +76,7 @@ class MessageModel {
     bool? isSentByMe,
     DateTime? timestamp,
     String? imagePath,
+    String? delivery,
     bool? isTransferring,
     int? transferCurrent,
     int? transferTotal,
@@ -75,6 +89,7 @@ class MessageModel {
       timestamp: timestamp ?? this.timestamp,
       imagePath: imagePath ?? this.imagePath,
       remoteMediaSize: remoteMediaSize,
+      delivery: delivery ?? this.delivery,
       isTransferring: isTransferring ?? this.isTransferring,
       transferCurrent: transferCurrent ?? this.transferCurrent,
       transferTotal: transferTotal ?? this.transferTotal,
@@ -90,6 +105,7 @@ class MessageModel {
       'timestamp': timestamp.toIso8601String(),
       'imagePath': imagePath,
       'remoteMediaSize': remoteMediaSize,
+      'delivery': delivery,
     };
   }
 
@@ -101,6 +117,7 @@ class MessageModel {
       timestamp: json['timestamp'] != null ? DateTime.parse(json['timestamp']) : DateTime.now(),
       imagePath: json['imagePath'],
       remoteMediaSize: json['remoteMediaSize'] as int?,
+      delivery: json['delivery'] as String?,
     );
   }
 }

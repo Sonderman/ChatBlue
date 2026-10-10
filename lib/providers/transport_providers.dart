@@ -4,6 +4,7 @@ import 'package:chatblue/config.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/core/services/device_id_service.dart';
 import 'package:chatblue/core/services/wd_service.dart';
+import 'package:chatblue/data/settings_repository.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
 import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/screens/chat_ui/connection_notice.dart';
@@ -146,6 +147,17 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   /// Scan-time RSSI of the last dial — the chat quality panel's only signal
   /// metric (Bluetooth Classic exposes no live RSSI for an RFCOMM link).
   int? _dialRssi;
+
+  /// Last scan reading per device address (this run): a dial WITHOUT scan
+  /// context — the chat's Connect button / transport picker — reuses it, so
+  /// the quality panel has a reading to show (labelled "(last scan)");
+  /// Classic exposes no live RSSI, so a scan value is the only reading
+  /// that will ever exist for the link.
+  final Map<String, int> _lastScanRssi = {};
+
+  /// Values already written to the settings store — the delta guard keeps
+  /// scan bursts from re-persisting on every inquiry window.
+  final Map<String, int> _persistedRssi = {};
   Timer? _serverAutoStopTimer;
   Timer? _scanSessionTimer;
   Timer? _scanRearmTimer;
@@ -199,6 +211,18 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
       // Stale late events (queued ACTION_FOUNDs landing after a window
       // died) must not repopulate the list while no scan is on.
       if (_scanSessionTimer == null && !state.isScanning) return;
+      // Remember the reading for later dials without scan context (the
+      // chat's Connect button): a nameless device is skipped from the list
+      // below, but it can still be dialed by its stored MAC. Persist it so
+      // a reconnect after a restart still has a signal to show.
+      final rssi = d.rssi;
+      if (rssi != null) {
+        _lastScanRssi[d.address] = rssi;
+        final persisted = _persistedRssi[d.address];
+        if (persisted == null || (persisted - rssi).abs() >= 2) {
+          _persistRssi(d.address, rssi);
+        }
+      }
       // Nameless neighbors (audio gear, TVs — devices that never broadcast
       // a name in their inquiry response) are noise on a chat picker; a
       // later FOUND event that carries the name still adds the device.
@@ -349,6 +373,30 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Settings key of the persisted scan reading for [address].
+  String _rssiKey(String address) => 'btRssi:${address.toUpperCase()}';
+
+  /// Persists a scan reading (`<rssi>|<epochMs>`) so a later session —
+  /// even after a restart — can show the last known signal on a reconnect
+  /// that has no scan context of its own.
+  void _persistRssi(String address, int rssi) {
+    _persistedRssi[address] = rssi;
+    final write = SettingsRepository.instance?.setString(
+      _rssiKey(address),
+      '$rssi|${DateTime.now().millisecondsSinceEpoch}',
+    );
+    if (write != null) unawaited(write);
+  }
+
+  /// The last persisted reading for [address], or null (unset / malformed).
+  int? _readPersistedRssi(String address) {
+    final raw = SettingsRepository.instance?.getString(_rssiKey(address));
+    if (raw == null) return null;
+    final rssi = int.tryParse(raw.split('|').first);
+    if (rssi == null || rssi < -100 || rssi > -1) return null;
+    return rssi;
   }
 
   /// Decline feedback — the themed notice card (dialer or declining side).
@@ -570,9 +618,17 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     // Fresh attempt: drop the previous failure reason so a stale reason
     // (e.g. a previous decline) can never masquerade as this dial's result.
     state = state.copyWith(clearLastConnectError: true);
-    // Dial-time scan RSSI for the chat quality panel (null when dialed
-    // without scan context, e.g. the chat's own Connect button).
-    _dialRssi = rssi;
+    // Dial-time scan RSSI for the chat quality panel. A dial WITHOUT scan
+    // context (the chat's Connect button / transport picker) reuses the
+    // last reading ever seen for this address — Classic exposes no live
+    // RSSI, so a scan reading is the only signal source that exists at all
+    // (the panel labels it "(last scan)"). Readings persist across
+    // restarts: a reconnect days later still shows the last known value.
+    if (rssi != null) {
+      _lastScanRssi[address] = rssi;
+      _persistRssi(address, rssi);
+    }
+    _dialRssi = rssi ?? _lastScanRssi[address] ?? _readPersistedRssi(address);
     final Completer<bool> completer = Completer<bool>();
     _pendingConnectCompleter = completer;
     _dialSettle = Completer<void>();

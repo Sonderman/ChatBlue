@@ -77,6 +77,11 @@ class Messages extends Table {
 
   IntColumn get transferTotal => integer().nullable()();
 
+  /// Delivery state of an OUTGOING message (null for incoming messages and
+  /// pre-tick legacy rows): 'pending' | 'sent' | 'delivered' | 'failed' —
+  /// see MessageModel.delivery / the chat controller.
+  TextColumn get delivery => text().nullable()();
+
   @override
   Set<Column> get primaryKey => {id};
 }

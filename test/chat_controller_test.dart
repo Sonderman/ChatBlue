@@ -15,162 +15,12 @@ import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/providers/chat_controller.dart';
 import 'package:crypto/crypto.dart';
 import 'package:drift/native.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Chat-controller contract: seeding, the FIFO send queue, the history-sync
-/// manifest flow and teardown. The fake binding records every transport call
-/// and lets the test fire signals/events synchronously.
-class FakeChatBinding implements ChatTransportBinding {
-  FakeChatBinding({this.transport = ChatSessionModel.transportBluetooth});
-
-  final String transport;
-  bool connected = false;
-  String? deviceKey;
-  String? deviceId;
-  String? deviceName;
-  int? deviceRssi;
-  bool awaiting = false;
-  String? connectError;
-
-  final List<String> sentMessages = [];
-  final List<Uint8List> sentBytes = [];
-  int disconnectCalls = 0;
-  int chatOpenedCalls = 0;
-  int chatClosedCalls = 0;
-  Completer<void>? holdSendMessage;
-  void Function(Uint8List bytes, String text, {required String kind})?
-      dataCallback;
-  void Function({
-    required String direction,
-    required int current,
-    required int total,
-    required String kind,
-  })? progressCallback;
-  final List<ChatTransportListener> listeners = [];
-
-  @override
-  bool get isConnected => connected;
-
-  @override
-  String? get connectedDeviceKey => deviceKey;
-
-  @override
-  String? get connectedDeviceId => deviceId;
-
-  @override
-  String? get connectedDeviceName => deviceName;
-
-  @override
-  int? get connectedDeviceRssi => deviceRssi;
-
-  int? linkQualityValue;
-
-  @override
-  int? get linkQuality => linkQualityValue;
-
-  int? liveRssi;
-
-  @override
-  Future<int?> getLiveRssi() async => connected ? liveRssi : null;
-
-  @override
-  String get transportType => transport;
-
-  @override
-  bool get isAwaitingAcceptance => awaiting;
-
-  @override
-  String? get lastConnectError => connectError;
-
-  @override
-  void addListener(ChatTransportListener listener) => listeners.add(listener);
-
-  @override
-  void removeListener(ChatTransportListener listener) =>
-      listeners.remove(listener);
-
-  @override
-  Future<bool> connectToSessionPeer(
-          {required String? address, String? name}) async =>
-      true;
-
-  @override
-  Future<void> disconnectFromDevice() async {
-    disconnectCalls++;
-  }
-
-  @override
-  Future<void> sendMessage(String message) async {
-    final hold = holdSendMessage;
-    if (hold != null) await hold.future;
-    sentMessages.add(message);
-  }
-
-  @override
-  Future<void> sendBytes(Uint8List bytes) async {
-    sentBytes.add(bytes);
-  }
-
-  @override
-  void onChatOpened() => chatOpenedCalls++;
-
-  @override
-  void onChatClosed() => chatClosedCalls++;
-
-  @override
-  void onSocketData(
-    void Function(Uint8List bytes, String text, {required String kind}) callback,
-  ) =>
-      dataCallback = callback;
-
-  @override
-  void onTransferProgress(
-    void Function({
-      required String direction,
-      required int current,
-      required int total,
-      required String kind,
-    }) callback,
-  ) =>
-      progressCallback = callback;
-
-  void emitConnection(bool c) {
-    connected = c;
-    for (final l in List.of(listeners)) {
-      l.onTransportConnectionChanged(c);
-    }
-  }
-
-  void emitReason(String r) {
-    for (final l in List.of(listeners)) {
-      l.onTransportDisconnectReason(r);
-    }
-  }
-
-  void emitPeerName(String n) {
-    for (final l in List.of(listeners)) {
-      l.onTransportPeerName(n);
-    }
-  }
-
-  void emitData(Uint8List bytes, String text, {required String kind}) =>
-      dataCallback?.call(bytes, text, kind: kind);
-
-  void emitProgress({
-    required String direction,
-    required int current,
-    required int total,
-    required String kind,
-  }) =>
-      progressCallback?.call(
-        direction: direction,
-        current: current,
-        total: total,
-        kind: kind,
-      );
-}
+import 'support/fake_chat_binding.dart';
 
 ChatSessionModel sessionFixture({
   String id = 'sess-1',
@@ -206,14 +56,19 @@ void main() {
   late FakeChatBinding binding;
   AppDatabase? defaultDb;
 
-  ProviderContainer container({FakeChatBinding? b, AppDatabase? database}) {
+  ProviderContainer container({
+    FakeChatBinding? b,
+    Map<String, FakeChatBinding>? byKind,
+    AppDatabase? database,
+  }) {
     final resolved =
         database ?? (defaultDb = AppDatabase(NativeDatabase.memory()));
     return ProviderContainer(
       overrides: [
         appDatabaseProvider.overrideWithValue(resolved),
         appLocalizationsProvider.overrideWithValue(AppLocalizationsEn()),
-        chatBindingProvider.overrideWith((ref, kind) => b ?? binding),
+        chatBindingProvider
+            .overrideWith((ref, kind) => byKind?[kind] ?? b ?? binding),
       ],
     );
   }
@@ -629,10 +484,13 @@ void main() {
       );
 
       // RF-2: a drop re-arms the sync; the next connect re-sends the manifest.
+      // (The peer's manifest above already triggered one re-delivery, so the
+      // absolute count includes it — assert the reconnect's exact +1.)
+      final beforeReconnect = manifestCount();
       binding.emitConnection(false);
       binding.emitConnection(true);
       await pumpEventQueue();
-      expect(manifestCount(), 2);
+      expect(manifestCount(), beforeReconnect + 1);
 
       // RF-4: a malformed sync frame is ignored silently.
       final before = stateOf(c, arg).messages.length;
@@ -691,6 +549,369 @@ void main() {
         ),
         isTrue,
       );
+    });
+  });
+
+  group('delivery ticks', () {
+    test('a text send starts pending and flips to sent once written',
+        () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      final controller = open(c, arg);
+      await pumpEventQueue();
+
+      binding.holdSendMessage = Completer<void>();
+      controller.textController.text = 'hi';
+      controller.sendTextMessage();
+      await pumpEventQueue();
+      // The bubble exists (user feedback) but the socket write is still in
+      // flight: waiting-to-send.
+      expect(
+        stateOf(c, arg).messages.single.delivery,
+        MessageModel.deliveryPending,
+      );
+
+      binding.holdSendMessage!.complete();
+      await pumpEventQueue();
+      expect(
+        stateOf(c, arg).messages.single.delivery,
+        MessageModel.deliverySent,
+      );
+    });
+
+    test('a failed socket write marks the message failed', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      final controller = open(c, arg);
+      await pumpEventQueue();
+
+      binding.failSendMessage = true;
+      controller.textController.text = 'boom';
+      controller.sendTextMessage();
+      await pumpEventQueue();
+      expect(
+        stateOf(c, arg).messages.single.delivery,
+        MessageModel.deliveryFailed,
+      );
+    });
+
+    test('a delivery ack flips an outgoing message to delivered and persists',
+        () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      binding.connected = true;
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      final controller = open(c, arg);
+      await pumpEventQueue();
+
+      controller.textController.text = 'hi';
+      controller.sendTextMessage();
+      await pumpEventQueue();
+      expect(
+        stateOf(c, arg).messages.single.delivery,
+        MessageModel.deliverySent,
+      );
+
+      // The peer confirms receipt with the content fingerprint of the
+      // message it just stored.
+      final fp = 'd:t:${sha256.convert(utf8.encode('hi'))}';
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@${jsonEncode({
+          'type': 'ack',
+          'items': [fp],
+        })}',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+      expect(
+        stateOf(c, arg).messages.single.delivery,
+        MessageModel.deliveryDelivered,
+      );
+
+      controller.close();
+      await pumpEventQueue();
+      final stored =
+          await SessionRepository(database).loadChatSession('sess-1');
+      expect(
+        stored!.messages.single.delivery,
+        MessageModel.deliveryDelivered,
+        reason: 'the delivered state must ride the session persistence',
+      );
+    });
+
+    test('an ack matches a media message by its stored-bytes fingerprint',
+        () async {
+      final tmp = Directory.systemTemp.createTempSync('chatblue_ack');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+      final imgPath = '${tmp.path}/img.jpg';
+      final imgBytes = Uint8List.fromList(List.generate(64, (i) => i * 3));
+      File(imgPath).writeAsBytesSync(imgBytes);
+
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(
+          messages: [
+            MessageModel(
+              id: 'img1',
+              text: '[Image] (64 bytes)',
+              isSentByMe: true,
+              timestamp: DateTime.now(),
+              imagePath: imgPath,
+              delivery: MessageModel.deliverySent,
+            ),
+          ],
+        ),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      final fp = 'd:m:${sha256.convert(imgBytes)}';
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@${jsonEncode({
+          'type': 'ack',
+          'items': [fp],
+        })}',
+        kind: 'text',
+      );
+      // The matcher reads the file for the bytes fingerprint (real I/O).
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
+      expect(
+        stateOf(c, arg).messages.single.delivery,
+        MessageModel.deliveryDelivered,
+      );
+    });
+
+    test('the receiver acks a live text frame', () async {
+      ChatController.ackFlushDelay = const Duration(milliseconds: 30);
+      addTearDown(() {
+        ChatController.ackFlushDelay = const Duration(milliseconds: 400);
+      });
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      binding.emitData(Uint8List(0), 'yo', kind: 'text');
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await pumpEventQueue();
+      final fp = 'd:t:${sha256.convert(utf8.encode('yo'))}';
+      expect(
+        binding.sentMessages.any(
+          (m) => m.contains('"type":"ack"') && m.contains(fp),
+        ),
+        isTrue,
+        reason: 'the receiver must confirm the stored message',
+      );
+    });
+
+    test('the receiver re-acks sync entries it already holds', () async {
+      ChatController.ackFlushDelay = const Duration(milliseconds: 30);
+      addTearDown(() {
+        ChatController.ackFlushDelay = const Duration(milliseconds: 400);
+      });
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      final entry = {
+        'id': 'p1',
+        'text': 'from-peer',
+        'sentByMe': true,
+        'timestamp': DateTime.now().toIso8601String(),
+      };
+      String frame() => '@@CHATBLUE_SYNC@@${jsonEncode({
+            'type': 'message',
+            'messages': [entry],
+          })}';
+      final fp = 'd:t:${sha256.convert(utf8.encode('from-peer'))}';
+      int ackCount() => binding.sentMessages
+          .where((m) => m.contains('"type":"ack"') && m.contains(fp))
+          .length;
+
+      binding.emitData(Uint8List(0), frame(), kind: 'text');
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await pumpEventQueue();
+      expect(ackCount(), 1);
+
+      // A re-serve of the same entry (e.g. the peer retried because our ack
+      // was lost) is deduplicated as a message but acked AGAIN — the
+      // sender's tick must still flip.
+      binding.emitData(Uint8List(0), frame(), kind: 'text');
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await pumpEventQueue();
+      expect(ackCount(), 2);
+    });
+
+    test('queued acks are dropped on disconnect (no socket to answer on)',
+        () async {
+      ChatController.ackFlushDelay = const Duration(milliseconds: 300);
+      addTearDown(() {
+        ChatController.ackFlushDelay = const Duration(milliseconds: 400);
+      });
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      binding.emitData(Uint8List(0), 'yo', kind: 'text');
+      await pumpEventQueue(); // the ack is queued, not yet flushed
+      binding.emitConnection(false);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await pumpEventQueue();
+      expect(
+        binding.sentMessages.any((m) => m.contains('"type":"ack"')),
+        isFalse,
+      );
+    });
+  });
+
+  group('transport picker', () {
+    testWidgets('same transport delegates to the classic session reconnect',
+        (tester) async {
+      final c = container();
+      addTearDown(c.dispose);
+
+      late BuildContext ctx;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) {
+              ctx = context;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      final sub = c.listen(chatControllerProvider(arg), (_, _) {});
+      addTearDown(sub.close);
+      final controller = c.read(chatControllerProvider(arg).notifier);
+      // Flush the open microtasks (pumpEventQueue hangs inside testWidgets'
+      // fake-async zone — its zero-delay timers never fire).
+      await tester.pump();
+
+      await controller.connectViaTransport(
+        ChatSessionModel.transportBluetooth,
+        ctx,
+      );
+      await tester.pump();
+      expect(binding.connectCalls, [
+        (address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      ]);
+    });
+
+    test('dialing another transport uses the stored address/name there',
+        () async {
+      final other =
+          FakeChatBinding(transport: ChatSessionModel.transportWifiDirect);
+      final c = container(byKind: {
+        ChatSessionModel.transportBluetooth: binding,
+        ChatSessionModel.transportWifiDirect: other,
+      });
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      final controller = open(c, arg);
+      await pumpEventQueue();
+
+      final ok = await controller.dialTransportPeer(
+        ChatSessionModel.transportWifiDirect,
+        address: 'AA:BB:CC:DD:EE:FF',
+        name: 'PeerOne',
+      );
+      await pumpEventQueue();
+      expect(ok, isTrue);
+      expect(other.connectCalls, [
+        (address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      ]);
+      // A successful dial still waits for the dial to SETTLE (the peer's
+      // acceptance / rejection — the scan screens' sequence); the fake's
+      // settle future completes immediately.
+      expect(other.dialSettledReads, 1);
+    });
+
+    test('a dial that still awaits acceptance holds until it settles',
+        () async {
+      final other =
+          FakeChatBinding(transport: ChatSessionModel.transportWifiDirect);
+      other.awaiting = true;
+      other.holdDialSettled = Completer<void>();
+      final c = container(byKind: {
+        ChatSessionModel.transportBluetooth: binding,
+        ChatSessionModel.transportWifiDirect: other,
+      });
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      final controller = open(c, arg);
+      await pumpEventQueue();
+
+      var dialed = false;
+      final dial = controller
+          .dialTransportPeer(
+            ChatSessionModel.transportWifiDirect,
+            address: 'AA:BB:CC:DD:EE:FF',
+            name: 'PeerOne',
+          )
+          .then((v) {
+        dialed = true;
+        return v;
+      });
+      await pumpEventQueue();
+      expect(other.connectCalls, hasLength(1));
+      expect(dialed, isFalse,
+          reason: 'the connecting panel must stay up until the dial settles');
+
+      other.holdDialSettled!.complete();
+      await dial;
+      await pumpEventQueue();
+      expect(dialed, isTrue);
+      expect(other.dialSettledReads, 1);
     });
   });
 
@@ -1635,6 +1856,190 @@ void main() {
       );
       await pumpEventQueue();
       expect(controller.peerReportedRssi, -54);
+    });
+
+    test(
+        'the peer\'s manifest re-delivers our manifest + reading once '
+        '(slow-receiver race)', () async {
+      // Device-reported: an old slow phone wires its chat controller's
+      // socket callback SECONDS after its chat opens (DB round-trips on a
+      // weak CPU) — the dialer's first manifest and linkShare both land
+      // before that and are dropped, leaving the receiver's panel with no
+      // signal at all. The peer's manifest only exists once their wiring
+      // is done, so it doubles as their readiness signal: respond.
+      binding.connected = true;
+      binding.deviceRssi = -58;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(
+          messages: [
+            MessageModel(
+              text: 'hello',
+              isSentByMe: true,
+              timestamp: DateTime.now(),
+            ),
+          ],
+        ),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      int count(String type) => binding.sentMessages
+          .where((m) => m.startsWith('@@CHATBLUE_SYNC@@'))
+          .where((m) =>
+              (jsonDecode(m.substring('@@CHATBLUE_SYNC@@'.length))
+                  as Map<String, dynamic>)['type'] ==
+              type)
+          .length;
+
+      expect(count('manifest'), 1);
+      expect(count('linkShare'), 1);
+
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"manifest","pv":3,"items":[]}',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+
+      expect(count('manifest'), 2,
+          reason: 'their manifest proves they can receive NOW — our first '
+              'pass may have raced their wiring and must be re-delivered');
+      expect(count('linkShare'), 2,
+          reason: 'the reading rides along so the peer panel can show it');
+    });
+
+    test('the manifest re-delivery fires once per connection', () async {
+      binding.connected = true;
+      binding.deviceRssi = -58;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(
+          messages: [
+            MessageModel(
+              text: 'hello',
+              isSentByMe: true,
+              timestamp: DateTime.now(),
+            ),
+          ],
+        ),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      int count(String type) => binding.sentMessages
+          .where((m) => m.startsWith('@@CHATBLUE_SYNC@@'))
+          .where((m) =>
+              (jsonDecode(m.substring('@@CHATBLUE_SYNC@@'.length))
+                  as Map<String, dynamic>)['type'] ==
+              type)
+          .length;
+
+      const manifest = '@@CHATBLUE_SYNC@@{"type":"manifest","pv":3,"items":[]}';
+      binding.emitData(Uint8List(0), manifest, kind: 'text');
+      binding.emitData(Uint8List(0), manifest, kind: 'text');
+      await pumpEventQueue();
+
+      expect(count('manifest'), 2,
+          reason: 'a second peer manifest (their own re-delivery) must not '
+              'trigger another round — bounded, no ping-pong');
+      expect(count('linkShare'), 2);
+    });
+
+    test(
+        'a nudge re-delivers when no peer manifest arrives at all '
+        '(both first passes raced)', () async {
+      final oldDelay = ChatController.syncNudgeDelay;
+      ChatController.syncNudgeDelay = const Duration(milliseconds: 60);
+      addTearDown(() => ChatController.syncNudgeDelay = oldDelay);
+
+      binding.connected = true;
+      binding.deviceRssi = -58;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(
+          messages: [
+            MessageModel(
+              text: 'hello',
+              isSentByMe: true,
+              timestamp: DateTime.now(),
+            ),
+          ],
+        ),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      int count(String type) => binding.sentMessages
+          .where((m) => m.startsWith('@@CHATBLUE_SYNC@@'))
+          .where((m) =>
+              (jsonDecode(m.substring('@@CHATBLUE_SYNC@@'.length))
+                  as Map<String, dynamic>)['type'] ==
+              type)
+          .length;
+
+      expect(count('manifest'), 1);
+
+      await Future<void>.delayed(const Duration(milliseconds: 140));
+      await pumpEventQueue();
+
+      expect(count('manifest'), 2,
+          reason: 'silence past the nudge deadline means our first pass may '
+              'never have reached the peer — deliver once more');
+      expect(count('linkShare'), 2);
+    });
+
+    test('the nudge stays quiet once the peer\'s manifest arrived', () async {
+      final oldDelay = ChatController.syncNudgeDelay;
+      ChatController.syncNudgeDelay = const Duration(milliseconds: 60);
+      addTearDown(() => ChatController.syncNudgeDelay = oldDelay);
+
+      binding.connected = true;
+      binding.deviceRssi = -58;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(
+          messages: [
+            MessageModel(
+              text: 'hello',
+              isSentByMe: true,
+              timestamp: DateTime.now(),
+            ),
+          ],
+        ),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      int count(String type) => binding.sentMessages
+          .where((m) => m.startsWith('@@CHATBLUE_SYNC@@'))
+          .where((m) =>
+              (jsonDecode(m.substring('@@CHATBLUE_SYNC@@'.length))
+                  as Map<String, dynamic>)['type'] ==
+              type)
+          .length;
+
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"manifest","pv":3,"items":[]}',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+
+      await Future<void>.delayed(const Duration(milliseconds: 140));
+      await pumpEventQueue();
+
+      expect(count('manifest'), 2,
+          reason: 'the re-delivery already covered the peer — the nudge '
+              'must not add a third');
     });
 
     test('linkQuality delegates to the binding (Nearby bandwidth metric)',

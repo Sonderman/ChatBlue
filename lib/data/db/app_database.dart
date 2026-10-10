@@ -13,21 +13,21 @@ part 'app_database.g.dart';
 /// its one-time importers were removed in P3). The schema mirrors the old
 /// Hive layout (see tables.dart).
 ///
-/// [schemaVersion] 3: versions 1–2 only ever existed on test devices via the
+/// [schemaVersion] 4: v3 is the first SHIPPED schema; v4 adds the messages
+/// `delivery` column (outgoing delivery ticks). Every version from 3 on
+/// migrates stepwise and PRESERVES data — a device upgrade must never lose
+/// chat history. Versions 1–2 only ever existed on test devices via the
 /// abandoned `migration/riverpod-drift-nearby` experiment (v2 added the
-/// sync-identity columns). A pre-existing file at ANY other version is
-/// REBUILT from scratch when opened instead of migrated — pre-release
-/// contents are disposable (test devices re-import through the migration
-/// builds when needed) and the rebuild clears `app_settings`. Replace the
-/// rebuild with real, data-preserving steps before a shipped schema bumps
-/// this.
+/// sync-identity columns); a pre-existing file at those versions is REBUILT
+/// from scratch when opened instead — pre-release contents are disposable
+/// and the rebuild clears `app_settings`.
 @DriftDatabase(tables: [Sessions, Messages, AppSettings])
 class AppDatabase extends _$AppDatabase {
   AppDatabase(super.executor);
 
   /// Bump together with a migration step below on every schema change.
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -38,6 +38,15 @@ class AppDatabase extends _$AppDatabase {
         // drift runs this for any pre-existing file whose version differs —
         // upgrades and downgrades alike (there is no separate handler).
         onUpgrade: (m, from, to) async {
+          // Shipped schemas (v3+) migrate STEPWISE, preserving all data:
+          // 3 → 4 adds the message `delivery` column. Never rebuild here —
+          // a shipped file carries real conversations.
+          if (from >= 3) {
+            if (from < 4) {
+              await m.addColumn(messages, messages.delivery);
+            }
+            return;
+          }
           // Pre-release files only (see class doc): wipe + recreate; the
           // Hive importer re-populates. No per-version diffing needed.
           await _dropAllTables();
