@@ -635,5 +635,49 @@ void main() {
           reason: 'the previous peer name leaked into this binding — the '
               'session-merge fallback could reopen the wrong chat');
     });
+
+    test(
+        'READY keeps the identity uid the peer frame bound before the '
+        'handshake (the socket map carries none)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+      final notifier = c.read(wdTransportProvider.notifier);
+
+      final connectFuture = notifier.connectToPeer('p2p-1');
+      // The socket map carries no identity (client side: no name/address).
+      service.onSocketConnected?.call(WdPeerInfo(deviceAddress: 'p2p-1'));
+      expect(await connectFuture, isTrue);
+
+      // The peer's identity frame lands before the user accepts (READY):
+      // uid + self-reported P2P MAC + display name.
+      service.onSocketData!(
+        Uint8List(0),
+        '@@CHATBLUE_ID@@uid-1|be:57:7a:fe:d5:a0|Peer One',
+        kind: 'text',
+      );
+
+      // READY must bind the CURRENT socket without dropping the uid: the
+      // chat session keys on it — without it the session keys on the
+      // rotating P2P MAC and the two devices can end up on different rows
+      // for one peer (device-reported: BT-era chat on one side, WFD-era
+      // chat on the other after a BT → Wi‑Fi Direct connect).
+      service.onSocketData!(
+        Uint8List(0),
+        '@@CHATBLUE_CONNECT@@',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+
+      final state = c.read(wdTransportProvider);
+      expect(state.isConnected, isTrue);
+      expect(state.connectedDevice?.peerId, 'uid-1',
+          reason: 'the READY branch dropped the identity uid — the session '
+              'would key on the rotating P2P MAC instead of the stable id');
+      expect(state.connectedDevice?.deviceName, 'Peer One',
+          reason: 'the identity name was dropped by the nameless socket map');
+      expect(state.connectedDevice?.deviceAddress, 'p2p-1',
+          reason: 'the dialed address must win over the socket map');
+    });
   });
 }

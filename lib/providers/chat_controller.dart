@@ -335,6 +335,16 @@ class ChatController extends Notifier<ChatState>
   /// may open a beat after ours). Test-overridable like the stall timeout.
   static Duration linkShareRetryDelay = const Duration(milliseconds: 2500);
 
+  /// Cadence of the live-read re-share while connected (Wi‑Fi Direct client
+  /// side): the peer's "(peer reading)" tracks the real link instead of a
+  /// frozen snapshot. Test-overridable like the other timeouts.
+  @visibleForTesting
+  static Duration linkShareRefreshInterval = const Duration(seconds: 5);
+
+  /// Re-share the live reading only when it moved at least this many dBm —
+  /// a stable link must not chatter.
+  static const int _linkShareMinDelta = 2;
+
   /// Outgoing FILE cap: the transports carry whole frames in memory, so
   /// this keeps both sides' RAM sane (images ride compressed, far below).
   /// Overridable in tests (20 MB on device).
@@ -393,6 +403,13 @@ class ChatController extends Notifier<ChatState>
   /// side never scanned, so this is the only reading it can show).
   int? _peerReportedRssi;
   Timer? _linkShareRetry;
+
+  /// Last reading pushed to the peer (change-guard for the live re-share).
+  int? _lastSharedRssi;
+
+  /// Periodic re-share of the LIVE link reading while connected — Wi‑Fi
+  /// Direct client side only (the side that has a readback).
+  Timer? _linkShareTicker;
 
   // True when this chat open created a BRAND-NEW session because the peer
   // identity was not (fully) known yet (rotated MAC / identity frame still
@@ -558,6 +575,14 @@ class ChatController extends Notifier<ChatState>
           chatSession: rebound,
           messages: rebound.messages,
         );
+        // A direct hit skips the miss-path peer search: a same-peer row
+        // from another transport era (e.g. a BT-era row beside this WFD
+        // row) would stay split — and the two devices could then open
+        // DIFFERENT conversations for one connection (device-reported:
+        // Redmi reopened the BT-era chat while the J7 opened its old WFD
+        // row). Absorb any sibling row before the open continues.
+        await _reconcilePeerSiblings();
+        if (_closed) return;
         if (identityChanged) {
           _scheduleSave();
         }
@@ -585,6 +610,10 @@ class ChatController extends Notifier<ChatState>
             debugPrint('Session re-key failed: $e');
           }
         }
+        if (_closed) return;
+        // A further same-peer row (another era) may still exist — absorb it
+        // too, mirroring the direct-hit reconcile.
+        await _reconcilePeerSiblings();
         if (_closed) return;
         _scheduleSave();
       } else if (session == null) {
@@ -633,9 +662,9 @@ class ChatController extends Notifier<ChatState>
     // arriving while this screen is visible must not push a second chat.
     _binding.onChatOpened();
 
-    // Share our scan-time reading — the accepting side never scanned and
-    // has no local RSSI of its own.
-    _sharePeerSignal();
+    // Share our signal reading — the accepting side never scanned and has
+    // no local RSSI of its own; whoever HAS a reading pushes it.
+    unawaited(_sharePeerSignal());
 
     // When this is not the first session with this peer, share the last
     // messages on (re)connection so both devices converge on the same
@@ -672,6 +701,8 @@ class ChatController extends Notifier<ChatState>
     _saveDebounce?.cancel();
     _linkShareRetry?.cancel();
     _linkShareRetry = null;
+    _linkShareTicker?.cancel();
+    _linkShareTicker = null;
     _incomingStallTimer?.cancel();
     _incomingStallTimer = null;
     _outgoingStallTimer?.cancel();
@@ -722,11 +753,17 @@ class ChatController extends Notifier<ChatState>
       _connectedSince = DateTime.now();
       _sendHistorySync();
       // Re-share on every (re)connection: the reading is per-link.
-      _sharePeerSignal();
+      unawaited(_sharePeerSignal());
     } else {
       _connectedSince = null;
       _peerReportedRssi = null;
       _syncSentForSession = false;
+      // The live-reading ticker describes the link that just died — stop
+      // it and forget the last pushed value; the next connection restarts
+      // both.
+      _linkShareTicker?.cancel();
+      _linkShareTicker = null;
+      _lastSharedRssi = null;
       // Same for an announcement whose bytes died with the link: without
       // this clear the next connection's first bytes frame misroutes.
       _pendingAudioMeta = null;
@@ -851,44 +888,64 @@ class ChatController extends Notifier<ChatState>
   /// wire) to the app bar and the persisted session — an UPGRADE only: a
   /// raw model code must not downgrade a stored display name.
   void _updateSessionName(String name) {
-    if (_closed) return;
-    if (name.isEmpty || state.peerName == name) return;
-    final session = state.chatSession;
-    if (session.name == name) {
-      state = state.copyWith(peerName: name);
-    } else if (ChatSessionModel.shouldReplaceDisplayName(session.name, name)) {
-      final renamed = ChatSessionModel(
-        id: session.id,
-        name: name,
-        createdAt: session.createdAt,
-        updatedAt: session.updatedAt,
-        messages: session.messages,
-        device: session.device,
-        transport: session.transport,
-      );
-      state = state.copyWith(peerName: name, chatSession: renamed);
-      _scheduleSave();
+    if (_closed || name.isEmpty) return;
+    if (state.peerName != name) {
+      final session = state.chatSession;
+      if (session.name == name) {
+        state = state.copyWith(peerName: name);
+      } else if (ChatSessionModel.shouldReplaceDisplayName(session.name, name)) {
+        final renamed = ChatSessionModel(
+          id: session.id,
+          name: name,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+          messages: session.messages,
+          device: session.device,
+          transport: session.transport,
+        );
+        state = state.copyWith(peerName: name, chatSession: renamed);
+        _scheduleSave();
+      }
+      // else: downgrade blocked — keep both the stored title and peerName.
     }
-    // else: downgrade blocked — keep both the stored title and peerName.
-    // The real (model) device name just landed: if this chat opened as a
-    // fresh session on an unknown identity, an existing session for the
-    // same peer may now be findable and must absorb into this one.
+    // Attempted even for a repeated name: a first emission can land while
+    // the open is still settling (the fresh-open flag is only set after its
+    // DB round-trips), burning the once-only merge attempt — the repeat
+    // (the peer re-sends its identity right after the handshake) must be
+    // able to retry it. The merge's own flags make repeats cheap.
     unawaited(_mergeLatePeerSession());
   }
 
   /// Late identity merge: the chat opened while the peer identity was still
   /// unknown (rotated P2P MAC / identity frame in flight), so the open
   /// MISSed and created a fresh session; the identity frame has now arrived
-  /// — if a stored session matches the peer (address, or a
+  /// — if a stored session matches the peer (address, uid or a
   /// normalization-insensitive name), it is the same conversation: adopt
   /// its history here and delete the duplicate so the history sync and the
   /// home list stay in ONE chat.
   Future<void> _mergeLatePeerSession() async {
     if (_closed || !_openedAsFreshSession || _lateMergeDone) return;
-    final duplicate = await _findExistingSessionForPeer();
+    final duplicate = await _findExistingSessionForPeer(
+      excludeId: state.chatSession.id,
+    );
     if (_closed) return;
     if (duplicate == null || duplicate.id == state.chatSession.id) return;
     _lateMergeDone = true;
+    await _absorbPeerSession(duplicate);
+    if (_closed) return;
+    _scheduleSave();
+    // The merged history may be exactly what the peer is missing: run the
+    // sync again now that the session holds the real conversation.
+    _syncSentForSession = false;
+    unawaited(_sendHistorySync());
+  }
+
+  /// Absorbs a stored session of the SAME peer into the open session: the
+  /// message union (identity dedup, newest-first — matching the list
+  /// contract everywhere else) persists under the open session's id, and
+  /// the duplicate row is removed.
+  Future<void> _absorbPeerSession(ChatSessionModel duplicate) async {
+    final session = state.chatSession;
     final seen = <String>{};
     final combined = <MessageModel>[];
     for (final m in [...duplicate.messages, ...state.messages]) {
@@ -897,12 +954,7 @@ class ChatController extends Notifier<ChatState>
               '${m.text}|${m.imagePath}';
       if (seen.add(k)) combined.add(m);
     }
-    // Newest-first, matching the list contract everywhere else (live frames
-    // are inserted at index 0; the list renders with reverse: true and the
-    // repo persists index order) — an ascending merge showed (and persisted)
-    // the whole conversation upside down.
     combined.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    final session = state.chatSession;
     final merged = ChatSessionModel(
       id: session.id,
       name: session.name,
@@ -919,42 +971,61 @@ class ChatController extends Notifier<ChatState>
     );
     state = state.copyWith(chatSession: merged, messages: combined);
     try {
-      final repo = _repo;
-      await repo.saveChatSession(merged);
-      await repo.deleteChatSession(duplicate.id);
+      await _repo.saveChatSession(merged);
+      await _repo.deleteChatSession(duplicate.id);
       if (kDebugMode) {
         debugPrint(
-          'Late identity merge: adopted "${duplicate.name}" '
-          '(${duplicate.id}) into ${merged.id} — '
-          '${combined.length} messages',
+          'Peer session merged: absorbed "${duplicate.name}" '
+          '(${duplicate.id}) into ${merged.id} — ${combined.length} messages',
         );
       }
     } catch (e) {
       if (kDebugMode) {
-        debugPrint('Late identity merge failed: $e');
+        debugPrint('Peer session merge failed: $e');
       }
     }
-    if (_closed) return;
-    _scheduleSave();
-    // The merged history may be exactly what the peer is missing: run the
-    // sync again now that the session holds the real conversation.
-    _syncSentForSession = false;
-    unawaited(_sendHistorySync());
+  }
+
+  /// Absorbs every stored session that belongs to the CURRENT peer into the
+  /// open one. A direct top-level key hit skips the miss-path peer search,
+  /// so a same-peer row left behind by another transport era (or by the
+  /// pre-display-name era, when the name search could not match) would stay
+  /// split — and worse, each device could open ITS row for one connection
+  /// and end up in DIFFERENT conversations (device-reported: after a BT →
+  /// Wi‑Fi Direct connect the Redmi reopened the BT-era chat while the J7
+  /// opened its old WFD row). Repeated matches are capped defensively.
+  Future<void> _reconcilePeerSiblings() async {
+    for (var i = 0; i < 5; i++) {
+      final duplicate = await _findExistingSessionForPeer(
+        excludeId: state.chatSession.id,
+      );
+      if (_closed) return;
+      if (duplicate == null) return;
+      await _absorbPeerSession(duplicate);
+      if (_closed) return;
+    }
   }
 
   /// Finds an existing session for the current peer when the computed key
-  /// misses: first by the peer's device address (MAC), then by the peer's
-  /// reported name (model — so the same device always shows up as one chat;
-  /// the identical-model edge case of two same phones is accepted for a P2P
-  /// app).
-  Future<ChatSessionModel?> _findExistingSessionForPeer() async {
+  /// misses: by the peer's device address (MAC), by the peer's STABLE
+  /// per-install uid (WFD identity frame — a session keyed on it is this
+  /// peer's by construction), then by the peer's reported name (model — so
+  /// the same device always shows up as one chat; the identical-model edge
+  /// case of two same phones is accepted for a P2P app). [excludeId] skips
+  /// the live session's own row so the search never returns itself and
+  /// shadows the real sibling.
+  Future<ChatSessionModel?> _findExistingSessionForPeer({
+    String? excludeId,
+  }) async {
     try {
       final all = await _repo.getAllChatSessions();
       final peerMac = _binding.connectedDeviceKey;
+      final peerUid = _binding.connectedDeviceId;
       final peerName = _binding.connectedDeviceName;
       if (kDebugMode) {
         debugPrint(
-          'Peer merge search: mac=$peerMac name=$peerName over '
+          'Peer merge search: mac=$peerMac uid=$peerUid name=$peerName '
+          'exclude=$excludeId over '
           '${all.map((s) => '${s.name}[${s.id}]').toList()}',
         );
       }
@@ -963,7 +1034,12 @@ class ChatController extends Notifier<ChatState>
           peerMac != 'unknown' &&
           peerMac != '02:00:00:00:00:00') {
         for (final s in all) {
-          if (s.device['address'] == peerMac) return s;
+          if (s.id != excludeId && s.device['address'] == peerMac) return s;
+        }
+      }
+      if (peerUid != null && peerUid.isNotEmpty && peerUid != 'unknown') {
+        for (final s in all) {
+          if (s.id != excludeId && s.id == peerUid) return s;
         }
       }
       if (peerName != null && peerName.isNotEmpty && peerName != 'unknown') {
@@ -972,7 +1048,9 @@ class ChatController extends Notifier<ChatState>
         // or punctuation — compare normalized.
         final target = _normalizePeerName(peerName);
         for (final s in all) {
-          if (_normalizePeerName(s.name) == target) return s;
+          if (s.id != excludeId && _normalizePeerName(s.name) == target) {
+            return s;
+          }
         }
       }
     } catch (_) {
@@ -1254,30 +1332,58 @@ class ChatController extends Notifier<ChatState>
     }
   }
 
-  /// Shares our scan-time reading with the peer: the accepting side never
-  /// scanned and has no local RSSI (no platform API reads a connected
-  /// RFCOMM link live), so the dialer pushes its value; the retry covers
-  /// the peer's chat opening / wiring a beat after ours.
-  void _sharePeerSignal() {
+  /// Shares our signal reading with the peer — the accepting side never
+  /// scanned and cannot read the link itself, so whoever HAS a reading
+  /// pushes it:
+  /// - Bluetooth: the dialer's scan-time value. It is static, so a single
+  ///   share (plus one retry for the peer's chat opening a beat late) is
+  ///   enough; no platform API reads a connected RFCOMM link live.
+  /// - Wi‑Fi Direct: the CLIENT side's live readback (`connectionInfo`) —
+  ///   the GO side has none, so this push is the only way the GO's panel
+  ///   can show a signal. The value changes over time: it is re-shared on
+  ///   [linkShareRefreshInterval] while connected (change-guarded), so the
+  ///   peer's "(peer reading)" tracks the real link.
+  Future<void> _sharePeerSignal() async {
     if (_closed || !state.isConnected) return;
-    final reading = _binding.connectedDeviceRssi;
-    if (reading == null) return;
+    final scan = _binding.connectedDeviceRssi;
+    final int? reading = scan ?? await _binding.getLiveRssi();
+    if (_closed || !state.isConnected) return;
+    if (reading != null) {
+      _lastSharedRssi = reading;
+      _sendLinkShare(reading);
+      _linkShareRetry?.cancel();
+      _linkShareRetry = Timer(linkShareRetryDelay, () {
+        if (_closed || !state.isConnected) return;
+        _sendLinkShare(reading);
+      });
+    }
+    if (scan == null &&
+        _binding.transportType == ChatSessionModel.transportWifiDirect) {
+      // No dial-time value on Wi‑Fi Direct: whatever we have (or may read
+      // once the association settles) is the LIVE link readback — keep
+      // (re)sharing it; the ticker also retries the first read.
+      _startLinkShareTicker();
+    }
+  }
+
+  void _sendLinkShare(int rssi) {
     unawaited(
       _sendText(
-        '$_syncPrefix${jsonEncode({'type': 'linkShare', 'rssi': reading})}',
+        '$_syncPrefix${jsonEncode({'type': 'linkShare', 'rssi': rssi})}',
       ),
     );
-    _linkShareRetry?.cancel();
-    _linkShareRetry = Timer(linkShareRetryDelay, () {
+  }
+
+  void _startLinkShareTicker() {
+    if (_linkShareTicker != null) return;
+    _linkShareTicker = Timer.periodic(linkShareRefreshInterval, (_) async {
       if (_closed || !state.isConnected) return;
-      final retry = _binding.connectedDeviceRssi;
-      if (retry != null) {
-        unawaited(
-          _sendText(
-            '$_syncPrefix${jsonEncode({'type': 'linkShare', 'rssi': retry})}',
-          ),
-        );
-      }
+      final live = await _binding.getLiveRssi();
+      if (_closed || !state.isConnected || live == null) return;
+      final last = _lastSharedRssi;
+      if (last != null && (live - last).abs() < _linkShareMinDelta) return;
+      _lastSharedRssi = live;
+      _sendLinkShare(live);
     });
   }
 
@@ -1288,8 +1394,10 @@ class ChatController extends Notifier<ChatState>
   /// - `fetch`     → send one message's media file (deferred download)
   /// - `download`  → the file we asked for (fills a placeholder bubble)
   /// - `fetchMiss` → the peer no longer holds the requested file
-  /// - `linkShare` → the dialer's scan-time RSSI, pushed for the quality
-  ///   panel (older builds ignore the unknown type via their `default:`).
+  /// - `linkShare` → the peer's signal reading (the dialer's scan value on
+  ///   Bluetooth; the client side's live readback on Wi‑Fi Direct), pushed
+  ///   for the quality panel (older builds ignore the unknown type via
+  ///   their `default:`).
   Future<void> _applyHistorySync(String payload) async {
     try {
       final decoded = jsonDecode(payload);

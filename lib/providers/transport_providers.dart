@@ -1424,6 +1424,18 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       // WFD MAC may rotate, but the name feeds the session-merge fallback
       // and could reopen the wrong chat — the BT twin of this bug was
       // device-reported).
+      //
+      // The socket map carries NO identity, though (the TCP-client side has
+      // neither name nor address; the GO side may only have the framework's
+      // P2P name): keep the uid/name the peer's identity frame bound BEFORE
+      // the handshake — the uid is the chat session's KEY source, and
+      // dropping it keys the session on the rotating P2P MAC, letting the
+      // two devices end up on DIFFERENT rows for one peer (device-reported:
+      // after a BT → Wi‑Fi Direct connect one side reopened the BT-era chat
+      // while the other opened its old WFD row). A disconnect (including
+      // the native "replaced" socket cancel) clears the binding, so
+      // `previous` can only be this link's own pre-READY identity.
+      final previous = state.connectedDevice;
       state = state.copyWith(
         connectedDevice: _pendingRemote ?? state.connectedDevice,
       );
@@ -1432,11 +1444,12 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
         state = state.copyWith(
           connectedDevice: WdPeerInfo(
             deviceAddress: _lastConnectAddress ?? current.deviceAddress,
-            deviceName: current.deviceName ?? _pendingPeerName,
+            deviceName:
+                current.deviceName ?? previous?.deviceName ?? _pendingPeerName,
             ip: current.ip,
             port: current.port,
             isGroupOwner: current.isGroupOwner,
-            peerId: current.peerId,
+            peerId: current.peerId ?? previous?.peerId,
           ),
         );
       }

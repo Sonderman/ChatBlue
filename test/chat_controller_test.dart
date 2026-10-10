@@ -353,6 +353,85 @@ void main() {
       expect(stored?.name, 'Redmi Note 10 Pro');
       expect(stored?.device['name'], 'Redmi Note 10 Pro');
     });
+
+    test(
+        'a direct key hit absorbs a same-peer row from another transport '
+        '(one chat per peer across transports)', () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final repo = SessionRepository(database);
+      // The peer's BT-era row (keyed by its Bluetooth MAC): the
+      // conversation the user had been using over Bluetooth.
+      await repo.saveChatSession(
+        sessionFixture(
+          id: 'DC:6A:E7:41:74:E6',
+          name: 'Redmi Note 10 Pro',
+          transport: ChatSessionModel.transportBluetooth,
+          device: {'name': 'Redmi Note 10 Pro', 'address': 'DC:6A:E7:41:74:E6'},
+          messages: [
+            MessageModel(
+              id: 'm-bt',
+              text: 'bluetooth era',
+              isSentByMe: true,
+              timestamp: DateTime(2026, 10, 10, 14),
+            ),
+          ],
+        ),
+      );
+      // An older Wi‑Fi Direct row keyed by the peer's stable uid — the key
+      // THIS open hits directly (the identity frame's uid).
+      await repo.saveChatSession(
+        sessionFixture(
+          id: 'uid-1',
+          name: 'Redmi Note 10 Pro',
+          transport: ChatSessionModel.transportWifiDirect,
+          device: {'name': 'Redmi Note 10 Pro', 'address': 'be:57:7a:fe:d5:a0'},
+          messages: [
+            MessageModel(
+              id: 'm-wfd',
+              text: 'wifi era',
+              isSentByMe: false,
+              timestamp: DateTime(2026, 10, 10, 15),
+            ),
+          ],
+        ),
+      );
+
+      // A Wi‑Fi Direct open with the full identity: key = the peer's uid —
+      // a DIRECT hit on the WFD row, with the BT-era row left beside it
+      // (device-reported: the Redmi reopened the BT-era chat while the J7
+      // opened its old WFD row — one connection, two different chats).
+      final b = FakeChatBinding(transport: ChatSessionModel.transportWifiDirect)
+        ..deviceId = 'uid-1'
+        ..deviceKey = 'be:57:7a:fe:d5:a0'
+        ..deviceName = 'Redmi Note 10 Pro';
+      final c = container(b: b, database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportWifiDirect);
+      open(c, arg);
+      // Let the open's DB round-trips (load → sibling search → absorb
+      // save/delete) complete.
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
+
+      final state = stateOf(c, arg);
+      // The hit row stays the session (its uid key is the stable one); the
+      // BT-era row is absorbed into it — union of messages, newest-first —
+      // so both devices can land on ONE conversation.
+      expect(state.chatSession.id, 'uid-1',
+          reason: 'the direct hit must stay the live session (stable uid key)');
+      expect(state.messages.map((m) => m.id).toList(), ['m-wfd', 'm-bt'],
+          reason: 'the BT-era sibling was not absorbed — its history is '
+              'missing from the open chat');
+      expect(await repo.loadChatSession('DC:6A:E7:41:74:E6'), isNull,
+          reason: 'the absorbed duplicate row must be gone (one chat per peer)');
+
+      // Drain the debounced save before the database closes.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final stored = await repo.loadChatSession('uid-1');
+      expect(stored!.messages.map((m) => m.id).toList(), ['m-wfd', 'm-bt']);
+    });
   });
 
   group('send queue', () {
@@ -1165,6 +1244,68 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 350));
     });
 
+    test(
+        'the late identity merge finds the name-matched sibling even while '
+        'the fresh row already owns the peer MAC (no self-shadow)', () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final repo = SessionRepository(database);
+      await repo.saveChatSession(
+        sessionFixture(
+          id: 'bt-era',
+          name: 'PeerOne',
+          transport: ChatSessionModel.transportBluetooth,
+          device: {'name': 'PeerOne', 'address': 'AA:BB:CC:DD:EE:FF'},
+          messages: [
+            MessageModel(
+              id: 'm-old',
+              text: 'older',
+              isSentByMe: true,
+              timestamp: DateTime(2026, 1, 1, 10),
+            ),
+          ],
+        ),
+      );
+
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      // The open started before the name was known: the MAC is present, so
+      // the fresh session is keyed — and ADDRESSED — on the peer MAC.
+      binding.deviceKey = 'be:57:7a:fe:d5:a0';
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      open(c, arg);
+      await pumpEventQueue();
+      expect(stateOf(c, arg).chatSession.id, 'be:57:7a:fe:d5:a0');
+      // The fresh row lands in the store (debounced) — from now on the
+      // MAC-keyed search would return the live row itself.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+
+      // The identity frame lands with the display name: the stored sibling
+      // must be found (name match) despite the self MAC shadow.
+      binding.deviceName = 'PeerOne';
+      binding.emitPeerName('PeerOne');
+      await pumpEventQueue();
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
+
+      final state = stateOf(c, arg);
+      expect(state.messages.map((m) => m.id).toList(), ['m-old'],
+          reason: 'the late merge matched the live row itself on the MAC and '
+              'silently skipped the real sibling');
+      expect(await repo.loadChatSession('bt-era'), isNull,
+          reason: 'the name-matched sibling must be absorbed into the live '
+              'session (one chat per peer)');
+      final live = state.chatSession.id;
+      expect(
+        (await repo.loadChatSession(live))!.messages.map((m) => m.id).toList(),
+        ['m-old'],
+      );
+
+      // Drain the debounced merge save the same way.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+
     test('a voice announcement from a dropped link does not misroute the '
         'next image', () async {
       binding.connected = true;
@@ -1381,6 +1522,77 @@ void main() {
         reason: 'the accepting side has no reading — it must not add wire '
             'traffic (which keeps unrelated message-flow assertions clean)',
       );
+    });
+
+    test(
+        'a live readback is pushed when no scan value exists (Wi‑Fi Direct '
+        'client side)', () async {
+      final b = FakeChatBinding(transport: ChatSessionModel.transportWifiDirect)
+        ..connected = true
+        ..liveRssi = -47;
+      final c = container(b: b);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportWifiDirect,
+        session:
+            sessionFixture(transport: ChatSessionModel.transportWifiDirect),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+      await pumpEventQueue();
+
+      final shares = b.sentMessages
+          .where((m) =>
+              m.startsWith('@@CHATBLUE_SYNC@@') && m.contains('"linkShare"'))
+          .map((m) => jsonDecode(m.substring('@@CHATBLUE_SYNC@@'.length))
+              as Map<String, dynamic>)
+          .toList();
+      expect(shares, isNotEmpty,
+          reason: 'the Wi‑Fi Direct client side holds the only live reading — '
+              'without this push the GO side\'s panel shows no signal at all '
+              '(device-reported)');
+      expect(shares.first['rssi'], -47);
+    });
+
+    test('the live reading is re-shared when it moves (change-guarded)',
+        () async {
+      final oldInterval = ChatController.linkShareRefreshInterval;
+      ChatController.linkShareRefreshInterval =
+          const Duration(milliseconds: 50);
+      addTearDown(() => ChatController.linkShareRefreshInterval = oldInterval);
+
+      final b = FakeChatBinding(transport: ChatSessionModel.transportWifiDirect)
+        ..connected = true
+        ..liveRssi = -47;
+      final c = container(b: b);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportWifiDirect,
+        session:
+            sessionFixture(transport: ChatSessionModel.transportWifiDirect),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+      await pumpEventQueue();
+
+      List<int> shared() => b.sentMessages
+          .where((m) =>
+              m.startsWith('@@CHATBLUE_SYNC@@') && m.contains('"linkShare"'))
+          .map((m) => (jsonDecode(m.substring('@@CHATBLUE_SYNC@@'.length))
+              as Map<String, dynamic>)['rssi'] as int)
+          .toList();
+
+      expect(shared(), [-47], reason: 'first share at connect');
+
+      // A stable link must not chatter.
+      await Future<void>.delayed(const Duration(milliseconds: 160));
+      expect(shared(), [-47]);
+
+      // The link moves: the new reading reaches the peer on the next tick.
+      b.liveRssi = -55;
+      await Future<void>.delayed(const Duration(milliseconds: 160));
+      expect(shared(), [-47, -55],
+          reason: 'the GO side\'s "(peer reading)" must track the live link');
     });
 
     test('a linkShare from the peer surfaces as peerReportedRssi', () async {
