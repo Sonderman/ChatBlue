@@ -6,17 +6,21 @@ import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 class MainActivity : FlutterActivity() {
 
@@ -35,6 +39,9 @@ class MainActivity : FlutterActivity() {
     private lateinit var njMethodChannel: MethodChannel
     private lateinit var njScanEventChannel: EventChannel
     private lateinit var njSocketEventChannel: EventChannel
+
+    // App-level utility channel (open received files, launch maps).
+    private lateinit var utilMethodChannel: MethodChannel
 
     private var scanEventSink: EventChannel.EventSink? = null
     private var socketEventSink: EventChannel.EventSink? = null
@@ -174,6 +181,7 @@ class MainActivity : FlutterActivity() {
         njMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/nearby")
         njScanEventChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/nearby_scan")
         njSocketEventChannel = EventChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/nearby_socket")
+        utilMethodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.sondermium.chatblue/util")
 
         bluetoothManager.setScanCallbacks(
             onStarted = {
@@ -249,6 +257,141 @@ class MainActivity : FlutterActivity() {
         setupNearbyCallbacks()
         setupNearbyMethodChannelHandlers()
         setupNearbyEventChannels()
+
+        setupUtilMethodChannelHandlers()
+    }
+
+    /// Utility channel: open a received file via the system viewer
+    /// (FileProvider content uri + temporary read grant) and launch a maps
+    /// app for coordinates (geo: intent with an https fallback).
+    private fun setupUtilMethodChannelHandlers() {
+        utilMethodChannel.setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
+            when (call.method) {
+                "openFile" -> {
+                    openFileWithViewer(call.argument<String>("path"), result)
+                }
+                "openMap" -> {
+                    val lat = call.argument<Double>("lat")
+                    val lng = call.argument<Double>("lng")
+                    if (lat == null || lng == null) {
+                        result.success(false)
+                    } else {
+                        openMapIntent(lat, lng, result)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    /// Opens [path] with the system viewer. The file is copied into the
+    /// cache first and served through the app's FileProvider (received files
+    /// live under the app data dir, which an outgoing intent cannot hand out
+    /// directly). Returns "opened", "permission" or "failed": package
+    /// archives need the per-app install-unknown-apps grant first — until
+    /// it is given, OEM installers (MIUI/HyperOS) swallow the VIEW intent
+    /// silently, so the matching settings page opens instead and a notice
+    /// tells the user to tap again.
+    private fun openFileWithViewer(path: String?, result: MethodChannel.Result) {
+        if (path.isNullOrEmpty()) {
+            result.success("failed")
+            return
+        }
+        try {
+            val source = File(path)
+            if (!source.exists()) {
+                result.success("failed")
+                return
+            }
+            val mime = guessMimeFromName(source.name)
+            val isApk = mime == "application/vnd.android.package-archive"
+            if (isApk && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                !packageManager.canRequestPackageInstalls()
+            ) {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+                result.success("permission")
+                return
+            }
+            val shareDir = File(cacheDir, "open")
+            if (!shareDir.exists()) shareDir.mkdirs()
+            val shared = File(shareDir, source.name)
+            source.copyTo(shared, overwrite = true)
+
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", shared)
+            val resolved = contentResolver.getType(uri) ?: mime
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, resolved)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            // Package archives go straight to the installer — a chooser
+            // trampoline hides it on several OEM ROMs.
+            if (isApk) {
+                startActivity(intent)
+            } else {
+                startActivity(Intent.createChooser(intent, null))
+            }
+            result.success("opened")
+        } catch (e: Exception) {
+            result.success("failed")
+        }
+    }
+
+    /// Best-effort mime type for the viewer (contentResolver often returns
+    /// null for our FileProvider uris, and a wrong generic type can hide
+    /// the right app from the chooser).
+    private fun guessMimeFromName(name: String): String {
+        val ext = name.substringAfterLast('.', "").lowercase()
+        return when (ext) {
+            "pdf" -> "application/pdf"
+            "txt" -> "text/plain"
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "mp4" -> "video/mp4"
+            "mp3" -> "audio/mpeg"
+            "m4a" -> "audio/mp4"
+            "wav" -> "audio/x-wav"
+            "zip" -> "application/zip"
+            "apk" -> "application/vnd.android.package-archive"
+            "doc" -> "application/msword"
+            "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            "xls" -> "application/vnd.ms-excel"
+            "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "ppt" -> "application/vnd.ms-powerpoint"
+            "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            else -> "*/*"
+        }
+    }
+
+    /// Opens the coordinates in a maps app (geo:), falling back to the
+    /// https maps url when no app handles the geo scheme.
+    private fun openMapIntent(lat: Double, lng: Double, result: MethodChannel.Result) {
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse("geo:$lat,$lng?q=$lat,$lng"))
+            )
+            result.success(true)
+            return
+        } catch (_: Exception) {
+            // No geo handler: fall through to the https url below.
+        }
+        try {
+            startActivity(
+                Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("https://maps.google.com/?q=$lat,$lng")
+                )
+            )
+            result.success(true)
+        } catch (e: Exception) {
+            result.success(false)
+        }
     }
 
     private fun setupMethodChannelHandlers() {
@@ -330,6 +473,14 @@ class MainActivity : FlutterActivity() {
                 }
                 "isConnected" -> {
                     result.success(bluetoothManager.isConnected())
+                }
+                "getLiveRssi" -> {
+                    val address: String? = call.argument("address")
+                    if (address.isNullOrBlank()) {
+                        result.success(null)
+                    } else {
+                        result.success(bluetoothManager.getLiveRssi(address))
+                    }
                 }
                 "sendString" -> {
                     val text: String? = call.argument("text")
@@ -479,6 +630,7 @@ class MainActivity : FlutterActivity() {
                 }
                 "disconnect" -> { wifiDirectManager.disconnect(); result.success(true) }
                 "isConnected" -> { result.success(wifiDirectManager.isConnected()) }
+                "getLiveRssi" -> { result.success(wifiDirectManager.getLiveRssi()) }
                 "sendString" -> {
                     val text: String? = call.argument("text")
                     if (text == null) result.error("ARG_ERROR", "'text' is required", null) else { wifiDirectManager.sendText(text); result.success(true) }

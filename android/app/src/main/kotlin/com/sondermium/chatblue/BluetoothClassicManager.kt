@@ -10,7 +10,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
-import android.os.ParcelUuid
 import android.content.SharedPreferences
 import android.os.Build
 import androidx.core.content.ContextCompat
@@ -30,12 +29,12 @@ class BluetoothClassicManager(private val context: Context) {
 
     private val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
 
-    // App-specific UUID used to identify ChatBlue instances via SDP
+    // App-specific UUID for the RFCOMM service (the SDP record a peer's
+    // dial resolves); scanning no longer probes for it — discovery lists
+    // every found device and the dial is the real capability check.
     private val appServiceUuid: UUID = UUID.fromString("3f4d0001-8b99-4fdd-a17b-9b0a4a97d0c7")
-    private val appServiceParcelUuid: ParcelUuid = ParcelUuid(appServiceUuid)
 
     private val discoveredByAddress: MutableMap<String, Map<String, Any?>> = ConcurrentHashMap()
-    private val candidatesByAddress: MutableMap<String, Map<String, Any?>> = ConcurrentHashMap()
     private val discoveryRegistered = AtomicBoolean(false)
 
     private var onScanStarted: (() -> Unit)? = null
@@ -103,7 +102,6 @@ class BluetoothClassicManager(private val context: Context) {
         }
         tryRegisterReceiver()
         discoveredByAddress.clear()
-        candidatesByAddress.clear()
         // Cancel any ongoing discovery to restart a fresh scan
         if (adapter.isDiscovering) adapter.cancelDiscovery()
         val started = try {
@@ -198,6 +196,17 @@ class BluetoothClassicManager(private val context: Context) {
         connectedThread = null
     }
 
+    /**
+     * Live RSSI of a connected device: no such platform API exists. The
+     * hidden BluetoothDevice.getRssi() this used to probe reflectively does
+     * not exist in AOSP (verified against the 10/11/12 framework and the
+     * modern Bluetooth module sources), so the probe only ever produced
+     * NoSuchMethodException. Scan-time EXTRA_RSSI is the only reading there
+     * is; the dialing side shares it with the peer over the sync link frame.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    fun getLiveRssi(address: String): Int? = null
+
     fun sendBytes(data: ByteArray) {
         // Backward-compatible: treat as raw payload but frame it as BYTES
         sendRawBytes(data)
@@ -254,16 +263,32 @@ class BluetoothClassicManager(private val context: Context) {
                     onScanStarted?.invoke()
                 }
                 BluetoothDevice.ACTION_FOUND -> {
+                    // Emit immediately: SDP probes during an ongoing
+                    // inquiry are unreliable on older stacks (observed on
+                    // the J7: fetchUuidsWithSdp fires per found device and
+                    // the ACTION_UUID confirmation never lands, so the old
+                    // app-UUID gate left the scan list empty) and can
+                    // trigger pairing prompts on Marshmallow+. The dial's
+                    // RFCOMM connect is the real capability check.
                     try {
                         if (!hasScanPermission()) return
                         val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
                         val rssi: Short = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE)
                         if (device != null) {
-                            val mapped = deviceToMap(device) + mapOf("rssi" to rssi.toInt())
-                            candidatesByAddress[device.address] = mapped
-                            try {
-                                if (hasConnectPermission()) device.fetchUuidsWithSdp()
-                            } catch (_: SecurityException) {}
+                            var mapped = deviceToMap(device) + mapOf("rssi" to rssi.toInt())
+                            if (mapped["name"] == null) {
+                                // Older stacks cache the remote name a beat
+                                // late: fall back to the inquiry result's
+                                // own name so scans list real names instead
+                                // of "unknown". (EXTRA_NAME is redacted on
+                                // Android 12+, where getName() works.)
+                                val extraName = intent.getStringExtra(BluetoothDevice.EXTRA_NAME)
+                                if (!extraName.isNullOrBlank()) {
+                                    mapped = mapped + mapOf("name" to extraName)
+                                }
+                            }
+                            discoveredByAddress[device.address] = mapped
+                            onDeviceFound?.invoke(mapped)
                         }
                     } catch (e: SecurityException) {
                         onScanError?.invoke(context.getString(R.string.bt_scan_error_security, e.message.orEmpty()))
@@ -271,24 +296,6 @@ class BluetoothClassicManager(private val context: Context) {
                 }
                 BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
                     onScanFinished?.invoke()
-                    candidatesByAddress.clear()
-                }
-                BluetoothDevice.ACTION_UUID -> {
-                    try {
-                        val device: BluetoothDevice? = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                        val parcelUuids = intent.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID)
-                        if (device != null && parcelUuids != null) {
-                            val hasApp = parcelUuids.any { it is ParcelUuid && it == appServiceParcelUuid }
-                            if (hasApp) {
-                                val mapped = candidatesByAddress[device.address] ?: deviceToMap(device)
-                                discoveredByAddress[device.address] = mapped
-                                onDeviceFound?.invoke(mapped)
-                            }
-                            candidatesByAddress.remove(device.address)
-                        }
-                    } catch (e: Exception) {
-                        onScanError?.invoke(context.getString(R.string.bt_scan_error_uuid, e.message.orEmpty()))
-                    }
                 }
             }
         }
@@ -300,7 +307,6 @@ class BluetoothClassicManager(private val context: Context) {
                 addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
                 addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
                 addAction(BluetoothDevice.ACTION_FOUND)
-                addAction(BluetoothDevice.ACTION_UUID)
             }
             context.registerReceiver(discoveryReceiver, filter)
         }

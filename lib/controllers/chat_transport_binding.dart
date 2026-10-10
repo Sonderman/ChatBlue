@@ -20,6 +20,15 @@ abstract interface class ChatTransportBinding {
   String? get connectedDeviceKey;
   String? get connectedDeviceId;
   String? get connectedDeviceName;
+
+  /// Dial-time signal reading for the connection-quality panel (Bluetooth
+  /// only — the other transports expose no signal metric).
+  int? get connectedDeviceRssi;
+
+  /// Live link RSSI readback for the quality panel; null when the
+  /// transport/platform exposes none.
+  Future<int?> getLiveRssi();
+
   String get transportType;
   bool get isAwaitingAcceptance;
   String? get lastConnectError;
@@ -134,6 +143,14 @@ class _BtChatBinding extends _BindingBase implements ChatTransportBinding {
       _ref.read(btTransportProvider.notifier).connectedDeviceName;
 
   @override
+  int? get connectedDeviceRssi =>
+      _ref.read(btTransportProvider.notifier).connectedDeviceRssi;
+
+  @override
+  Future<int?> getLiveRssi() =>
+      _ref.read(btTransportProvider.notifier).getLiveRssi();
+
+  @override
   String get transportType =>
       _ref.read(btTransportProvider.notifier).transportType;
 
@@ -230,6 +247,13 @@ class _WdChatBinding extends _BindingBase implements ChatTransportBinding {
       _ref.read(wdTransportProvider.notifier).connectedDeviceName;
 
   @override
+  int? get connectedDeviceRssi => null;
+
+  @override
+  Future<int?> getLiveRssi() =>
+      _ref.read(wdTransportProvider.notifier).getLiveRssi();
+
+  @override
   String get transportType =>
       _ref.read(wdTransportProvider.notifier).transportType;
 
@@ -321,6 +345,12 @@ class _NearbyChatBinding extends _BindingBase implements ChatTransportBinding {
   @override
   String? get connectedDeviceName =>
       _ref.read(nearbyTransportProvider.notifier).connectedDeviceName;
+
+  @override
+  int? get connectedDeviceRssi => null;
+
+  @override
+  Future<int?> getLiveRssi() async => null;
 
   @override
   String get transportType =>

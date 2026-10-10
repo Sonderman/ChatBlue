@@ -5,9 +5,11 @@ import 'dart:io';
 import 'package:chatblue/config.dart';
 import 'package:chatblue/controllers/chat_transport_binding.dart';
 import 'package:chatblue/core/models/chatsession_model.dart';
+import 'package:chatblue/core/models/location_message.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/data/db/app_database.dart';
 import 'package:chatblue/data/session_repository.dart';
+import 'package:chatblue/data/settings_repository.dart';
 import 'package:chatblue/l10n/app_localizations_en.dart';
 import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/providers/chat_controller.dart';
@@ -28,6 +30,7 @@ class FakeChatBinding implements ChatTransportBinding {
   String? deviceKey;
   String? deviceId;
   String? deviceName;
+  int? deviceRssi;
   bool awaiting = false;
   String? connectError;
 
@@ -58,6 +61,14 @@ class FakeChatBinding implements ChatTransportBinding {
 
   @override
   String? get connectedDeviceName => deviceName;
+
+  @override
+  int? get connectedDeviceRssi => deviceRssi;
+
+  int? liveRssi;
+
+  @override
+  Future<int?> getLiveRssi() async => connected ? liveRssi : null;
 
   @override
   String get transportType => transport;
@@ -1190,6 +1201,611 @@ void main() {
       expect(msgs.any((m) => m.imagePath != null), isTrue);
 
       // Drain the debounced finalize save the same way.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+  });
+
+  group('link panel', () {
+    test('link stats accumulate and the rate decays after its window', () {
+      final stats = LinkStats();
+      stats.recordIn(400);
+      stats.recordOut(100);
+      expect(stats.bytesIn, 400);
+      expect(stats.bytesOut, 100);
+      expect(stats.framesIn, 1);
+      expect(stats.framesOut, 1);
+      final now = DateTime.now();
+      expect(stats.currentBytesPerSecond(now: now), closeTo(100, 0.5));
+      // Six seconds later the samples left the 5 s window: idle again.
+      expect(
+        stats.currentBytesPerSecond(now: now.add(const Duration(seconds: 6))),
+        0,
+      );
+    });
+
+    test('panel visibility defaults to hidden and toggles', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      // No settings store in tests → the fail-open default: hidden.
+      expect(stateOf(c, arg).linkPanelVisible, isFalse);
+      final controller = c.read(chatControllerProvider(arg).notifier);
+      controller.toggleLinkPanel();
+      expect(stateOf(c, arg).linkPanelVisible, isTrue);
+      controller.toggleLinkPanel();
+      expect(stateOf(c, arg).linkPanelVisible, isFalse);
+    });
+
+    test('a persisted visible preference shows the panel at open', () async {
+      final db = AppDatabase(NativeDatabase.memory());
+      SettingsRepository.instance = SettingsRepository(db);
+      await SettingsRepository.instance!.load();
+      await SettingsRepository.instance!
+          .setString('connectionPanelVisible', 'true');
+      addTearDown(() async {
+        SettingsRepository.instance = null;
+        await db.close();
+      });
+
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      expect(stateOf(c, arg).linkPanelVisible, isTrue,
+          reason: 'both roles (dialer and receiver) open the same screen and '
+              'read the same device-local preference — an enabled receiver '
+              'phone must show the panel too, regardless of who dialed');
+
+      // Toggling off persists the new value (cache updates synchronously).
+      c.read(chatControllerProvider(arg).notifier).toggleLinkPanel();
+      expect(
+        SettingsRepository.instance!.getString('connectionPanelVisible'),
+        'false',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+
+    test('link stats count received and sent traffic', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+      final controller = c.read(chatControllerProvider(arg).notifier);
+      expect(controller.transportKind, ChatSessionModel.transportBluetooth);
+
+      // Incoming text frame + incoming bytes frame.
+      binding.emitData(Uint8List(0), 'hello', kind: 'text');
+      await pumpEventQueue();
+      binding.emitData(Uint8List.fromList([1, 2, 3, 4]), '', kind: 'bytes');
+      await pumpEventQueue();
+
+      final stats = controller.linkStats;
+      expect(stats.framesIn, 2);
+      expect(stats.bytesIn, 4 + 5); // 5 = 'hello'.length
+      expect(stats.currentBytesPerSecond(), greaterThan(0));
+
+      // Outgoing text.
+      controller.textController.text = 'ping';
+      controller.sendTextMessage();
+      await pumpEventQueue();
+      expect(stats.framesOut, 1);
+      expect(stats.bytesOut, 4);
+
+      // Drain the debounced persist of the received-bytes bubble.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+
+    test('the link uptime starts on connect and clears on disconnect',
+        () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+      final controller = c.read(chatControllerProvider(arg).notifier);
+
+      expect(controller.connectedSince, isNull);
+      binding.emitConnection(true);
+      expect(controller.connectedSince, isNotNull);
+      binding.emitConnection(false);
+      expect(controller.connectedSince, isNull);
+    });
+  });
+
+  group('peer signal sharing', () {
+    test('opening a connected chat pushes the dial-time reading', () async {
+      final oldDelay = ChatController.linkShareRetryDelay;
+      ChatController.linkShareRetryDelay = const Duration(milliseconds: 40);
+      addTearDown(() => ChatController.linkShareRetryDelay = oldDelay);
+
+      binding.connected = true;
+      binding.deviceRssi = -58;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      List<Map<String, dynamic>> shares() => binding.sentMessages
+          .where((m) => m.startsWith('@@CHATBLUE_SYNC@@'))
+          .map((m) => jsonDecode(m.substring('@@CHATBLUE_SYNC@@'.length))
+              as Map<String, dynamic>)
+          .where((d) => d['type'] == 'linkShare')
+          .toList();
+
+      expect(shares(), hasLength(1),
+          reason: 'the dialer pushes its scan reading for the accepting '
+              'side, which never scanned');
+      expect(shares().single['rssi'], -58);
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect(shares(), hasLength(2),
+          reason: 'one retry covers the peer chat opening a beat late');
+    });
+
+    test('a chat without a local reading shares nothing', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      expect(
+        binding.sentMessages.where((m) => m.contains('"linkShare"')),
+        isEmpty,
+        reason: 'the accepting side has no reading — it must not add wire '
+            'traffic (which keeps unrelated message-flow assertions clean)',
+      );
+    });
+
+    test('a linkShare from the peer surfaces as peerReportedRssi', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+      final controller = c.read(chatControllerProvider(arg).notifier);
+      expect(controller.peerReportedRssi, isNull);
+
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"linkShare","rssi":-54}',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+      expect(controller.peerReportedRssi, -54,
+          reason: 'the dialer\'s scan reading reaches the accepting side');
+
+      // Implausible readings must not poison the panel.
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"linkShare","rssi":3}',
+        kind: 'text',
+      );
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"linkShare","rssi":-300}',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+      expect(controller.peerReportedRssi, -54);
+    });
+  });
+
+  group('file & location sharing', () {
+    late Directory tmpDir;
+
+    setUp(() {
+      tmpDir = Directory.systemTemp.createTempSync('chatblue_share_test');
+    });
+
+    tearDown(() {
+      try {
+        tmpDir.deleteSync(recursive: true);
+      } catch (_) {}
+    });
+
+    Future<File> writeTempFile(String name, int size) async {
+      final f = File('${tmpDir.path}/$name');
+      await f.writeAsBytes(List<int>.filled(size, 7));
+      return f;
+    }
+
+    ChatOpenArg shareArg() => ChatOpenArg(
+          transport: ChatSessionModel.transportBluetooth,
+          session: sessionFixture(),
+        );
+
+    test(
+        'a file send announces name+size before the bytes and finalizes a '
+        'file bubble', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = shareArg();
+      open(c, arg);
+      await pumpEventQueue();
+      final controller = c.read(chatControllerProvider(arg).notifier);
+
+      final file = await writeTempFile('report.pdf', 1024);
+      await controller.sendFile(file.path, name: 'report.pdf');
+      await pumpEventQueue();
+
+      // The announcement frame precedes the bytes (it carries the name the
+      // receiver labels the file with); the bytes stay raw binary.
+      expect(binding.sentMessages.length, 1);
+      expect(binding.sentMessages.single, startsWith('@@CHATBLUE_FILE@@'));
+      expect(binding.sentMessages.single, contains('"name":"report.pdf"'));
+      expect(binding.sentMessages.single, contains('"size":1024'));
+      expect(binding.sentBytes.length, 1);
+      expect(binding.sentBytes.single.length, 1024);
+
+      // The transfer's own final progress event finalizes the bubble as a
+      // file message (same contract as images/voice).
+      binding.emitProgress(
+        direction: 'out',
+        current: 1024,
+        total: 1024,
+        kind: 'bytes',
+      );
+      final msgs = stateOf(c, arg).messages;
+      final fileMsg = msgs.firstWhere((m) => m.transferKind == 'file');
+      expect(fileMsg.imagePath, file.path);
+      expect(fileMsg.text, contains('report.pdf'));
+      expect(fileMsg.isTransferring, isFalse);
+
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+
+    test('a file above the cap is refused (nothing is sent)', () async {
+      final oldCap = ChatController.maxFileBytes;
+      ChatController.maxFileBytes = 512;
+      addTearDown(() => ChatController.maxFileBytes = oldCap);
+
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = shareArg();
+      open(c, arg);
+      await pumpEventQueue();
+      final controller = c.read(chatControllerProvider(arg).notifier);
+
+      final file = await writeTempFile('big.bin', 4096);
+      await controller.sendFile(file.path, name: 'big.bin');
+      await pumpEventQueue();
+
+      expect(binding.sentMessages, isEmpty);
+      expect(binding.sentBytes, isEmpty);
+      expect(
+        stateOf(c, arg).messages.any((m) => m.transferKind == 'file'),
+        isFalse,
+      );
+    });
+
+    test(
+        'file sending is blocked for a peer on a pre-feature build (pv<2); '
+        'location still goes', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = shareArg();
+      open(c, arg);
+      await pumpEventQueue();
+      final controller = c.read(chatControllerProvider(arg).notifier);
+
+      // The peer's sync manifest reports protocol v1 (it cannot render the
+      // file announcement/bytes pair).
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"manifest","pv":1,"items":[]}',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+
+      final file = await writeTempFile('doc.txt', 64);
+      await controller.sendFile(file.path, name: 'doc.txt');
+      await pumpEventQueue();
+      expect(
+        binding.sentMessages.where((m) => m.startsWith('@@CHATBLUE_FILE@@')),
+        isEmpty,
+        reason: 'a pre-feature peer must not receive the new wire pair',
+      );
+
+      // Location is plain text — safe for every build.
+      controller.sendLocation(
+        lat: 41.008237,
+        lng: 28.978358,
+        accuracyMeters: 12,
+      );
+      await pumpEventQueue();
+      expect(binding.sentMessages.any((m) => m.startsWith('📍')), isTrue);
+    });
+
+    test('an incoming file lands under its original name with a file bubble',
+        () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = shareArg();
+      open(c, arg);
+      await pumpEventQueue();
+
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_FILE@@{"name":"trip plan.pdf","size":4}',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+      binding.emitData(Uint8List.fromList([9, 8, 7, 6]), '', kind: 'bytes');
+      await pumpEventQueue();
+      await pumpEventQueue();
+
+      final msgs = stateOf(c, arg).messages;
+      final m = msgs.firstWhere((x) => x.transferKind == 'file');
+      expect(m.imagePath, isNotNull);
+      expect(m.imagePath!.split(Platform.pathSeparator).last, 'trip plan.pdf');
+      expect(File(m.imagePath!).readAsBytesSync(), [9, 8, 7, 6]);
+      expect(m.isTransferring, isFalse);
+
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+
+    test('a second incoming file with the same name does not overwrite the '
+        'first', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = shareArg();
+      open(c, arg);
+      await pumpEventQueue();
+
+      for (final payload in [
+        [1, 1],
+        [2, 2],
+      ]) {
+        binding.emitData(
+          Uint8List(0),
+          '@@CHATBLUE_FILE@@{"name":"a.bin","size":2}',
+          kind: 'text',
+        );
+        await pumpEventQueue();
+        binding.emitData(Uint8List.fromList(payload), '', kind: 'bytes');
+        await pumpEventQueue();
+      }
+
+      // The incoming write runs on a background isolate (compute): wait
+      // for the messages to land instead of racing a fixed pump window.
+      for (var i = 0; i < 50 && stateOf(c, arg).messages.length < 2; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+
+      final files = stateOf(c, arg)
+          .messages
+          .where((m) => m.transferKind == 'file')
+          .toList();
+      expect(files.length, 2);
+      expect(files[0].imagePath == files[1].imagePath, isFalse);
+      final byteSets = files
+          .map((m) => File(m.imagePath!).readAsBytesSync().toList())
+          .toList();
+      expect(byteSets, containsAll([
+        [1, 1],
+        [2, 2],
+      ]));
+
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+
+    test(
+        'a file announcement from a dropped link does not misroute the next '
+        'bytes', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = shareArg();
+      open(c, arg);
+      await pumpEventQueue();
+
+      // Announcement arrives… then the link drops before the bytes.
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_FILE@@{"name":"x.pdf","size":4}',
+        kind: 'text',
+      );
+      binding.emitConnection(false);
+      await pumpEventQueue();
+
+      // Reconnect: the peer's next IMAGE bytes must land as an image, not
+      // be saved as a file off the stale announcement.
+      binding.emitConnection(true);
+      binding.emitData(Uint8List.fromList([1, 2, 3, 4]), '', kind: 'bytes');
+      await pumpEventQueue();
+      await pumpEventQueue();
+
+      final msgs = stateOf(c, arg).messages;
+      expect(msgs.any((m) => m.transferKind == 'file'), isFalse,
+          reason: 'stale _pendingIncomingFileMeta routed image bytes to the '
+              'file handler');
+      expect(msgs.any((m) => m.imagePath != null), isTrue);
+
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+
+    test('a synced file entry materializes as a file message with its name',
+        () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = shareArg();
+      open(c, arg);
+      await pumpEventQueue();
+
+      final b64 = base64Encode([9, 9, 9]);
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"message","messages":[{"id":"f1",'
+        '"text":"[File] notes.txt (3 bytes)","sentByMe":true,'
+        '"timestamp":"${DateTime.now().toIso8601String()}",'
+        '"type":"file","fileName":"notes.txt","bytes":"$b64"}]}',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+      await pumpEventQueue();
+
+      final m =
+          stateOf(c, arg).messages.firstWhere((x) => x.id == 'f1');
+      expect(m.transferKind, 'file');
+      expect(m.imagePath!.split(Platform.pathSeparator).last, 'notes.txt');
+      expect(File(m.imagePath!).readAsBytesSync(), [9, 9, 9]);
+
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+
+    test('a large synced file arrives as a download placeholder', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = shareArg();
+      open(c, arg);
+      await pumpEventQueue();
+
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@{"type":"message","messages":[{"id":"f2",'
+        '"text":"[File] movie.mp4 (10485760 bytes)","sentByMe":false,'
+        '"timestamp":"${DateTime.now().toIso8601String()}",'
+        '"type":"file","fileName":"movie.mp4","remoteSize":10485760}]}',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+
+      final m =
+          stateOf(c, arg).messages.firstWhere((x) => x.id == 'f2');
+      expect(m.transferKind, 'file');
+      expect(m.hasRemoteMedia, isTrue);
+      expect(m.remoteMediaSize, 10485760);
+    });
+
+    test(
+        'location messages travel as encoded text and reach the bubble state',
+        () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = shareArg();
+      open(c, arg);
+      await pumpEventQueue();
+      final controller = c.read(chatControllerProvider(arg).notifier);
+
+      controller.sendLocation(
+        lat: 41.008237,
+        lng: 28.978358,
+        accuracyMeters: 12,
+      );
+      await pumpEventQueue();
+
+      expect(binding.sentMessages.length, 1);
+      expect(binding.sentMessages.single, startsWith('📍'));
+      final mine = stateOf(c, arg).messages.first;
+      expect(mine.text, binding.sentMessages.single);
+      expect(mine.isSentByMe, isTrue);
+
+      // The peer side of the same format: arrives as a plain chat message
+      // (the rich bubble is a pure render-time concern).
+      final peerText = encodeLocationMessage(
+        lat: 40.7128,
+        lng: -74.006,
+        accuracyMeters: 25,
+      );
+      binding.emitData(Uint8List(0), peerText, kind: 'text');
+      await pumpEventQueue();
+      final received = stateOf(c, arg).messages.first;
+      expect(received.text, peerText);
+      expect(received.isSentByMe, isFalse);
+    });
+  });
+
+  group('image transfer integrity', () {
+    test(
+        'an outgoing image stores exactly the bytes that went on the wire '
+        '(compression included)', () async {
+      final original = Uint8List.fromList(
+        List<int>.generate(1000, (i) => i % 251),
+      );
+      // A compression pass that changes both size and content — the real
+      // case (quality-70 re-encode of a picked photo).
+      final compressed = Uint8List.fromList(
+        List<int>.generate(400, (i) => (i * 7) % 251),
+      );
+      final oldCompressor = ChatController.imageCompressor;
+      ChatController.imageCompressor = (b) async => compressed;
+      addTearDown(() => ChatController.imageCompressor = oldCompressor);
+
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+      final controller = c.read(chatControllerProvider(arg).notifier);
+
+      await controller.enqueuePickedImage(original);
+      await pumpEventQueue();
+
+      expect(binding.sentBytes.length, 1);
+      expect(binding.sentBytes.single, compressed,
+          reason: 'the wire must carry the compressed copy');
+
+      binding.emitProgress(
+        direction: 'out',
+        current: 400,
+        total: 400,
+        kind: 'bytes',
+      );
+      final sent = stateOf(c, arg)
+          .messages
+          .firstWhere((m) => m.imagePath != null && m.isSentByMe);
+      final stored = File(sent.imagePath!).readAsBytesSync();
+      expect(stored, compressed,
+          reason: 'the stored copy must be byte-identical to the wire bytes '
+              '— a divergent copy (stored original vs sent compressed) '
+              'defeats the content-hash dedup fallback, so a peer re-serve '
+              'cannot be recognised when the ±10 s timestamp window does '
+              'not apply (slow transfers / clock skew) and the same image '
+              'is added a second time (device-reported duplicate bubbles)');
+
       await Future<void>.delayed(const Duration(milliseconds: 350));
     });
   });

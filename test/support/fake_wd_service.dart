@@ -57,6 +57,13 @@ class FakeWdService extends WifiDirectService {
   @override
   Future<bool> isConnected() async => false;
 
+  /// Value returned by [getLiveRssi]; null simulates a platform without a
+  /// live read.
+  int? liveRssi;
+
+  @override
+  Future<int?> getLiveRssi() async => liveRssi;
+
   @override
   Future<void> sendString(String text) async {}
 

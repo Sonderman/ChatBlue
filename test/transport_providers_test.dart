@@ -60,6 +60,26 @@ void main() {
       expect(c.read(btTransportProvider).scanResults, isEmpty);
     });
 
+    test('scan results skip devices that never broadcast a name', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      c.read(btTransportProvider);
+      service.onScanStarted?.call();
+      service.onDeviceFound?.call(
+        BtDeviceInfo(address: 'AA:BB:CC', name: 'PeerOne'),
+      );
+      service.onDeviceFound?.call(BtDeviceInfo(address: '11:22:33'));
+      service.onDeviceFound?.call(
+        BtDeviceInfo(address: '22:33:44', name: '   '),
+      );
+      expect(
+        c.read(btTransportProvider).scanResults.map((d) => d.address).toList(),
+        ['AA:BB:CC'],
+        reason: 'nameless neighbors (audio gear / TVs that never broadcast '
+            'a name) are noise on the device picker',
+      );
+    });
+
     test('stopScan empties the nearby list (live-view semantics)', () async {
       final c = container();
       addTearDown(c.dispose);
@@ -340,6 +360,61 @@ void main() {
         BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
       );
       expect(await connectFuture, isTrue);
+    });
+
+    test('a dial keeps its scan RSSI for the quality panel until the link '
+        'drops', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+      final notifier = c.read(btTransportProvider.notifier);
+
+      // Panel data needs the LINK up (READY), not just the socket.
+      final connectFuture = notifier.connectToPeer(
+        'AA:BB:CC:DD:EE:FF',
+        rssi: -58,
+      );
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      );
+      await connectFuture;
+      service.onSocketData!(Uint8List(0), '@@CHATBLUE_CONNECT@@', kind: 'text');
+      await pumpEventQueue();
+
+      expect(c.read(btTransportProvider).isConnected, isTrue);
+      expect(notifier.connectedDeviceRssi, -58,
+          reason: 'the dial-time scan RSSI feeds the chat quality panel '
+              '(Bluetooth Classic has no live link RSSI API)');
+
+      service.onSocketDisconnected?.call('remote');
+      await pumpEventQueue();
+      expect(notifier.connectedDeviceRssi, isNull);
+    });
+
+    test('getLiveRssi polls the native reading while connected', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      final notifier = c.read(btTransportProvider.notifier);
+      expect(await notifier.getLiveRssi(), isNull,
+          reason: 'no connected device yet');
+
+      final connectFuture = notifier.connectToPeer(
+        'AA:BB:CC:DD:EE:FF',
+        rssi: -58,
+      );
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      );
+      await connectFuture;
+      service.onSocketData!(Uint8List(0), '@@CHATBLUE_CONNECT@@', kind: 'text');
+      await pumpEventQueue();
+
+      service.liveRssi = -54;
+      expect(await notifier.getLiveRssi(), -54,
+          reason: 'the quality panel polls the platform live value');
+
+      service.liveRssi = null; // platform without a live read
+      expect(await notifier.getLiveRssi(), isNull);
     });
   });
 

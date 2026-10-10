@@ -137,6 +137,12 @@ class BtClassicService {
     return _platform.isConnected();
   }
 
+  /// Best-effort live RSSI of a connected device; null when the platform
+  /// exposes none.
+  Future<int?> getLiveRssi(String address) {
+    return _platform.getLiveRssi(address);
+  }
+
   /// Send a UTF-8 encoded text over the socket.
   Future<void> sendString(String text) async {
     await _platform.sendString(text);

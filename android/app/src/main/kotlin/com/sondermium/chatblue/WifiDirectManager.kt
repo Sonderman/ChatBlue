@@ -144,6 +144,25 @@ class WifiDirectManager(private val context: Context) {
 
     fun isConnected(): Boolean = connectedThread?.isActive() == true
 
+    /**
+     * Best-effort live RSSI of the P2P link. Only the CLIENT side can read
+     * it: the group is then a regular Wi-Fi association and
+     * WifiManager.connectionInfo reports its current signal. As group owner
+     * there is no readback; null when unknown.
+     */
+    fun getLiveRssi(): Int? {
+        if (groupOwnerMode.get()) return null
+        return try {
+            val wm = context.applicationContext
+                .getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                ?: return null
+            val rssi = wm.connectionInfo.rssi
+            if (rssi in -100..-1) rssi else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun dispose() {
         tryUnregisterReceiver()
         stopDiscovery()

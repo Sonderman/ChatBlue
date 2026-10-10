@@ -142,6 +142,10 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   DateTime? _connectInitiatedAt;
   BtDeviceInfo? _pendingRemote;
   bool _pendingAccept = false;
+
+  /// Scan-time RSSI of the last dial — the chat quality panel's only signal
+  /// metric (Bluetooth Classic exposes no live RSSI for an RFCOMM link).
+  int? _dialRssi;
   Timer? _serverAutoStopTimer;
   Timer? _scanSessionTimer;
   Timer? _scanRearmTimer;
@@ -192,9 +196,14 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     };
 
     _service.onDeviceFound = (d) {
-      // Stale late events (SDP replies landing after a window died) must
-      // not repopulate the list while no scan is on.
+      // Stale late events (queued ACTION_FOUNDs landing after a window
+      // died) must not repopulate the list while no scan is on.
       if (_scanSessionTimer == null && !state.isScanning) return;
+      // Nameless neighbors (audio gear, TVs — devices that never broadcast
+      // a name in their inquiry response) are noise on a chat picker; a
+      // later FOUND event that carries the name still adds the device.
+      final name = d.name;
+      if (name == null || name.trim().isEmpty) return;
       final results = [...state.scanResults];
       final idx = results.indexWhere((e) => e.address == d.address);
       if (idx == -1) {
@@ -247,6 +256,8 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
 
     _service.onSocketDisconnected = (reason) {
       _settleDial();
+      // The dial-time RSSI describes the link that just died.
+      _dialRssi = null;
       final bool wasConnected = state.isConnected;
       // The device binding describes a LIVE link — a stale peer kept across
       // disconnects used to survive into the NEXT connection: the READY
@@ -319,6 +330,26 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   String? get connectedDeviceKey => state.connectedDevice?.address;
   String? get connectedDeviceName => state.connectedDevice?.name;
   String get transportType => 'bt';
+
+  /// Scan-time RSSI of the last dial, shown by the chat's connection
+  /// quality panel while THIS link is up. Bluetooth Classic exposes no
+  /// public live RSSI for an RFCOMM link; the panel prefers [getLiveRssi]
+  /// and falls back to this dial-time value (labelled) when the platform
+  /// yields none.
+  int? get connectedDeviceRssi => state.isConnected ? _dialRssi : null;
+
+  /// Best-effort live RSSI of the connected device: the native side reads
+  /// the stack's hidden current value and returns null when the platform
+  /// blocks or lacks it.
+  Future<int?> getLiveRssi() async {
+    final address = state.connectedDevice?.address;
+    if (address == null || !state.isConnected) return null;
+    try {
+      return await _service.getLiveRssi(address);
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Decline feedback — the themed notice card (dialer or declining side).
   /// The skip-guards keep this the only surface for the outcome.
@@ -511,9 +542,10 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     _chatDataCallback?.call(bytes, text, kind: kind);
   }
 
-  /// Connect to a discovered or paired device and await the connection result.
+  /// Connect to a discovered or paired device and await the connection
+  /// result ([device.rssi] feeds the chat quality panel when present).
   Future<bool> connectToDevice(BtDeviceInfo device) =>
-      connectToPeer(device.address);
+      connectToPeer(device.address, rssi: device.rssi);
 
   /// Bluetooth addresses are `XX:XX:XX:XX:XX:XX`. Anything else must never
   /// reach the native layer: `BluetoothAdapter.getRemoteDevice` throws
@@ -524,7 +556,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   static final RegExp _btAddressPattern =
       RegExp(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$');
 
-  Future<bool> connectToPeer(String address) async {
+  Future<bool> connectToPeer(String address, {int? rssi}) async {
     address = address.trim();
     if (!_btAddressPattern.hasMatch(address)) {
       if (kDebugMode) {
@@ -538,6 +570,9 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     // Fresh attempt: drop the previous failure reason so a stale reason
     // (e.g. a previous decline) can never masquerade as this dial's result.
     state = state.copyWith(clearLastConnectError: true);
+    // Dial-time scan RSSI for the chat quality panel (null when dialed
+    // without scan context, e.g. the chat's own Connect button).
+    _dialRssi = rssi;
     final Completer<bool> completer = Completer<bool>();
     _pendingConnectCompleter = completer;
     _dialSettle = Completer<void>();
@@ -831,6 +866,17 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   String? get connectedDeviceId => state.connectedDevice?.peerId;
   String? get connectedDeviceName => state.connectedDevice?.deviceName;
   String get transportType => 'wfd';
+
+  /// Best-effort live RSSI of the P2P link (client side); null when the
+  /// platform exposes none.
+  Future<int?> getLiveRssi() async {
+    if (!state.isConnected) return null;
+    try {
+      return await _service.getLiveRssi();
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Decline feedback — the themed notice card (dialer or declining side).
   /// The skip-guards keep this the only surface for the outcome.

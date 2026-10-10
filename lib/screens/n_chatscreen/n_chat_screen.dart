@@ -81,6 +81,7 @@ class _NChatScreenState extends ConsumerState<NChatScreen> {
             bottom: false,
             child: Column(
               children: [
+                ChatLinkPanel(state: state, controller: controller),
                 ChatSyncBanner(state: state),
                 Expanded(
                   child: ChatMessageList(state: state, controller: controller),

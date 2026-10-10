@@ -3,7 +3,7 @@ description: "A new Flutter project."
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
 
-version: 1.0.1+4
+version: 1.1.0+5
 
 environment:
   sdk: ^3.13.5
@@ -39,6 +39,12 @@ dependencies:
   # flutter-mcp-toolkit köprüsü (debug): koşan app'i agent'tan sürmek +
   # log/hata okumak için; init main.dart'ta kDebugMode-gated.
   mcp_toolkit: ^7.0.0
+
+  # Dosya + konum paylaşımı (sohbet): sistem dosya seçici (SAF) ve
+  # tek-seferlik konum alımı; dosya açma/harita intent'leri native util
+  # kanalında (ek paket yok).
+  file_picker: ^13.1.0
+  geolocator: ^14.1.1
 
 dev_dependencies:
   build_runner: ^2.6.0

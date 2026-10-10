@@ -11,9 +11,12 @@
 // controller's dedicated [AudioPlaybackState] notifier so position updates
 // never rebuild the message list.
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:auto_size_text/auto_size_text.dart';
+import 'package:chatblue/core/format_utils.dart';
+import 'package:chatblue/core/models/location_message.dart';
 import 'package:chatblue/core/models/message_model.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
 import 'package:chatblue/providers/chat_controller.dart';
@@ -119,8 +122,7 @@ class ChatPalette {
     progressTrack: Color(0x1F0A1122),
   );
 
-  static ChatPalette of(BuildContext context) =>
-      Theme.of(context).brightness == Brightness.dark ? dark : light;
+  static ChatPalette of(BuildContext context) => Theme.of(context).brightness == Brightness.dark ? dark : light;
 }
 
 /// Formats a message timestamp as 24-hour HH:mm.
@@ -149,14 +151,12 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
     final l10n = AppLocalizations.of(context)!;
     // Fallback order matters (BT carries a transport name immediately, WFD
     // only after READY): transport name → peer-reported name → stored name.
-    final name = controller.connectedDeviceName ??
-        (state.peerName.isNotEmpty ? state.peerName : state.chatSession.name);
+    final name =
+        controller.connectedDeviceName ?? (state.peerName.isNotEmpty ? state.peerName : state.chatSession.name);
     return AppBar(
       // Status bar icons follow the chat palette, not the app theme: the
       // chat bar stays dark navy on the light theme too.
-      systemOverlayStyle: p.barForeground == Colors.white
-          ? SystemUiOverlayStyle.light
-          : SystemUiOverlayStyle.dark,
+      systemOverlayStyle: p.barForeground == Colors.white ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
       backgroundColor: p.bar,
       surfaceTintColor: Colors.transparent,
       elevation: 0,
@@ -175,11 +175,7 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
                 AutoSizeText(
                   name,
                   maxLines: 1,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: p.barForeground,
-                  ),
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: p.barForeground),
                 ),
                 const SizedBox(height: 2),
                 Row(
@@ -188,13 +184,8 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
                     _StatusDot(connected: state.isConnected, palette: p),
                     const SizedBox(width: 6),
                     Text(
-                      state.isConnected
-                          ? l10n.connectedStatus
-                          : l10n.notConnectedStatus,
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: state.isConnected ? p.accent : Colors.redAccent,
-                      ),
+                      state.isConnected ? l10n.connectedStatus : l10n.notConnectedStatus,
+                      style: TextStyle(fontSize: 11, color: state.isConnected ? p.accent : Colors.redAccent),
                     ),
                   ],
                 ),
@@ -204,6 +195,13 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
         ],
       ),
       actions: [
+        IconButton(
+          // Connection-quality strip toggle (hidden by default; the
+          // preference persists across restarts).
+          icon: Icon(Icons.signal_cellular_alt, color: p.accent),
+          tooltip: l10n.connectionPanelTooltip,
+          onPressed: controller.toggleLinkPanel,
+        ),
         IconButton(
           // Action icons follow the palette accent (like the composer's and
           // the status indicators) — `muted` rendered as a washed-out gray
@@ -233,28 +231,16 @@ class _DeviceAvatar extends StatelessWidget {
       height: 40,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: palette.sentGradient,
-        ),
+        gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: palette.sentGradient),
         border: Border.all(color: palette.accent.withValues(alpha: 0.55), width: 1.5),
         boxShadow: [
-          BoxShadow(
-            color: palette.accent.withValues(alpha: 0.25),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
+          BoxShadow(color: palette.accent.withValues(alpha: 0.25), blurRadius: 10, offset: const Offset(0, 2)),
         ],
       ),
       child: Center(
         child: Text(
           initial,
-          style: const TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.w700,
-            color: Colors.white,
-          ),
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: Colors.white),
         ),
       ),
     );
@@ -277,19 +263,14 @@ class _StatusDot extends StatelessWidget {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: color,
-        boxShadow: [
-          BoxShadow(color: color.withValues(alpha: 0.7), blurRadius: 6),
-        ],
+        boxShadow: [BoxShadow(color: color.withValues(alpha: 0.7), blurRadius: 6)],
       ),
     );
   }
 }
 
 /// Theme-aware confirmation dialog for clearing the conversation.
-Future<void> showChatClearDialog(
-  BuildContext context,
-  ChatController controller,
-) async {
+Future<void> showChatClearDialog(BuildContext context, ChatController controller) async {
   final p = ChatPalette.of(context);
   final l10n = AppLocalizations.of(context)!;
   final clear = await showDialog<bool>(
@@ -301,20 +282,14 @@ Future<void> showChatClearDialog(
         side: BorderSide(color: p.border),
       ),
       title: Text(l10n.clearConversationTitle, style: TextStyle(color: p.messageText)),
-      content: Text(
-        l10n.clearConversationMessage,
-        style: TextStyle(color: p.muted),
-      ),
+      content: Text(l10n.clearConversationMessage, style: TextStyle(color: p.muted)),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(dialogContext).pop(false),
           child: Text(l10n.cancel, style: TextStyle(color: p.muted)),
         ),
         FilledButton(
-          style: FilledButton.styleFrom(
-            backgroundColor: const Color(0xFFC62828),
-            foregroundColor: Colors.white,
-          ),
+          style: FilledButton.styleFrom(backgroundColor: const Color(0xFFC62828), foregroundColor: Colors.white),
           onPressed: () => Navigator.of(dialogContext).pop(true),
           child: Text(l10n.clearAction),
         ),
@@ -328,11 +303,7 @@ Future<void> showChatClearDialog(
 
 /// Theme-aware confirmation dialog for removing one of the user's own
 /// messages (local only — the peer's copy is untouched).
-Future<void> showDeleteMessageDialog(
-  BuildContext context,
-  ChatController controller,
-  MessageModel message,
-) async {
+Future<void> showDeleteMessageDialog(BuildContext context, ChatController controller, MessageModel message) async {
   final p = ChatPalette.of(context);
   final l10n = AppLocalizations.of(context)!;
   final delete = await showDialog<bool>(
@@ -344,20 +315,14 @@ Future<void> showDeleteMessageDialog(
         side: BorderSide(color: p.border),
       ),
       title: Text(l10n.deleteMessageTitle, style: TextStyle(color: p.messageText)),
-      content: Text(
-        l10n.deleteMessageBody,
-        style: TextStyle(color: p.muted),
-      ),
+      content: Text(l10n.deleteMessageBody, style: TextStyle(color: p.muted)),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(dialogContext).pop(false),
           child: Text(l10n.cancel, style: TextStyle(color: p.muted)),
         ),
         FilledButton(
-          style: FilledButton.styleFrom(
-            backgroundColor: const Color(0xFFC62828),
-            foregroundColor: Colors.white,
-          ),
+          style: FilledButton.styleFrom(backgroundColor: const Color(0xFFC62828), foregroundColor: Colors.white),
           onPressed: () => Navigator.of(dialogContext).pop(true),
           child: Text(l10n.delete),
         ),
@@ -366,6 +331,61 @@ Future<void> showDeleteMessageDialog(
   );
   if (delete == true) {
     controller.deleteMessage(message.id);
+  }
+}
+
+/// Long-press actions for a plain text bubble: copy (both directions) and —
+/// for own, finished messages — the delete confirm. Deliberately NOT the
+/// framework's SelectableText selection toolbar: its follower-layer
+/// machinery trips a layout assertion in this Flutter version, and its copy
+/// action took the whole message anyway.
+Future<void> showMessageActionsDialog(
+  BuildContext context,
+  ChatController? controller,
+  MessageModel message, {
+  required bool mine,
+}) async {
+  final p = ChatPalette.of(context);
+  final l10n = AppLocalizations.of(context)!;
+  final bool canDelete =
+      mine && controller != null && !message.isTransferring;
+  final action = await showDialog<String>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      backgroundColor: p.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: p.border),
+      ),
+      content: Text(
+        message.text,
+        maxLines: 4,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(color: p.messageText),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(dialogContext).pop('copy'),
+          child: Text(l10n.copyAction, style: TextStyle(color: p.accent)),
+        ),
+        if (canDelete)
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFC62828),
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(dialogContext).pop('delete'),
+            child: Text(l10n.delete),
+          ),
+      ],
+    ),
+  );
+  if (action == 'copy') {
+    await Clipboard.setData(ClipboardData(text: message.text));
+    // Clear any visible notice card (the old toolbar's copy did the same).
+    ConnectionNotice.dismiss();
+  } else if (action == 'delete' && controller != null && context.mounted) {
+    await showDeleteMessageDialog(context, controller, message);
   }
 }
 
@@ -382,20 +402,14 @@ Future<bool?> showChatTransferDialog(BuildContext context) {
         side: BorderSide(color: p.border),
       ),
       title: Text(l10n.transferInProgressTitle, style: TextStyle(color: p.messageText)),
-      content: Text(
-        l10n.transferInProgressMessage,
-        style: TextStyle(color: p.muted),
-      ),
+      content: Text(l10n.transferInProgressMessage, style: TextStyle(color: p.muted)),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(dialogContext).pop(false),
           child: Text(l10n.stayAction, style: TextStyle(color: p.accent)),
         ),
         FilledButton(
-          style: FilledButton.styleFrom(
-            backgroundColor: p.accentDeep,
-            foregroundColor: Colors.white,
-          ),
+          style: FilledButton.styleFrom(backgroundColor: p.accentDeep, foregroundColor: Colors.white),
           onPressed: () => Navigator.of(dialogContext).pop(true),
           child: Text(l10n.leaveAction),
         ),
@@ -424,7 +438,9 @@ class ChatSyncBanner extends StatelessWidget {
     // inset, so the banner only needs the app bar's 64 px toolbar height
     // to sit flush against its bottom edge.
     return Container(
-      margin: const EdgeInsets.only(top: 66, left: 10, right: 10),
+      // The quality panel above already carries the 66 px app-bar offset
+      // when it is visible; without it the banner starts the content.
+      margin: EdgeInsets.only(top: state.linkPanelVisible ? 2 : 66, left: 10, right: 10),
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
       decoration: BoxDecoration(
         color: p.bar,
@@ -437,19 +453,9 @@ class ChatSyncBanner extends StatelessWidget {
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              SizedBox(
-                width: 10,
-                height: 10,
-                child: CircularProgressIndicator(
-                  strokeWidth: 1.6,
-                  color: p.accent,
-                ),
-              ),
+              SizedBox(width: 10, height: 10, child: CircularProgressIndicator(strokeWidth: 1.6, color: p.accent)),
               const SizedBox(width: 8),
-              Text(
-                l10n.syncingHistory,
-                style: TextStyle(fontSize: 11, color: p.muted),
-              ),
+              Text(l10n.syncingHistory, style: TextStyle(fontSize: 11, color: p.muted)),
             ],
           ),
           const SizedBox(height: 4),
@@ -462,6 +468,181 @@ class ChatSyncBanner extends StatelessWidget {
               valueColor: AlwaysStoppedAnimation<Color>(p.accent),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Collapsible connection-quality strip: link type + state, uptime, live
+/// traffic counters/rate and — on Bluetooth — the dial-time scan RSSI.
+/// Visibility lives in [ChatState.linkPanelVisible] (the app bar icon
+/// toggles it; the preference is persisted); when hidden it renders
+/// nothing and its 1 s ticker is stopped.
+class ChatLinkPanel extends StatefulWidget {
+  const ChatLinkPanel({super.key, required this.state, required this.controller});
+
+  final ChatState state;
+  final ChatController controller;
+
+  @override
+  State<ChatLinkPanel> createState() => _ChatLinkPanelState();
+}
+
+class _ChatLinkPanelState extends State<ChatLinkPanel> {
+  Timer? _ticker;
+  int _ticks = 0;
+  bool _rssiBusy = false;
+  int? _liveRssi;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncTicker();
+  }
+
+  @override
+  void didUpdateWidget(ChatLinkPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncTicker();
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  /// The 1 s ticker runs only while the strip is visible: it refreshes the
+  /// uptime and rate labels by re-reading the controller, and polls the
+  /// live link RSSI every 3 s (best effort — the platform may expose
+  /// none, in which case the label falls back to the dial-time value).
+  void _syncTicker() {
+    final visible = widget.state.linkPanelVisible;
+    if (visible && _ticker == null) {
+      unawaited(_refreshLiveRssi());
+      _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted) return;
+        _ticks++;
+        if (_ticks % 3 == 0) unawaited(_refreshLiveRssi());
+        setState(() {});
+      });
+    } else if (!visible && _ticker != null) {
+      _ticker!.cancel();
+      _ticker = null;
+      _liveRssi = null;
+    }
+  }
+
+  Future<void> _refreshLiveRssi() async {
+    if (_rssiBusy) return;
+    if (!widget.state.isConnected) {
+      if (_liveRssi != null && mounted) setState(() => _liveRssi = null);
+      return;
+    }
+    _rssiBusy = true;
+    try {
+      final value = await widget.controller.fetchLiveRssi();
+      if (mounted && value != _liveRssi) setState(() => _liveRssi = value);
+    } finally {
+      _rssiBusy = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.state.linkPanelVisible) return const SizedBox.shrink();
+    final p = ChatPalette.of(context);
+    final l10n = AppLocalizations.of(context)!;
+    final controller = widget.controller;
+    final connected = widget.state.isConnected;
+    final since = controller.connectedSince;
+    final uptime = (connected && since != null) ? formatUptime(DateTime.now().difference(since)) : null;
+    final stats = controller.linkStats;
+    final rate = stats.currentBytesPerSecond();
+    final dialRssi = controller.connectedDeviceRssi;
+    final peerRssi = controller.peerReportedRssi;
+    final liveRssi = _liveRssi;
+    // Live value when the platform provides one; otherwise the dial-time
+    // scan value (labelled), falling back to the reading the dialing side
+    // shared — the accepting side never scanned (no platform API reads a
+    // connected RFCOMM link live).
+    final String? rssiText = !connected
+        ? null
+        : liveRssi != null
+            ? '${l10n.signalLabel}: $liveRssi dBm'
+            : dialRssi != null
+                ? '${l10n.signalLabel}: $dialRssi dBm ${l10n.lastScanTag}'
+                : peerRssi == null
+                    ? null
+                    : '${l10n.signalLabel}: $peerRssi dBm ${l10n.peerReadingTag}';
+    final linkLabel = switch (controller.transportKind) {
+      'wfd' => l10n.wifiTab,
+      'nearby' => l10n.nearbyTab,
+      _ => l10n.bluetoothTab,
+    };
+    return Container(
+      // Docked flush under the app bar — no gap: the SafeArea above already
+      // consumed the status-bar inset and the bar itself is 64 tall, so
+      // the strip's top edge meets the bar's bottom edge exactly (top
+      // corners stay square so it reads as attached).
+      margin: const EdgeInsets.only(top: 2, left: 10, right: 10),
+      padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+      decoration: BoxDecoration(
+        color: p.bar,
+        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(12)),
+        border: Border.all(color: p.border),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(
+                connected ? Icons.signal_cellular_alt : Icons.link_off,
+                size: 15,
+                color: connected ? p.accent : Colors.redAccent,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  '$linkLabel · '
+                  '${connected ? l10n.connectedStatus : l10n.notConnectedStatus}'
+                  '${uptime == null ? '' : ' · $uptime'}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: p.messageText),
+                ),
+              ),
+              GestureDetector(
+                onTap: controller.toggleLinkPanel,
+                behavior: HitTestBehavior.opaque,
+                child: Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Icon(Icons.keyboard_arrow_up, size: 18, color: p.muted),
+                ),
+              ),
+            ],
+          ),
+          if (connected)
+            Padding(
+              padding: const EdgeInsets.only(top: 2, bottom: 2),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '↑ ${formatFileSize(stats.bytesOut)}  '
+                      '↓ ${formatFileSize(stats.bytesIn)}  ·  '
+                      '${rate > 0 ? '${formatFileSize(rate.round())}/s' : '—'}'
+                      '${rssiText == null ? '' : '  ·  $rssiText'}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11, color: p.muted),
+                    ),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -486,8 +667,7 @@ class ChatMessageList extends StatelessWidget {
       reverse: true,
       padding: EdgeInsets.fromLTRB(10, topInset, 10, 8),
       itemCount: state.messages.length,
-      itemBuilder: (context, index) =>
-          ChatMessageBubble(message: state.messages[index], controller: controller),
+      itemBuilder: (context, index) => ChatMessageBubble(message: state.messages[index], controller: controller),
     );
   }
 }
@@ -509,8 +689,7 @@ class ChatMessageBubble extends StatelessWidget {
     final p = ChatPalette.of(context);
     final l10n = AppLocalizations.of(context)!;
     final bool mine = message.isSentByMe;
-    final bool showProgress =
-        message.isTransferring && message.transferKind == 'bytes';
+    final bool showProgress = message.isTransferring && message.transferKind == 'bytes';
     final radius = BorderRadius.only(
       topLeft: const Radius.circular(18),
       topRight: const Radius.circular(18),
@@ -519,62 +698,43 @@ class ChatMessageBubble extends StatelessWidget {
     );
 
     final Widget content;
+    // True when this bubble renders a plain text message (drives the
+    // long-press actions below).
+    bool textBubble = false;
+    // Location messages are stored as plain text (readable on every build);
+    // the rich bubble below is a pure render-time view.
+    final DecodedLocation? location =
+        (message.imagePath == null && !message.hasRemoteMedia && message.transferKind == null)
+        ? parseLocationMessage(message.text)
+        : null;
     if (message.hasRemoteMedia) {
       // Deferred media from the history sync: the file still lives on the
       // peer — offer a download placeholder instead of the media.
       content = _downloadBubble(p, mine, l10n);
     } else if (message.isAudio && message.imagePath != null) {
       content = _audioBubble(p, mine);
+    } else if (message.isFile && message.imagePath != null) {
+      content = _fileBubble(context, p, mine, l10n);
     } else if (message.imagePath != null) {
       content = _imageBubble(context, p, mine, showProgress);
     } else if (showProgress) {
       content = _progressBubble(p, mine, l10n);
+    } else if (location != null) {
+      content = _locationBubble(p, mine, l10n, location);
     } else {
+      textBubble = true;
       content = Column(
         crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          SelectableText(
+          // Plain Text on purpose: the framework's SelectableText selection
+          // toolbar trips a layout assertion in this Flutter version
+          // (RenderFollowerLayer vs the OverlayPortal deferred layout), and
+          // its copy action took the whole message anyway — long-press
+          // opens the themed actions dialog instead (showMessageActionsDialog).
+          Text(
             message.text,
-            // Long-press opens the text selection toolbar: Copy is always
-            // offered (without requiring a selection it copies the whole
-            // message); own messages additionally get a Delete action that
-            // routes through the themed confirmation dialog.
-            contextMenuBuilder: (context, editableTextState) {
-              final items = editableTextState.contextMenuButtonItems;
-              items.add(
-                ContextMenuButtonItem(
-                  label: l10n.copyAction,
-                  onPressed: () {
-                    Clipboard.setData(ClipboardData(text: message.text));
-                    editableTextState.hideToolbar();
-                    // Clear any visible notice card (the old code cleared a
-                    // snackbar here the same way).
-                    ConnectionNotice.dismiss();
-                  },
-                ),
-              );
-              if (mine && controller != null) {
-                items.add(
-                  ContextMenuButtonItem(
-                    label: l10n.delete,
-                    onPressed: () {
-                      editableTextState.hideToolbar();
-                      showDeleteMessageDialog(context, controller!, message);
-                    },
-                  ),
-                );
-              }
-              return AdaptiveTextSelectionToolbar.buttonItems(
-                buttonItems: items,
-                anchors: editableTextState.contextMenuAnchors,
-              );
-            },
-            style: TextStyle(
-              height: 1.25,
-              fontSize: 15,
-              color: mine ? Colors.white : p.messageText,
-            ),
+            style: TextStyle(height: 1.25, fontSize: 15, color: mine ? Colors.white : p.messageText),
           ),
           const SizedBox(height: 3),
           Text(
@@ -589,15 +749,23 @@ class ChatMessageBubble extends StatelessWidget {
       );
     }
 
-    // Long-press on any (non-text) own bubble asks before deleting; text
-    // bubbles are handled via their selection toolbar above. Transfers in
-    // flight are excluded — mid-transfer deletions would corrupt the
-    // progress-bubble bookkeeping.
+    // Long-press: text bubbles get the copy/delete actions dialog (delete
+    // only for own messages); other own, finished bubbles ask before
+    // deleting. Transfers in flight are excluded — mid-transfer deletions
+    // would corrupt the progress-bubble bookkeeping.
     return GestureDetector(
-      onLongPress:
-          (mine && !message.isTransferring && controller != null)
-          ? () => showDeleteMessageDialog(context, controller!, message)
-          : null,
+      onLongPress: message.isTransferring
+          ? null
+          : textBubble
+              ? () => showMessageActionsDialog(
+                    context,
+                    controller,
+                    message,
+                    mine: mine,
+                  )
+              : (mine && controller != null)
+                  ? () => showDeleteMessageDialog(context, controller!, message)
+                  : null,
       child: Align(
         alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
         child: Container(
@@ -609,15 +777,7 @@ class ChatMessageBubble extends StatelessWidget {
             color: mine ? null : p.bubbleIn,
             borderRadius: radius,
             border: mine ? null : Border.all(color: p.border),
-            boxShadow: mine
-                ? [
-                    BoxShadow(
-                      color: p.sentGlow,
-                      blurRadius: 14,
-                      offset: const Offset(0, 4),
-                    ),
-                  ]
-                : null,
+            boxShadow: mine ? [BoxShadow(color: p.sentGlow, blurRadius: 14, offset: const Offset(0, 4))] : null,
           ),
           child: content,
         ),
@@ -630,32 +790,28 @@ class ChatMessageBubble extends StatelessWidget {
   /// fetches the file on tap and spins while the fetch is in flight.
   Widget _downloadBubble(ChatPalette p, bool mine, AppLocalizations l10n) {
     final bool audio = message.isAudio;
+    final bool file = message.isFile;
     final bool busy = message.isTransferring;
     final int size = message.remoteMediaSize ?? 0;
     final Color iconColor = mine ? Colors.white : p.accent;
     return GestureDetector(
       onTap: busy ? null : () => controller?.downloadMedia(message),
       child: Column(
-        crossAxisAlignment:
-            mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               Icon(
-                audio ? Icons.mic_none : Icons.image_outlined,
+                audio ? Icons.mic_none : (file ? Icons.insert_drive_file_outlined : Icons.image_outlined),
                 size: 20,
                 color: iconColor,
               ),
               const SizedBox(width: 8),
               Text(
-                audio ? l10n.audioLabel : l10n.photoLabel,
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: mine ? Colors.white : p.messageText,
-                ),
+                audio ? l10n.audioLabel : (file ? l10n.fileSource : l10n.photoLabel),
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: mine ? Colors.white : p.messageText),
               ),
             ],
           ),
@@ -676,14 +832,11 @@ class ChatMessageBubble extends StatelessWidget {
                 Icon(Icons.download_rounded, size: 16, color: iconColor),
               const SizedBox(width: 6),
               Text(
-                busy
-                    ? l10n.downloadingLabel
-                    : '${_formatMediaSize(size)} • ${l10n.downloadMediaHint}',
+                busy ? l10n.downloadingLabel : '${_formatMediaSize(size)} • ${l10n.downloadMediaHint}',
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
-                  color:
-                      mine ? Colors.white.withValues(alpha: 0.85) : p.muted,
+                  color: mine ? Colors.white.withValues(alpha: 0.85) : p.muted,
                 ),
               ),
             ],
@@ -703,32 +856,16 @@ class ChatMessageBubble extends StatelessWidget {
   }
 
   /// Compact human size for the download placeholder ("2.4 MB").
-  String _formatMediaSize(int bytes) {
-    if (bytes >= 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    if (bytes >= 1024) {
-      return '${(bytes / 1024).round()} KB';
-    }
-    return '$bytes B';
-  }
+  String _formatMediaSize(int bytes) => formatFileSize(bytes);
 
   /// Image thumbnail bubble with progress bar while transferring.
-  Widget _imageBubble(
-    BuildContext context,
-    ChatPalette p,
-    bool mine,
-    bool showProgress,
-  ) {
+  Widget _imageBubble(BuildContext context, ChatPalette p, bool mine, bool showProgress) {
     return GestureDetector(
       onTap: showProgress
           ? null
-          : () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) =>
-                      ChatImagePreviewScreen(path: message.imagePath!),
-                ),
-              ),
+          : () =>
+                Navigator.of(context)
+                    .push(MaterialPageRoute<void>(builder: (_) => ChatImagePreviewScreen(path: message.imagePath!))),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.end,
         mainAxisSize: MainAxisSize.min,
@@ -744,9 +881,7 @@ class ChatMessageBubble extends StatelessWidget {
             const SizedBox(height: 8),
             _chatProgressBar(
               p,
-              value: ((message.transferCurrent ?? 0) / (message.transferTotal ?? 1))
-                  .clamp(0, 1)
-                  .toDouble(),
+              value: ((message.transferCurrent ?? 0) / (message.transferTotal ?? 1)).clamp(0, 1).toDouble(),
             ),
             const SizedBox(height: 4),
           ],
@@ -780,44 +915,29 @@ class ChatMessageBubble extends StatelessWidget {
     );
   }
 
-  Widget _audioBubbleBody(
-    AudioPlaybackState playback,
-    ChatPalette p,
-    bool mine,
-  ) {
+  Widget _audioBubbleBody(AudioPlaybackState playback, ChatPalette p, bool mine) {
     final isThis = playback.playingId == message.id;
     final playing = isThis && playback.playing;
     final durationMs = playback.durationMs;
     final value = isThis ? (playback.progress * durationMs) : 0.0;
     return Column(
-      crossAxisAlignment:
-          mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             GestureDetector(
-              onTap: controller == null
-                  ? null
-                  : () => controller!.toggleAudio(message),
+              onTap: controller == null ? null : () => controller!.toggleAudio(message),
               child: Container(
                 width: 38,
                 height: 38,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
                   gradient: LinearGradient(colors: p.sentGradient),
-                  border: Border.all(
-                    color: mine
-                        ? Colors.white.withValues(alpha: 0.45)
-                        : p.border,
-                  ),
+                  border: Border.all(color: mine ? Colors.white.withValues(alpha: 0.45) : p.border),
                 ),
-                child: Icon(
-                  playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                  color: Colors.white,
-                  size: 26,
-                ),
+                child: Icon(playing ? Icons.pause_rounded : Icons.play_arrow_rounded, color: Colors.white, size: 26),
               ),
             ),
             const SizedBox(width: 10),
@@ -841,17 +961,13 @@ class ChatMessageBubble extends StatelessWidget {
                       _AudioSkipButton(
                         icon: Icons.replay_10,
                         color: mine ? Colors.white : p.accent,
-                        onTap: () => controller!.skipAudio(
-                          const Duration(seconds: -10),
-                        ),
+                        onTap: () => controller!.skipAudio(const Duration(seconds: -10)),
                       ),
                       const SizedBox(width: 10),
                       _AudioSkipButton(
                         icon: Icons.forward_10,
                         color: mine ? Colors.white : p.accent,
-                        onTap: () => controller!.skipAudio(
-                          const Duration(seconds: 10),
-                        ),
+                        onTap: () => controller!.skipAudio(const Duration(seconds: 10)),
                       ),
                     ],
                   ],
@@ -863,32 +979,147 @@ class ChatMessageBubble extends StatelessWidget {
                   child: SliderTheme(
                     data: SliderThemeData(
                       trackHeight: 3,
-                      thumbShape: const RoundSliderThumbShape(
-                        enabledThumbRadius: 6,
-                      ),
-                      overlayShape: const RoundSliderOverlayShape(
-                        overlayRadius: 12,
-                      ),
+                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                      overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
                       activeTrackColor: mine ? Colors.white : p.accent,
-                      inactiveTrackColor: mine
-                          ? Colors.white.withValues(alpha: 0.3)
-                          : p.progressTrack,
+                      inactiveTrackColor: mine ? Colors.white.withValues(alpha: 0.3) : p.progressTrack,
                       thumbColor: mine ? Colors.white : p.accent,
-                      overlayColor: (mine ? Colors.white : p.accent)
-                          .withValues(alpha: 0.15),
+                      overlayColor: (mine ? Colors.white : p.accent).withValues(alpha: 0.15),
                     ),
                     child: Slider(
                       value: value.clamp(0.0, durationMs),
                       max: durationMs > 0 ? durationMs : 1,
-                      onChanged: controller == null
-                          ? null
-                          : (v) => controller!.seekAudio(message, v),
+                      onChanged: controller == null ? null : (v) => controller!.seekAudio(message, v),
                     ),
                   ),
                 ),
               ],
             ),
           ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          formatChatTimestamp(message.timestamp),
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+            color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// File attachment bubble: document icon, name + size and an Open action
+  /// (system viewer via the util channel). The path's basename is the
+  /// file's real name; a collision copy carries a timestamp prefix.
+  Widget _fileBubble(BuildContext context, ChatPalette p, bool mine, AppLocalizations l10n) {
+    final path = message.imagePath!;
+    final name = path.split(Platform.pathSeparator).last;
+    int? size;
+    try {
+      size = File(path).lengthSync();
+    } catch (_) {}
+    final fg = mine ? Colors.white : p.messageText;
+    return GestureDetector(
+      onTap: () => controller?.openReceivedFile(path),
+      child: Column(
+        crossAxisAlignment: mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.insert_drive_file_outlined, size: 26, color: mine ? Colors.white : p.accent),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: fg),
+                    ),
+                    Text(
+                      '${size == null ? '' : '${formatFileSize(size)} · '}'
+                      '${l10n.openAction}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: mine ? Colors.white.withValues(alpha: 0.85) : p.accent,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(Icons.open_in_new, size: 16, color: mine ? Colors.white : p.accent),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            formatChatTimestamp(message.timestamp),
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Rich location bubble (see [parseLocationMessage]): coordinates +
+  /// accuracy and an Open-in-Maps action. The message text itself stays the
+  /// encoded plain text.
+  Widget _locationBubble(ChatPalette p, bool mine, AppLocalizations l10n, DecodedLocation location) {
+    final fg = mine ? Colors.white : p.messageText;
+    final coords = '${location.lat.toStringAsFixed(5)}, ${location.lng.toStringAsFixed(5)}';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.location_on_outlined, size: 22, color: mine ? Colors.white : p.accent),
+            const SizedBox(width: 8),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  coords,
+                  style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: fg),
+                ),
+                if (location.accuracyMeters != null)
+                  Text(
+                    '±${location.accuracyMeters} m',
+                    style: TextStyle(fontSize: 11, color: mine ? Colors.white.withValues(alpha: 0.85) : p.muted),
+                  ),
+              ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        GestureDetector(
+          onTap: () => controller?.openLocationInMaps(location.lat, location.lng),
+          behavior: HitTestBehavior.opaque,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.map_outlined, size: 15, color: mine ? Colors.white : p.accent),
+              const SizedBox(width: 5),
+              Text(
+                l10n.openInMaps,
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: mine ? Colors.white : p.accent),
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 4),
         Text(
@@ -917,19 +1148,13 @@ class ChatMessageBubble extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
       children: [
-        _chatProgressBar(
-          p,
-          value: (current / (total == 0 ? 1 : total)).clamp(0, 1).toDouble(),
-        ),
+        _chatProgressBar(p, value: (current / (total == 0 ? 1 : total)).clamp(0, 1).toDouble()),
         const SizedBox(height: 6),
         Text(
           '${mine ? l10n.sendingLabel : l10n.receivingLabel} '
           '$current/$total bytes ($pct%)',
           textAlign: TextAlign.right,
-          style: TextStyle(
-            fontSize: 11,
-            color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted,
-          ),
+          style: TextStyle(fontSize: 11, color: mine ? Colors.white.withValues(alpha: 0.75) : p.muted),
         ),
       ],
     );
@@ -950,11 +1175,7 @@ class ChatMessageBubble extends StatelessWidget {
 
 /// Small icon button used for ±10 s seek jumps in voice bubbles.
 class _AudioSkipButton extends StatelessWidget {
-  const _AudioSkipButton({
-    required this.icon,
-    required this.color,
-    required this.onTap,
-  });
+  const _AudioSkipButton({required this.icon, required this.color, required this.onTap});
 
   final IconData icon;
   final Color color;
@@ -999,8 +1220,7 @@ class ChatInputBar extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (state.isRecording)
-          _RecordingBanner(state: state, controller: controller, palette: p),
+        if (state.isRecording) _RecordingBanner(state: state, controller: controller, palette: p),
         Container(
           margin: const EdgeInsets.fromLTRB(10, 4, 10, 10),
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
@@ -1014,9 +1234,7 @@ class ChatInputBar extends StatelessWidget {
               // Tap-to-record voice message button (tap again to stop & send;
               // long-press the recording banner to cancel).
               GestureDetector(
-                onTap: state.isRecording
-                    ? controller.stopRecordingAndSend
-                    : controller.startRecording,
+                onTap: state.isRecording ? controller.stopRecordingAndSend : controller.startRecording,
                 child: Padding(
                   padding: const EdgeInsets.all(10),
                   child: Icon(
@@ -1027,9 +1245,9 @@ class ChatInputBar extends StatelessWidget {
                 ),
               ),
               IconButton(
-                icon: Icon(Icons.image_outlined, color: p.accent),
-                tooltip: l10n.sendImageTooltip,
-                onPressed: () => controller.showImageSourceSheet(context),
+                icon: Icon(Icons.attach_file, color: p.accent),
+                tooltip: l10n.attachTooltip,
+                onPressed: () => controller.showAttachmentSheet(context),
               ),
               Expanded(
                 child: TextField(
@@ -1043,14 +1261,8 @@ class ChatInputBar extends StatelessWidget {
                     isDense: true,
                     filled: true,
                     fillColor: p.surface.withValues(alpha: 0.85),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 10,
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(24),
-                      borderSide: BorderSide.none,
-                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
                   ),
                 ),
               ),
@@ -1066,11 +1278,7 @@ class ChatInputBar extends StatelessWidget {
 
 /// Thin strip shown above the composer while a voice recording is active.
 class _RecordingBanner extends StatelessWidget {
-  const _RecordingBanner({
-    required this.state,
-    required this.controller,
-    required this.palette,
-  });
+  const _RecordingBanner({required this.state, required this.controller, required this.palette});
 
   final ChatState state;
   final ChatController controller;
@@ -1080,9 +1288,7 @@ class _RecordingBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context)!;
     final seconds = state.recordSeconds;
-    final label = l10n.recordingLabel(
-      '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}',
-    );
+    final label = l10n.recordingLabel('${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}');
     return GestureDetector(
       // Long-press anywhere on the banner also cancels.
       onLongPress: () => controller.cancelRecording(),
@@ -1103,12 +1309,7 @@ class _RecordingBanner extends StatelessWidget {
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: Colors.redAccent,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.redAccent.withValues(alpha: 0.6),
-                    blurRadius: 6,
-                  ),
-                ],
+                boxShadow: [BoxShadow(color: Colors.redAccent.withValues(alpha: 0.6), blurRadius: 6)],
               ),
             ),
             const SizedBox(width: 8),
@@ -1126,11 +1327,7 @@ class _RecordingBanner extends StatelessWidget {
                     const SizedBox(width: 4),
                     Text(
                       l10n.cancel,
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: palette.accent,
-                      ),
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: palette.accent),
                     ),
                   ],
                 ),
@@ -1146,11 +1343,7 @@ class _RecordingBanner extends StatelessWidget {
 /// Shown instead of the composer when the chat is opened without a live
 /// connection: a Connect button that tries to reach the session's device.
 class _ConnectBar extends StatelessWidget {
-  const _ConnectBar({
-    required this.state,
-    required this.controller,
-    required this.palette,
-  });
+  const _ConnectBar({required this.state, required this.controller, required this.palette});
 
   final ChatState state;
   final ChatController controller;
@@ -1170,10 +1363,7 @@ class _ConnectBar extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            l10n.notConnectedBar,
-            style: TextStyle(fontSize: 11, color: palette.muted),
-          ),
+          Text(l10n.notConnectedBar, style: TextStyle(fontSize: 11, color: palette.muted)),
           const SizedBox(height: 8),
           Material(
             color: Colors.transparent,
@@ -1183,28 +1373,17 @@ class _ConnectBar extends StatelessWidget {
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(23),
                 gradient: LinearGradient(colors: palette.sentGradient),
-                boxShadow: [
-                  BoxShadow(
-                    color: palette.sentGlow,
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
+                boxShadow: [BoxShadow(color: palette.sentGlow, blurRadius: 8, offset: const Offset(0, 2))],
               ),
               child: InkWell(
                 borderRadius: BorderRadius.circular(23),
-                onTap: state.isConnecting
-                    ? null
-                    : controller.connectToCurrentSession,
+                onTap: state.isConnecting ? null : controller.connectToCurrentSession,
                 child: Center(
                   child: state.isConnecting
                       ? const SizedBox(
                           width: 20,
                           height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.4,
-                            color: Colors.white,
-                          ),
+                          child: CircularProgressIndicator(strokeWidth: 2.4, color: Colors.white),
                         )
                       : Row(
                           mainAxisSize: MainAxisSize.min,
@@ -1213,11 +1392,7 @@ class _ConnectBar extends StatelessWidget {
                             const SizedBox(width: 8),
                             Text(
                               l10n.connectAction,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
-                                fontSize: 15,
-                              ),
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 15),
                             ),
                           ],
                         ),
@@ -1249,13 +1424,7 @@ class _SendButton extends StatelessWidget {
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           gradient: LinearGradient(colors: palette.sentGradient),
-          boxShadow: [
-            BoxShadow(
-              color: palette.sentGlow,
-              blurRadius: 8,
-              offset: const Offset(0, 2),
-            ),
-          ],
+          boxShadow: [BoxShadow(color: palette.sentGlow, blurRadius: 8, offset: const Offset(0, 2))],
         ),
         child: InkWell(
           onTap: onPressed,
@@ -1282,9 +1451,7 @@ class ChatImagePreviewScreen extends StatelessWidget {
       backgroundColor: p.canvasTop,
       appBar: AppBar(
         backgroundColor: p.bar,
-        systemOverlayStyle: p.barForeground == Colors.white
-            ? SystemUiOverlayStyle.light
-            : SystemUiOverlayStyle.dark,
+        systemOverlayStyle: p.barForeground == Colors.white ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         iconTheme: IconThemeData(color: p.barForeground),

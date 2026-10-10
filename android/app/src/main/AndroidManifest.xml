@@ -22,6 +22,9 @@
 <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" tools:replace="android:maxSdkVersion" />
 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+<!-- Sideloading received APKs: without this the system installer silently
+     ignores our VIEW intent (Android 8+/MIUI). -->
+<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -69,6 +72,17 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- Serves received files to system viewers via content uris
+             (cache copies under cache/open). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

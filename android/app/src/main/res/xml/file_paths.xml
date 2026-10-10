@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider paths: only the cache copies made by
+     MainActivity.openFileWithViewer (cache/open/) are shared. -->
+<paths>
+    <cache-path name="open" path="open/" />
+</paths>

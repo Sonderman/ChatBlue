@@ -71,16 +71,13 @@ class _BChatScreenState extends ConsumerState<BChatScreen> {
             gradient: LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
-              colors: [
-                ChatPalette.of(context).canvasTop,
-                ChatPalette.of(context).canvasBottom,
-              ],
+              colors: [ChatPalette.of(context).canvasTop, ChatPalette.of(context).canvasBottom],
             ),
           ),
           child: SafeArea(
-            bottom: false,
             child: Column(
               children: [
+                ChatLinkPanel(state: state, controller: controller),
                 ChatSyncBanner(state: state),
                 Expanded(
                   child: ChatMessageList(state: state, controller: controller),

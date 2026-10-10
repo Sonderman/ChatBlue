@@ -173,6 +173,12 @@ class WifiDirectService {
   Future<bool> isConnected() {
     return _platform.isConnected();
   }
+
+  /// Best-effort live RSSI of the P2P link (client side); null when the
+  /// platform exposes none.
+  Future<int?> getLiveRssi() {
+    return _platform.getLiveRssi();
+  }
   // endregion
 
   // region I/O

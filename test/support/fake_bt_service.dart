@@ -52,6 +52,13 @@ class FakeBtService extends BtClassicService {
   @override
   Future<bool> isConnected() async => false;
 
+  /// Value returned by [getLiveRssi]; null simulates a platform without a
+  /// live read.
+  int? liveRssi;
+
+  @override
+  Future<int?> getLiveRssi(String address) async => liveRssi;
+
   /// Recorded [sendString] payloads — lets tests assert the wire order.
   final List<String> sendStringCalls = [];
 

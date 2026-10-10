@@ -108,6 +108,12 @@ class BtPlatformChannel {
     return ok;
   }
 
+  /// Best-effort live RSSI of a connected device; null when the platform
+  /// exposes none.
+  Future<int?> getLiveRssi(String address) {
+    return _method.invokeMethod<int>('getLiveRssi', {'address': address});
+  }
+
   Future<bool> sendString(String text) async {
     final bool ok = await _method.invokeMethod('sendString', {'text': text});
     return ok;

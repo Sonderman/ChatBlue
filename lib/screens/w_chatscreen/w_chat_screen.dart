@@ -81,6 +81,7 @@ class _WChatScreenState extends ConsumerState<WChatScreen> {
             bottom: false,
             child: Column(
               children: [
+                ChatLinkPanel(state: state, controller: controller),
                 ChatSyncBanner(state: state),
                 Expanded(
                   child: ChatMessageList(state: state, controller: controller),

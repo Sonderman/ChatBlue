@@ -45,6 +45,11 @@ class MessageModel {
   /// True when this message carries a voice recording instead of text/image.
   bool get isAudio => transferKind == 'audio';
 
+  /// True when this message carries a file attachment (see the chat
+  /// controller's file pipeline: `imagePath` holds the file's path, the
+  /// caption its display name/size).
+  bool get isFile => transferKind == 'file';
+
   /// True when this message is a placeholder for media that still lives on
   /// the peer (deferred sync): the bubble offers download-on-tap.
   bool get hasRemoteMedia => remoteMediaSize != null && imagePath == null;

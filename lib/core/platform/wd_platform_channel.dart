@@ -125,6 +125,12 @@ class WdPlatformChannel {
     final bool ok = await _method.invokeMethod('isConnected');
     return ok;
   }
+
+  /// Best-effort live RSSI of the P2P link (client side); null when the
+  /// platform exposes none.
+  Future<int?> getLiveRssi() {
+    return _method.invokeMethod<int>('getLiveRssi');
+  }
   // endregion
 
   // region Socket I/O

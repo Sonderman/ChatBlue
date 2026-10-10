@@ -4,17 +4,23 @@ import 'dart:io';
 
 import 'package:chatblue/config.dart';
 import 'package:chatblue/controllers/chat_transport_binding.dart';
+import 'package:chatblue/core/format_utils.dart';
 import 'package:chatblue/core/models/chatsession_model.dart';
+import 'package:chatblue/core/models/location_message.dart';
 import 'package:chatblue/core/models/message_model.dart';
+import 'package:chatblue/core/platform/util_platform_channel.dart';
 import 'package:chatblue/core/services/bt_classic_service.dart';
 import 'package:chatblue/data/session_repository.dart';
+import 'package:chatblue/data/settings_repository.dart';
 import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:crypto/crypto.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
@@ -40,10 +46,15 @@ class _OutgoingJob {
       : kind = _SendKind.text,
         bytes = null,
         imagePath = null,
-        audioText = null;
+        audioText = null,
+        fileName = null;
 
-  _OutgoingJob.bytes(Uint8List this.bytes, this.imagePath, {this.audioText})
-      : kind = _SendKind.bytes,
+  _OutgoingJob.bytes(
+    Uint8List this.bytes,
+    this.imagePath, {
+    this.audioText,
+    this.fileName,
+  })  : kind = _SendKind.bytes,
         text = null;
 
   final _SendKind kind;
@@ -54,6 +65,11 @@ class _OutgoingJob {
   /// When set, the transferred bytes are a voice recording and the bubble
   /// finalizes as an audio message with this duration caption.
   final String? audioText;
+
+  /// When set, the transferred bytes are a FILE with this name: an
+  /// announcement frame (name+size) precedes the bytes and the bubble
+  /// finalizes as a file message.
+  final String? fileName;
 }
 
 /// Identifies one chat open: the transport plus (for home-list opens) the
@@ -97,6 +113,55 @@ class AudioPlaybackState {
 
 const Object _sentinel = Object();
 
+/// Per-chat-open link counters feeding the connection-quality panel: byte
+/// and frame totals in both directions plus a short sliding window whose
+/// rate is computed at read time (the panel's 1 s ticker re-reads it — the
+/// stats own no timers).
+class LinkStats {
+  int bytesIn = 0;
+  int bytesOut = 0;
+  int framesIn = 0;
+  int framesOut = 0;
+
+  static const Duration _rateWindow = Duration(seconds: 5);
+  final List<({DateTime at, int bytes})> _samples = [];
+
+  void recordIn(int bytes) {
+    bytesIn += bytes;
+    framesIn++;
+    final now = DateTime.now();
+    _samples.add((at: now, bytes: bytes));
+    _prune(now);
+  }
+
+  void recordOut(int bytes) {
+    bytesOut += bytes;
+    framesOut++;
+    final now = DateTime.now();
+    _samples.add((at: now, bytes: bytes));
+    _prune(now);
+  }
+
+  /// Bytes/second over the last [_rateWindow]. [now] is injectable so tests
+  /// can age the window without sleeping.
+  double currentBytesPerSecond({DateTime? now}) {
+    final at = now ?? DateTime.now();
+    _prune(at);
+    var sum = 0;
+    for (final s in _samples) {
+      sum += s.bytes;
+    }
+    return sum / _rateWindow.inSeconds;
+  }
+
+  void _prune(DateTime now) {
+    final cutoff = now.subtract(_rateWindow);
+    while (_samples.isNotEmpty && _samples.first.at.isBefore(cutoff)) {
+      _samples.removeAt(0);
+    }
+  }
+}
+
 /// Immutable chat-session UI state — the Rx fields of the old
 /// `ChatScreenControllerBase` as one value.
 class ChatState {
@@ -110,6 +175,7 @@ class ChatState {
     this.isRecording = false,
     this.recordSeconds = 0,
     this.isConnected = false,
+    this.linkPanelVisible = false,
     this.outgoingTransfer,
     this.incomingTransfer,
   });
@@ -136,6 +202,10 @@ class ChatState {
   /// Transport connection mirror (binding signals keep it fresh).
   final bool isConnected;
 
+  /// Connection-quality strip visibility (persisted in the settings store;
+  /// default hidden — the app bar icon toggles it).
+  final bool linkPanelVisible;
+
   final TransferState? outgoingTransfer;
   final TransferState? incomingTransfer;
 
@@ -156,6 +226,7 @@ class ChatState {
     bool? isRecording,
     int? recordSeconds,
     bool? isConnected,
+    bool? linkPanelVisible,
     Object? outgoingTransfer = _sentinel,
     Object? incomingTransfer = _sentinel,
   }) {
@@ -169,6 +240,7 @@ class ChatState {
       isRecording: isRecording ?? this.isRecording,
       recordSeconds: recordSeconds ?? this.recordSeconds,
       isConnected: isConnected ?? this.isConnected,
+      linkPanelVisible: linkPanelVisible ?? this.linkPanelVisible,
       outgoingTransfer: identical(outgoingTransfer, _sentinel)
           ? this.outgoingTransfer
           : outgoingTransfer as TransferState?,
@@ -212,6 +284,13 @@ class ChatController extends Notifier<ChatState>
   final ValueNotifier<AudioPlaybackState> audioPlayback =
       ValueNotifier(const AudioPlaybackState());
 
+  /// Connection-quality panel counters (per-open traffic + rolling rate).
+  final LinkStats linkStats = LinkStats();
+
+  /// Wall-clock start of the CURRENT link (null while disconnected): drives
+  /// the panel's uptime label; re-set on every (re)connection.
+  DateTime? _connectedSince;
+
   // ── Voice messages ──────────────────────────────────────────────────────
   Timer? _recordTimer;
   AudioRecorder? _recorder;
@@ -225,6 +304,17 @@ class ChatController extends Notifier<ChatState>
   /// When set, the outgoing byte transfer is a voice recording; used to
   /// finalize its bubble as an audio message.
   String? _pendingOutgoingAudioText;
+
+  /// When set, the incoming bytes are a FILE: the announcement frame
+  /// carries the original name (JSON) — same lifecycle as [_pendingAudioMeta]
+  /// (cleared on disconnect/teardown so a dead announcement cannot misroute
+  /// the next connection's first bytes).
+  String? _pendingIncomingFileMeta;
+
+  /// When set, the outgoing byte transfer is a file with this name: an
+  /// announcement frame rides before the bytes and the bubble finalizes as
+  /// a file message.
+  String? _pendingOutgoingFileText;
 
   // Progress bubbles are tracked by message id (bubble UUID) instead of list
   // index, so concurrent in/out transfers can never corrupt each other.
@@ -240,6 +330,16 @@ class ChatController extends Notifier<ChatState>
   /// Overridable in tests (the suite runs with milliseconds, not 20 s).
   @visibleForTesting
   static Duration transferStallTimeout = const Duration(seconds: 20);
+
+  /// Delay before the signal-read request is re-sent once (the peer's chat
+  /// may open a beat after ours). Test-overridable like the stall timeout.
+  static Duration linkShareRetryDelay = const Duration(milliseconds: 2500);
+
+  /// Outgoing FILE cap: the transports carry whole frames in memory, so
+  /// this keeps both sides' RAM sane (images ride compressed, far below).
+  /// Overridable in tests (20 MB on device).
+  @visibleForTesting
+  static int maxFileBytes = 20 * 1024 * 1024;
   Timer? _incomingStallTimer;
   Timer? _outgoingStallTimer;
 
@@ -271,6 +371,9 @@ class ChatController extends Notifier<ChatState>
   // Voice-message announcement prefix (duration meta sent before the bytes).
   static const String _audioPrefix = '@@CHATBLUE_AUDIO@@';
 
+  // File-transfer announcement prefix (name+size meta sent before bytes).
+  static const String _filePrefix = '@@CHATBLUE_FILE@@';
+
   /// Voice recordings are cut off (and sent) automatically at this length.
   static const int _maxRecordSeconds = 120;
 
@@ -279,6 +382,17 @@ class ChatController extends Notifier<ChatState>
 
   // One history sync per connection: re-armed on every disconnect.
   bool _syncSentForSession = false;
+
+  /// Peer's data-plane protocol version (from its sync manifest; null until
+  /// one arrives). File sharing needs >= 2 — a peer that reported 1 (or an
+  /// older build whose manifest has no `pv` field) cannot render the
+  /// announcement/bytes pair, so files are blocked for it.
+  int? _peerPv;
+
+  /// Scan-time RSSI the peer shared over the sync channel (the accepting
+  /// side never scanned, so this is the only reading it can show).
+  int? _peerReportedRssi;
+  Timer? _linkShareRetry;
 
   // True when this chat open created a BRAND-NEW session because the peer
   // identity was not (fully) known yet (rotated MAC / identity frame still
@@ -339,6 +453,14 @@ class ChatController extends Notifier<ChatState>
     _repo = ref.read(sessionRepositoryProvider);
     _binding.addListener(this);
     ref.onDispose(_disposeSafe);
+    // Connection-quality panel: the persisted preference decides visibility
+    // (fail-open hidden without a settings store); the uptime clock starts
+    // now when the chat opens onto an already-live link — the connection
+    // signal would never fire in that case.
+    final bool panelVisible =
+        SettingsRepository.instance?.getString('connectionPanelVisible') ==
+            'true';
+    _connectedSince = _binding.isConnected ? DateTime.now() : null;
 
     final ChatSessionModel? argSession = _arg.session;
     ChatSessionModel session;
@@ -395,6 +517,7 @@ class ChatController extends Notifier<ChatState>
       chatSession: session,
       messages: session.messages,
       isConnected: _binding.isConnected,
+      linkPanelVisible: panelVisible,
     );
   }
 
@@ -510,6 +633,10 @@ class ChatController extends Notifier<ChatState>
     // arriving while this screen is visible must not push a second chat.
     _binding.onChatOpened();
 
+    // Share our scan-time reading — the accepting side never scanned and
+    // has no local RSSI of its own.
+    _sharePeerSignal();
+
     // When this is not the first session with this peer, share the last
     // messages on (re)connection so both devices converge on the same
     // history. Chat screens opened through the scan flow already have a
@@ -543,6 +670,8 @@ class ChatController extends Notifier<ChatState>
 
   void _teardown({required bool disconnectTransport}) {
     _saveDebounce?.cancel();
+    _linkShareRetry?.cancel();
+    _linkShareRetry = null;
     _incomingStallTimer?.cancel();
     _incomingStallTimer = null;
     _outgoingStallTimer?.cancel();
@@ -557,6 +686,7 @@ class ChatController extends Notifier<ChatState>
     // teardown: the next connection's first bytes frame would be routed to
     // the audio handler and saved as a .m4a instead of an image.
     _pendingAudioMeta = null;
+    _pendingIncomingFileMeta = null;
     // No peer answers deferred-download requests once the chat closes.
     for (final t in _fetchWatchdogs.values) {
       t.cancel();
@@ -589,12 +719,18 @@ class ChatController extends Notifier<ChatState>
     if (_closed) return;
     state = state.copyWith(isConnected: connected);
     if (connected) {
+      _connectedSince = DateTime.now();
       _sendHistorySync();
+      // Re-share on every (re)connection: the reading is per-link.
+      _sharePeerSignal();
     } else {
+      _connectedSince = null;
+      _peerReportedRssi = null;
       _syncSentForSession = false;
       // Same for an announcement whose bytes died with the link: without
       // this clear the next connection's first bytes frame misroutes.
       _pendingAudioMeta = null;
+      _pendingIncomingFileMeta = null;
       // A dropped link kills any in-flight byte transfer: resolve its
       // bubble now instead of leaving it stuck at its last reading.
       _failActiveTransfers();
@@ -619,6 +755,37 @@ class ChatController extends Notifier<ChatState>
   /// Live name of the connected peer (transport-provided; null before the
   /// peer's name frame arrives on transports that announce it).
   String? get connectedDeviceName => _binding.connectedDeviceName;
+
+  /// Toggles the connection-quality strip; the choice is persisted so it
+  /// survives restarts (same cached key/value store as theme/locale).
+  void toggleLinkPanel() {
+    if (_closed) return;
+    final next = !state.linkPanelVisible;
+    state = state.copyWith(linkPanelVisible: next);
+    final write = SettingsRepository.instance
+        ?.setString('connectionPanelVisible', next ? 'true' : 'false');
+    if (write != null) unawaited(write);
+  }
+
+  /// Quality-panel data: uptime clock of the current link, traffic counters
+  /// and — Bluetooth only — the dial-time scan RSSI.
+  DateTime? get connectedSince => _connectedSince;
+  int? get connectedDeviceRssi => _binding.connectedDeviceRssi;
+
+  /// RSSI the peer shared over the sync channel (the accepting side has no
+  /// local reading — no platform API exists for a connected RFCOMM link).
+  int? get peerReportedRssi => _peerReportedRssi;
+
+  /// Live link RSSI readback for the quality panel — best effort: each
+  /// transport returns null where the platform exposes no readback.
+  Future<int?> fetchLiveRssi() async {
+    try {
+      return await _binding.getLiveRssi();
+    } catch (_) {
+      return null;
+    }
+  }
+  String get transportKind => _arg.transport;
 
   /// The app's unified notice card — the same surface the transport
   /// notifiers and the scan screens raise (no plain snackbars anymore).
@@ -844,13 +1011,20 @@ class ChatController extends Notifier<ChatState>
 
     _binding.onSocketData((bytes, text, {required String kind}) async {
       if (_closed) return;
+      // Link-panel counters: every frame carries its payload size here
+      // (bytes frames binary, text frames UTF-8).
+      linkStats.recordIn(
+        kind == 'bytes' ? bytes.length : utf8.encode(text).length,
+      );
       if (kDebugMode && showDebugLogs) {
         debugPrint('Socket data: $text\n Kind: $kind');
       }
       if (kind == 'bytes' && bytes.isNotEmpty) {
-        // A voice announcement precedes the audio bytes; route accordingly.
+        // A voice/file announcement precedes its bytes; route accordingly.
         if (_pendingAudioMeta != null) {
           await _handleIncomingAudio(bytes);
+        } else if (_pendingIncomingFileMeta != null) {
+          await _handleIncomingFile(bytes);
         } else {
           await _handleIncomingImage(bytes);
         }
@@ -858,6 +1032,10 @@ class ChatController extends Notifier<ChatState>
         // Voice transfer announcement: remember the duration for the coming
         // bytes; nothing is added to the chat at this point.
         _pendingAudioMeta = text.substring(_audioPrefix.length);
+      } else if (text.startsWith(_filePrefix)) {
+        // File transfer announcement: remember the name for the coming
+        // bytes; nothing is added to the chat at this point.
+        _pendingIncomingFileMeta = text.substring(_filePrefix.length);
       } else if (text.startsWith(_syncPrefix)) {
         // History sync packet from the peer: not a real message, apply it to
         // the local history instead of appending it to the chat.
@@ -949,6 +1127,23 @@ class ChatController extends Notifier<ChatState>
     );
   }
 
+  /// Sends through the binding while counting the payload for the link
+  /// panel. Counted only when a link is really up (the transports no-op
+  /// sends while disconnected, so the counters must not drift).
+  Future<void> _sendText(String message) {
+    if (_binding.isConnected) {
+      linkStats.recordOut(utf8.encode(message).length);
+    }
+    return _binding.sendMessage(message);
+  }
+
+  Future<void> _sendBytesFrame(Uint8List bytes) {
+    if (_binding.isConnected) {
+      linkStats.recordOut(bytes.length);
+    }
+    return _binding.sendBytes(bytes);
+  }
+
   /// Sends the sync **manifest** — a light SHA-256 digest of the last
   /// [_syncHistoryCount] messages (what the peer may need) — as a single
   /// small packet. The peer compares it against its own set and only
@@ -980,7 +1175,7 @@ class ChatController extends Notifier<ChatState>
     // Sync traffic rides OUTSIDE the user send queue: live messages are
     // never blocked behind sync packets (the single socket still orders
     // frames FIFO natively).
-    _binding.sendMessage(
+    _sendText(
       _syncPrefix +
           jsonEncode({
             'type': 'manifest',
@@ -1020,7 +1215,7 @@ class ChatController extends Notifier<ChatState>
         icon: Icons.file_download_off,
       );
     });
-    _binding.sendMessage(
+    _sendText(
       _syncPrefix + jsonEncode({'type': 'fetch', 'id': id}),
     );
   }
@@ -1049,12 +1244,41 @@ class ChatController extends Notifier<ChatState>
   /// line.
   void _logPeerProtocolVersion(Object? raw) {
     final int peer = raw is int ? raw : 1;
+    // Remembered for the file-sharing capability gate (needs >= 2).
+    _peerPv = peer;
     if (kDebugMode && showDebugLogs) {
       debugPrint(
         'Sync protocol: peer v$peer, local v$syncProtocolVersion'
         '${peer == syncProtocolVersion ? '' : ' — MISMATCH'}',
       );
     }
+  }
+
+  /// Shares our scan-time reading with the peer: the accepting side never
+  /// scanned and has no local RSSI (no platform API reads a connected
+  /// RFCOMM link live), so the dialer pushes its value; the retry covers
+  /// the peer's chat opening / wiring a beat after ours.
+  void _sharePeerSignal() {
+    if (_closed || !state.isConnected) return;
+    final reading = _binding.connectedDeviceRssi;
+    if (reading == null) return;
+    unawaited(
+      _sendText(
+        '$_syncPrefix${jsonEncode({'type': 'linkShare', 'rssi': reading})}',
+      ),
+    );
+    _linkShareRetry?.cancel();
+    _linkShareRetry = Timer(linkShareRetryDelay, () {
+      if (_closed || !state.isConnected) return;
+      final retry = _binding.connectedDeviceRssi;
+      if (retry != null) {
+        unawaited(
+          _sendText(
+            '$_syncPrefix${jsonEncode({'type': 'linkShare', 'rssi': retry})}',
+          ),
+        );
+      }
+    });
   }
 
   /// Dispatches an incoming sync packet by its `type`:
@@ -1064,6 +1288,8 @@ class ChatController extends Notifier<ChatState>
   /// - `fetch`     → send one message's media file (deferred download)
   /// - `download`  → the file we asked for (fills a placeholder bubble)
   /// - `fetchMiss` → the peer no longer holds the requested file
+  /// - `linkShare` → the dialer's scan-time RSSI, pushed for the quality
+  ///   panel (older builds ignore the unknown type via their `default:`).
   Future<void> _applyHistorySync(String payload) async {
     try {
       final decoded = jsonDecode(payload);
@@ -1083,6 +1309,11 @@ class ChatController extends Notifier<ChatState>
           await _applySyncMessages(decoded['messages']);
         case 'fetchMiss':
           _handleFetchMiss(decoded['id']);
+        case 'linkShare':
+          final rssi = (decoded['rssi'] as num?)?.toInt();
+          if (rssi != null && rssi >= -100 && rssi <= -1) {
+            _peerReportedRssi = rssi;
+          }
         default:
           break;
       }
@@ -1108,7 +1339,7 @@ class ChatController extends Notifier<ChatState>
     }
     if (missing.isEmpty) return;
 
-    _binding.sendMessage(
+    _sendText(
       _syncPrefix + jsonEncode({'type': 'request', 'items': missing}),
     );
   }
@@ -1130,7 +1361,7 @@ class ChatController extends Notifier<ChatState>
       for (final m in sorted) {
         if (sent >= n) break;
         if (await _messageHash(m) != h) continue;
-        _binding.sendMessage(
+        _sendText(
           _syncPrefix +
               jsonEncode({
                 'type': 'message',
@@ -1155,7 +1386,7 @@ class ChatController extends Notifier<ChatState>
         try {
           final file = File(path);
           if (await file.exists() && file.lengthSync() <= _syncMaxFetchBytes) {
-            _binding.sendMessage(
+            _sendText(
               _syncPrefix +
                   jsonEncode({
                     'type': 'download',
@@ -1170,7 +1401,7 @@ class ChatController extends Notifier<ChatState>
       }
       break;
     }
-    _binding.sendMessage(
+    _sendText(
       _syncPrefix + jsonEncode({'type': 'fetchMiss', 'id': id}),
     );
   }
@@ -1206,12 +1437,18 @@ class ChatController extends Notifier<ChatState>
       'timestamp': m.timestamp.toIso8601String(),
     };
     final imagePath = m.imagePath;
+    final bool isFile = m.transferKind == 'file';
+    final String? fileName = isFile && imagePath != null
+        ? imagePath.split(Platform.pathSeparator).last
+        : null;
     if (imagePath == null) {
       // This side holds the message as a placeholder: pass the marker along
       // so any further sync keeps knowing where the file lives.
       final pendingSize = m.remoteMediaSize;
       if (pendingSize != null && pendingSize > 0) {
-        entry['type'] = m.transferKind == 'audio' ? 'audio' : 'image';
+        entry['type'] = m.transferKind == 'audio'
+            ? 'audio'
+            : (isFile ? 'file' : 'image');
         entry['remoteSize'] = pendingSize;
       }
       return entry;
@@ -1224,11 +1461,13 @@ class ChatController extends Notifier<ChatState>
         final int embedLimit =
             forceBytes ? _syncMaxFetchBytes : _syncInlineMediaBytes;
         if (size <= embedLimit) {
-          entry['type'] = isAudio ? 'audio' : 'image';
+          entry['type'] = isFile ? 'file' : (isAudio ? 'audio' : 'image');
+          if (fileName != null) entry['fileName'] = fileName;
           entry['bytes'] = base64Encode(await file.readAsBytes());
         } else if (size <= _syncMaxFetchBytes) {
           // Too large to auto-transfer: advertise it for download-on-tap.
-          entry['type'] = isAudio ? 'audio' : 'image';
+          entry['type'] = isFile ? 'file' : (isAudio ? 'audio' : 'image');
+          if (fileName != null) entry['fileName'] = fileName;
           entry['remoteSize'] = size;
         }
         // Beyond the fetch cap: only the text caption travels.
@@ -1306,6 +1545,9 @@ class ChatController extends Notifier<ChatState>
         // Rehydrate embedded media bytes (decoded early so the content hash
         // can be used for a robust dedup and the file written only once).
         final bool isAudioEntry = entry['type'] == 'audio';
+        final bool isFileEntry = entry['type'] == 'file';
+        final String? fileEntryName =
+            isFileEntry ? (entry['fileName'] as String?) : null;
         Uint8List? mediaBytes;
         final b64 = entry['bytes'] as String?;
         if (b64 != null && b64.isNotEmpty) {
@@ -1328,10 +1570,15 @@ class ChatController extends Notifier<ChatState>
           if (idx != -1 && state.messages[idx].hasRemoteMedia) {
             String? downloaded;
             try {
-              downloaded = await _persistIncomingBytes(
-                mediaBytes,
-                isAudioEntry ? 'm4a' : 'jpg',
-              );
+              downloaded = isFileEntry
+                  ? await _persistIncomingNamedBytes(
+                      mediaBytes,
+                      fileEntryName ?? 'file',
+                    )
+                  : await _persistMediaBytes(
+                      mediaBytes,
+                      isAudioEntry ? 'm4a' : 'jpg',
+                    );
             } catch (_) {
               downloaded = null;
             }
@@ -1364,10 +1611,15 @@ class ChatController extends Notifier<ChatState>
         String? mediaPath;
         if (mediaBytes != null) {
           try {
-            mediaPath = await _persistIncomingBytes(
-              mediaBytes,
-              isAudioEntry ? 'm4a' : 'jpg',
-            );
+            mediaPath = isFileEntry
+                ? await _persistIncomingNamedBytes(
+                    mediaBytes,
+                    fileEntryName ?? 'file',
+                  )
+                : await _persistMediaBytes(
+                    mediaBytes,
+                    isAudioEntry ? 'm4a' : 'jpg',
+                  );
           } catch (_) {
             mediaPath = null;
           }
@@ -1384,7 +1636,9 @@ class ChatController extends Notifier<ChatState>
             isSentByMe: sentByMe,
             timestamp: ts,
             imagePath: mediaPath,
-            transferKind: isAudioEntry ? 'audio' : null,
+            transferKind: isAudioEntry
+                ? 'audio'
+                : (isFileEntry ? 'file' : null),
             remoteMediaSize:
                 mediaPath == null && remoteSize != null && remoteSize > 0
                     ? remoteSize
@@ -1475,7 +1729,7 @@ class ChatController extends Notifier<ChatState>
 
     final String filePath;
     try {
-      filePath = await _persistIncomingBytes(bytes, 'jpg');
+      filePath = await _persistMediaBytes(bytes, 'jpg');
     } catch (e) {
       // A failed disk write used to strand the progress bubble at its last
       // reading (an unhandled async error the UI never reflected).
@@ -1561,30 +1815,39 @@ class ChatController extends Notifier<ChatState>
       );
     }
 
-    // Finalize outgoing: convert the progress bubble into the real image
-    // message.
+    // Finalize outgoing: convert the progress bubble into the real
+    // image/voice/file message.
     var finalized = false;
     if (transfer.total > 0 && transfer.current >= transfer.total) {
       final bytesToAttach = _pendingOutgoingBytes;
       final audioText = _pendingOutgoingAudioText;
+      final fileText = _pendingOutgoingFileText;
       final l10n = ref.read(appLocalizationsProvider);
       msgs[idx] = msgs[idx].copyWith(
         text: audioText ??
-            (bytesToAttach != null
-                // Localized like the incoming path: the hardcoded English
-                // caption shipped "[Image] (…)" even on the TR UI.
-                ? l10n.imageCaption('${bytesToAttach.lengthInBytes}')
-                : msgs[idx].text),
+            (fileText != null
+                ? l10n.fileCaption(
+                    fileText,
+                    '${bytesToAttach?.lengthInBytes ?? 0}',
+                  )
+                : (bytesToAttach != null
+                    // Localized like the incoming path: the hardcoded English
+                    // caption shipped "[Image] (…)" even on the TR UI.
+                    ? l10n.imageCaption('${bytesToAttach.lengthInBytes}')
+                    : msgs[idx].text)),
         imagePath: _sendingImagePath ?? msgs[idx].imagePath,
         isTransferring: false,
         transferCurrent: transfer.total,
         transferTotal: transfer.total,
-        transferKind: audioText != null ? 'audio' : 'bytes',
+        transferKind: audioText != null
+            ? 'audio'
+            : (fileText != null ? 'file' : 'bytes'),
       );
       finalized = true;
       _sendingImagePath = null;
       _pendingOutgoingBytes = null;
       _pendingOutgoingAudioText = null;
+      _pendingOutgoingFileText = null;
       _outgoingProgressId = null;
     }
     state = state.copyWith(messages: msgs);
@@ -1662,7 +1925,7 @@ class ChatController extends Notifier<ChatState>
   /// Called by the stall watchdog, a failed disk write, and on disconnect —
   /// without it the bubble sat at its last reading (rounded up to a
   /// deceptive "100%") forever, even after the link was long gone.
-  void _failIncomingTransfer() {
+  void _failIncomingTransfer({bool asFile = false}) {
     if (_closed) return;
     _incomingStallTimer?.cancel();
     _incomingStallTimer = null;
@@ -1680,7 +1943,7 @@ class ChatController extends Notifier<ChatState>
     if (idx == -1) return;
     final l10n = ref.read(appLocalizationsProvider);
     msgs[idx] = msgs[idx].copyWith(
-      text: l10n.imageReceiveFailed,
+      text: asFile ? l10n.fileReceiveFailed : l10n.imageReceiveFailed,
       isTransferring: false,
     );
     state = state.copyWith(messages: msgs);
@@ -1693,8 +1956,9 @@ class ChatController extends Notifier<ChatState>
   void _failOutgoingTransfer() {
     if (_closed) return;
     // Captured BEFORE the cleanup below: the failed transfer's kind picks
-    // its label (a voice failure must not read "image").
+    // its label (a voice/file failure must not read "image").
     final wasAudio = _pendingOutgoingAudioText != null;
+    final wasFile = _pendingOutgoingFileText != null;
     _outgoingStallTimer?.cancel();
     _outgoingStallTimer = null;
     _outgoingTransferFailed = true;
@@ -1710,11 +1974,14 @@ class ChatController extends Notifier<ChatState>
     _outgoingProgressId = null;
     _pendingOutgoingBytes = null;
     _pendingOutgoingAudioText = null;
+    _pendingOutgoingFileText = null;
     _sendingImagePath = null;
     if (idx == -1) return;
     final l10n = ref.read(appLocalizationsProvider);
     msgs[idx] = msgs[idx].copyWith(
-      text: wasAudio ? l10n.audioSendFailed : l10n.imageSendFailed,
+      text: wasFile
+          ? l10n.fileSendFailed
+          : (wasAudio ? l10n.audioSendFailed : l10n.imageSendFailed),
       isTransferring: false,
     );
     state = state.copyWith(messages: msgs);
@@ -1866,10 +2133,10 @@ class ChatController extends Notifier<ChatState>
 
   Future<void> pickAndSendImage() => _pickAndSend(ImageSource.gallery);
 
-  /// Image-source chooser. Pure Flutter (`showModalBottomSheet` via the
-  /// caller's context) — no GetX sheet API; the sheet is dismissed through
-  /// its own route before the picker opens.
-  Future<void> showImageSourceSheet(BuildContext context) async {
+  /// Attachment chooser (gallery, camera, file, location). Pure Flutter
+  /// (`showModalBottomSheet` via the caller's context); the sheet is
+  /// dismissed through its own route before the picker/dialogs open.
+  Future<void> showAttachmentSheet(BuildContext context) async {
     if (!state.isConnected) return;
     final Color cardColor = Theme.of(context).cardColor;
     final l10n = ref.read(appLocalizationsProvider);
@@ -1907,10 +2174,254 @@ class ChatController extends Notifier<ChatState>
                   await _pickAndSend(ImageSource.camera);
                 },
               ),
+              ListTile(
+                leading: const Icon(Icons.insert_drive_file_outlined),
+                title: Text(l10n.fileSource),
+                onTap: () async {
+                  Navigator.of(sheetContext).pop();
+                  await pickAndSendFile(context);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.location_on_outlined),
+                title: Text(l10n.locationSource),
+                onTap: () async {
+                  Navigator.of(sheetContext).pop();
+                  await shareLocationFlow(context);
+                },
+              ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  /// Picks a file (system picker) and sends it. Bluetooth confirms first
+  /// (a multi-MB RFCOMM transfer can take minutes); the cap is enforced
+  /// before any byte is queued.
+  Future<void> pickAndSendFile(BuildContext context) async {
+    if (_closed || !state.isConnected) return;
+    final l10n = ref.read(appLocalizationsProvider);
+    PlatformFile? picked;
+    try {
+      picked = await FilePicker.pickFile();
+    } catch (e) {
+      if (kDebugMode && showDebugLogs) debugPrint('File picker failed: $e');
+      return;
+    }
+    if (_closed || picked == null) return;
+    // SAF may hand back a content:// uri with no local path: materialize a
+    // cache-backed copy so the bubble has a real openable file.
+    var path = picked.path;
+    if (path == null) {
+      try {
+        final bytes = await picked.readAsBytes();
+        final dir = await getApplicationDocumentsDirectory();
+        path = '${dir.path}/${DateTime.now().millisecondsSinceEpoch}_'
+            '${_sanitizeFileName(picked.name)}';
+        await compute(_writeBytesToFile, (path: path, bytes: bytes));
+      } catch (e) {
+        if (kDebugMode && showDebugLogs) {
+          debugPrint('File materialize failed: $e');
+        }
+      }
+    }
+    if (_closed) return;
+    if (path == null) {
+      _showNotice(
+        l10n.fileOpenFailedTitle,
+        l10n.fileOpenFailed,
+        icon: Icons.error_outline,
+      );
+      return;
+    }
+    final int pickedSize = (await picked.length()) ?? 0;
+    if (pickedSize > maxFileBytes) {
+      _showNotice(
+        l10n.fileTooLargeTitle,
+        l10n.fileTooLargeMessage(
+          '${(maxFileBytes / (1024 * 1024)).round()} MB',
+        ),
+        icon: Icons.error_outline,
+      );
+      return;
+    }
+    // Bluetooth is the slow channel: confirm before a potentially long
+    // transfer (WFD/Nearby are fast enough to just send).
+    if (_arg.transport == ChatSessionModel.transportBluetooth &&
+        context.mounted) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: Text(l10n.btFileSlowTitle),
+          content: Text(l10n.btFileSlowMessage(formatFileSize(pickedSize))),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: Text(l10n.cancel),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text(l10n.sendAction),
+            ),
+          ],
+        ),
+      );
+      if (ok != true || _closed) return;
+    }
+    await sendFile(path, name: picked.name);
+  }
+
+  /// One-shot location share: permission → single fix → confirm preview →
+  /// [sendLocation]. Every failure surfaces as a themed notice.
+  Future<void> shareLocationFlow(BuildContext context) async {
+    if (_closed || !state.isConnected) return;
+    final l10n = ref.read(appLocalizationsProvider);
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        _showNotice(
+          l10n.locationOffTitle,
+          l10n.locationOffMessage,
+          icon: Icons.location_off,
+          accent: Colors.amber,
+        );
+        return;
+      }
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        _showNotice(
+          l10n.permissionTitle,
+          l10n.locationPermissionMessage,
+          icon: Icons.lock_outline,
+          accent: Colors.amber,
+        );
+        return;
+      }
+    } catch (e) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Location permission failed: $e');
+      }
+      _showNotice(
+        l10n.permissionTitle,
+        l10n.locationPermissionMessage,
+        icon: Icons.lock_outline,
+        accent: Colors.amber,
+      );
+      return;
+    }
+    if (_closed) return;
+
+    Position? fix;
+    try {
+      fix = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 12),
+        ),
+      );
+    } catch (_) {
+      // Timeout / provider failure: fall back to the last known fix.
+    }
+    if (fix == null) {
+      try {
+        fix = await Geolocator.getLastKnownPosition();
+      } catch (_) {}
+    }
+    if (_closed) return;
+    if (fix == null) {
+      _showNotice(
+        l10n.locationFailedTitle,
+        l10n.locationFailedMessage,
+        icon: Icons.gps_off,
+        accent: Colors.redAccent,
+      );
+      return;
+    }
+    final Position pos = fix;
+    final int? accuracy =
+        pos.accuracy.isFinite && pos.accuracy > 0 ? pos.accuracy.round() : null;
+
+    if (!context.mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.locationConfirmTitle),
+        content: Text(
+          '${pos.latitude.toStringAsFixed(6)}, '
+          '${pos.longitude.toStringAsFixed(6)}'
+          '${accuracy == null ? '' : '\n±$accuracy m'}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text(l10n.cancel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(l10n.sendAction),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || _closed) return;
+    sendLocation(
+      lat: pos.latitude,
+      lng: pos.longitude,
+      accuracyMeters: accuracy,
+    );
+  }
+
+  /// Opens a received file with the system viewer (util channel); shows a
+  /// notice when the file is missing or nothing can open it, and a
+  /// settings pointer when an APK still needs the install-unknown-apps
+  /// grant (the native side opens that settings page instead of the
+  /// installer, which would otherwise swallow the intent silently).
+  Future<void> openReceivedFile(String path) async {
+    if (_closed) return;
+    var outcome = 'failed';
+    try {
+      outcome = await UtilPlatformChannel.openFile(path);
+    } catch (e) {
+      if (kDebugMode && showDebugLogs) debugPrint('openFile failed: $e');
+    }
+    if (_closed || outcome == 'opened') return;
+    final l10n = ref.read(appLocalizationsProvider);
+    if (outcome == 'permission') {
+      _showNotice(
+        l10n.installPermissionTitle,
+        l10n.installPermissionMessage,
+        icon: Icons.app_settings_alt_outlined,
+      );
+      return;
+    }
+    _showNotice(
+      l10n.fileOpenFailedTitle,
+      l10n.fileOpenFailed,
+      icon: Icons.error_outline,
+    );
+  }
+
+  /// Opens coordinates in a maps app (util channel); shows a notice when
+  /// none handles the geo/https intents.
+  Future<void> openLocationInMaps(double lat, double lng) async {
+    if (_closed) return;
+    var ok = false;
+    try {
+      ok = await UtilPlatformChannel.openMap(lat: lat, lng: lng);
+    } catch (e) {
+      if (kDebugMode && showDebugLogs) debugPrint('openMap failed: $e');
+    }
+    if (_closed || ok) return;
+    final l10n = ref.read(appLocalizationsProvider);
+    _showNotice(
+      l10n.locationFailedTitle,
+      l10n.mapsOpenFailed,
+      icon: Icons.map_outlined,
     );
   }
 
@@ -1920,24 +2431,130 @@ class ChatController extends Notifier<ChatState>
     final XFile? file = await picker.pickImage(source: source);
     if (file == null || _closed) return;
 
-    Uint8List bytes = await file.readAsBytes();
+    final bytes = await file.readAsBytes();
     if (_closed) return;
-    _sendingImagePath = file.path;
-    // Single compression pass: pickImage is used without imageQuality so the
-    // JPEG is not decoded twice (previous code compressed twice).
+    await enqueuePickedImage(bytes);
+  }
+
+  /// Test seam for the outgoing compression pass: tests swap in a stand-in
+  /// so the stored-bytes == wire-bytes invariant stays observable without
+  /// the platform plugin.
+  @visibleForTesting
+  static Future<Uint8List> Function(Uint8List bytes) imageCompressor =
+      _compressImage;
+
+  static Future<Uint8List> _compressImage(Uint8List bytes) async {
+    // Single compression pass: pickImage is used without imageQuality so
+    // the JPEG is not decoded twice.
     try {
       final compressed =
           await FlutterImageCompress.compressWithList(bytes, quality: 70);
-      if (compressed.isNotEmpty) {
-        bytes = Uint8List.fromList(compressed);
-      }
+      if (compressed.isNotEmpty) return Uint8List.fromList(compressed);
     } catch (_) {}
-    if (_closed) return;
+    return bytes;
+  }
 
+  /// Compresses one pass, then queues the transfer pointing the message at
+  /// EXACTLY the bytes that go on the wire. The stored copy must stay
+  /// byte-identical to what the peer receives: a divergent copy (stored
+  /// original vs sent compressed) defeats the content-hash dedup fallback,
+  /// so a re-served copy can only be recognised by the ±10 s timestamp
+  /// window — which slow transfers and clock skew break (duplicate image
+  /// bubbles after sync). Byte-identical replicas also keep history-sync
+  /// manifest hashes matching, so no side re-serves the other's images.
+  @visibleForTesting
+  Future<void> enqueuePickedImage(Uint8List rawBytes) async {
+    if (_closed || !state.isConnected) return;
+    final bytes = await imageCompressor(rawBytes);
+    if (_closed) return;
+    final sentPath = await _persistMediaBytes(bytes, 'jpg');
+    if (_closed) return;
+    _sendingImagePath = sentPath;
     // Queue the transfer instead of sending immediately: it starts only
     // after any currently in-flight send completes, so wire order and
     // progress state of concurrent image transfers never interleave.
-    _enqueueSend(_OutgoingJob.bytes(bytes, file.path));
+    _enqueueSend(_OutgoingJob.bytes(bytes, sentPath));
+  }
+
+  /// Queues one file for sending. [name] defaults to the path's basename;
+  /// the bytes are read into memory (transports frame whole payloads), so
+  /// [maxFileBytes] caps both sides' RAM.
+  Future<void> sendFile(String path, {String? name}) async {
+    if (_closed || !state.isConnected) return;
+    final l10n = ref.read(appLocalizationsProvider);
+    // A pre-file peer build cannot render the announcement/bytes pair at
+    // all — block instead of shipping bytes it would mis-save as an image.
+    final peerPv = _peerPv;
+    if (peerPv != null && peerPv < 2) {
+      _showNotice(
+        l10n.fileUnsupportedTitle,
+        l10n.fileUnsupportedMessage,
+        icon: Icons.system_update_alt,
+      );
+      return;
+    }
+    Uint8List bytes;
+    try {
+      final file = File(path);
+      if (!await file.exists()) {
+        throw const FileSystemException('file is gone');
+      }
+      bytes = await file.readAsBytes();
+    } catch (e) {
+      if (kDebugMode && showDebugLogs) debugPrint('File read failed: $e');
+      if (_closed) return;
+      _showNotice(
+        l10n.fileOpenFailedTitle,
+        l10n.fileOpenFailed,
+        icon: Icons.error_outline,
+      );
+      return;
+    }
+    if (_closed) return;
+    if (bytes.length > maxFileBytes) {
+      _showNotice(
+        l10n.fileTooLargeTitle,
+        l10n.fileTooLargeMessage(
+          '${(maxFileBytes / (1024 * 1024)).round()} MB',
+        ),
+        icon: Icons.error_outline,
+      );
+      return;
+    }
+    final fileName = _sanitizeFileName(
+      (name == null || name.trim().isEmpty)
+          ? path.split(Platform.pathSeparator).last
+          : name,
+    );
+    _enqueueSend(_OutgoingJob.bytes(bytes, path, fileName: fileName));
+  }
+
+  /// Queues a one-shot location share. The message text is the encoded
+  /// plain-text form (readable on every build; see location_message.dart).
+  void sendLocation({
+    required double lat,
+    required double lng,
+    int? accuracyMeters,
+  }) {
+    if (_closed || !state.isConnected) return;
+    final text = encodeLocationMessage(
+      lat: lat,
+      lng: lng,
+      accuracyMeters: accuracyMeters,
+    );
+    final msgs = List.of(state.messages);
+    msgs.insert(
+      0,
+      MessageModel(
+        id: Uuid().v4(),
+        text: text,
+        isSentByMe: true,
+        timestamp: DateTime.now(),
+      ),
+    );
+    state = state.copyWith(messages: msgs);
+    _scheduleSave();
+    _enqueueSend(_OutgoingJob.text(text));
   }
 
   /// Adds a send job and starts draining the queue when idle.
@@ -1968,14 +2585,25 @@ class ChatController extends Notifier<ChatState>
         // A fresh job revives the outgoing transfer state: the previous
         // one's failure flag must not suppress this job's progress bubbles.
         _outgoingTransferFailed = false;
+        // A file announces itself first (name + size) so the receiver can
+        // label/name the incoming bytes — the same text-channel contract
+        // the voice-message announcement uses.
+        final fileName = job.fileName;
+        if (fileName != null) {
+          await _sendText(
+            _filePrefix +
+                jsonEncode({'name': fileName, 'size': job.bytes!.length}),
+          );
+        }
         // Wire these before sendBytes so progress callbacks can finalize the
         // bubble; cleared on completion/failure in _updateOutgoingProgress.
         _pendingOutgoingBytes = job.bytes;
         _sendingImagePath = job.imagePath;
         _pendingOutgoingAudioText = job.audioText;
-        await _binding.sendBytes(job.bytes!);
+        _pendingOutgoingFileText = fileName;
+        await _sendBytesFrame(job.bytes!);
       } else {
-        await _binding.sendMessage(job.text!);
+        await _sendText(job.text!);
       }
     } catch (_) {
       // A thrown send resolves the transfer through the same failure path
@@ -1993,10 +2621,46 @@ class ChatController extends Notifier<ChatState>
     _drainSendQueue();
   }
 
-  Future<String> _persistIncomingBytes(Uint8List bytes, String ext) async {
+  Future<String> _persistMediaBytes(Uint8List bytes, String ext) async {
     final dir = await getApplicationDocumentsDirectory();
     final path = '${dir.path}/${DateTime.now().millisecondsSinceEpoch}.$ext';
     // Write on a background isolate so large payloads don't jank the UI
+    await compute(_writeBytesToFile, (path: path, bytes: bytes));
+    return path;
+  }
+
+  /// Sanitizes a peer-supplied file name for disk use: separators/control
+  /// chars replaced, never empty, length-capped with the extension kept.
+  static String _sanitizeFileName(String raw) {
+    var name = raw.trim().replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_');
+    if (name.isEmpty || name == '.' || name == '..') name = 'file';
+    if (name.length > 100) {
+      final dot = name.lastIndexOf('.');
+      final ext =
+          (dot > 0 && name.length - dot <= 12) ? name.substring(dot) : '';
+      name = name.substring(0, 100 - ext.length) + ext;
+    }
+    return name;
+  }
+
+  /// Persists incoming FILE bytes under [name] in a `received/` folder —
+  /// unlike media (timestamped names), file bubbles must show their real
+  /// name; a collision gets a timestamp prefix instead of an overwrite.
+  Future<String> _persistIncomingNamedBytes(
+    Uint8List bytes,
+    String name,
+  ) async {
+    final dir = await getApplicationDocumentsDirectory();
+    final received = Directory('${dir.path}/received');
+    if (!await received.exists()) {
+      await received.create(recursive: true);
+    }
+    final safe = _sanitizeFileName(name);
+    var path = '${received.path}/$safe';
+    if (await File(path).exists()) {
+      path =
+          '${received.path}/${DateTime.now().millisecondsSinceEpoch}_$safe';
+    }
     await compute(_writeBytesToFile, (path: path, bytes: bytes));
     return path;
   }
@@ -2182,7 +2846,7 @@ class ChatController extends Notifier<ChatState>
 
     final String filePath;
     try {
-      filePath = await _persistIncomingBytes(bytes, 'm4a');
+      filePath = await _persistMediaBytes(bytes, 'm4a');
     } catch (e) {
       if (kDebugMode && showDebugLogs) {
         debugPrint('Incoming audio persist failed: $e');
@@ -2221,6 +2885,82 @@ class ChatController extends Notifier<ChatState>
           timestamp: DateTime.now(),
           imagePath: filePath,
           transferKind: 'audio',
+        ),
+      );
+    }
+    state = state.copyWith(messages: msgs);
+    _scheduleSave();
+  }
+
+  /// Processes an incoming file transfer: persists the bytes under the
+  /// announced name (sanitized; collisions get a timestamp prefix) and
+  /// finalizes the transfer bubble as a file message.
+  Future<void> _handleIncomingFile(Uint8List bytes) async {
+    if (_closed) return;
+    final meta = _pendingIncomingFileMeta;
+    _pendingIncomingFileMeta = null;
+    var name = 'file';
+    if (meta != null && meta.isNotEmpty) {
+      try {
+        name = _sanitizeFileName(
+          (jsonDecode(meta)['name'] as String?) ?? name,
+        );
+      } catch (_) {
+        name = _sanitizeFileName(meta);
+      }
+    }
+
+    // Capture the target id and consume it BEFORE the disk write; the list
+    // is re-read afterwards (see _handleIncomingImage).
+    final targetId = _incomingProgressId;
+    _incomingProgressId = null;
+    _incomingStallTimer?.cancel();
+    _incomingStallTimer = null;
+
+    final String filePath;
+    try {
+      filePath = await _persistIncomingNamedBytes(bytes, name);
+    } catch (e) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Incoming file persist failed: $e');
+      }
+      if (_closed) return;
+      _failIncomingTransfer(asFile: true);
+      return;
+    }
+    if (_closed) return;
+
+    _incomingTransferFailed = false;
+    final l10n = ref.read(appLocalizationsProvider);
+    final caption = l10n.fileCaption(name, '${bytes.lengthInBytes}');
+    final msgs = List.of(state.messages);
+    int idx =
+        targetId == null ? -1 : msgs.indexWhere((m) => m.id == targetId);
+    if (idx == -1) {
+      idx = msgs.indexWhere(
+        (m) =>
+            m.isTransferring && m.transferKind == 'bytes' && !m.isSentByMe,
+      );
+    }
+    if (idx != -1) {
+      msgs[idx] = msgs[idx].copyWith(
+        text: caption,
+        isSentByMe: false,
+        timestamp: DateTime.now(),
+        imagePath: filePath,
+        isTransferring: false,
+        transferKind: 'file',
+      );
+    } else {
+      msgs.insert(
+        0,
+        MessageModel(
+          id: Uuid().v4(),
+          text: caption,
+          isSentByMe: false,
+          timestamp: DateTime.now(),
+          imagePath: filePath,
+          transferKind: 'file',
         ),
       );
     }
