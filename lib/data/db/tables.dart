@@ -44,6 +44,13 @@ class Sessions extends Table {
   /// entry for [transport] (see SessionRepository._decodeAddresses).
   TextColumn get deviceAddresses => text().nullable()();
 
+  /// User-chosen display name for the chat (home list long-press rename):
+  /// shown instead of [name] wherever the session title renders. Null/empty
+  /// = not set; the stored [name] keeps updating from the live peer
+  /// identity underneath, so clearing the nickname falls back to the
+  /// current device name (see ChatSessionModel.title).
+  TextColumn get nickname => text().nullable()();
+
   @override
   Set<Column> get primaryKey => {id};
 }

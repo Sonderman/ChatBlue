@@ -53,6 +53,7 @@ void main() {
     String? transport = 'bt',
     Map<String, dynamic>? device,
     Map<String, String> deviceAddresses = const {},
+    String? nickname,
   }) =>
       ChatSessionModel(
         id: id,
@@ -63,6 +64,7 @@ void main() {
         device: device ?? {'name': name, 'address': 'AA:BB:CC:DD:EE:FF'},
         transport: transport,
         deviceAddresses: deviceAddresses,
+        nickname: nickname,
       );
 
   test('save -> load round-trips every message field', () async {
@@ -94,6 +96,36 @@ void main() {
     expect(restored.imagePath, '/data/img.jpg');
     expect(restored.remoteMediaSize, 4096);
     expect(restored.transferKind, 'audio');
+  });
+
+  test('setSessionNickname sets, updates and clears the user title', () async {
+    await repo.saveChatSession(session());
+    final storedUpdatedAt = DateTime(2026, 10, 6, 11);
+
+    await repo.setSessionNickname('peer-1', '  Kanka  ');
+    var loaded = await repo.loadChatSession('peer-1');
+    // Trimmed on write; the device name stays untouched beneath it.
+    expect(loaded!.nickname, 'Kanka');
+    expect(loaded.name, 'Redmi');
+    expect(loaded.title, 'Kanka');
+    // A rename never bumps updatedAt (it must not reorder the list or look
+    // like new activity).
+    expect(loaded.updatedAt, storedUpdatedAt);
+
+    await repo.setSessionNickname('peer-1', 'Babam');
+    loaded = await repo.loadChatSession('peer-1');
+    expect(loaded!.nickname, 'Babam');
+
+    // Clearing (empty or null) restores the device-name title.
+    await repo.setSessionNickname('peer-1', '');
+    loaded = await repo.loadChatSession('peer-1');
+    expect(loaded!.nickname, isNull);
+    expect(loaded.title, 'Redmi');
+
+    await repo.setSessionNickname('peer-1', 'Kanka');
+    await repo.setSessionNickname('peer-1', null);
+    loaded = await repo.loadChatSession('peer-1');
+    expect(loaded!.nickname, isNull);
   });
 
   test('getAllChatSessions sorts by updatedAt DESC and filters by chatID',

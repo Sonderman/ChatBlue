@@ -1238,6 +1238,9 @@ class ChatController extends Notifier<ChatState>
           device: session.device,
           transport: session.transport,
           deviceAddresses: session.deviceAddresses,
+          // The user's nickname rides the rename — a live name upgrade must
+          // never drop the chosen title.
+          nickname: session.nickname,
         );
         state = state.copyWith(peerName: name, chatSession: renamed);
         _scheduleSave();
@@ -1321,6 +1324,11 @@ class ChatController extends Notifier<ChatState>
         ...duplicate.deviceAddresses,
         ...session.deviceAddresses,
       },
+      // The user's chosen title survives the absorb: the live row's
+      // nickname wins, the absorbed sibling's is adopted when the live row
+      // has none (a nickname set on the old row keeps showing after the
+      // merge).
+      nickname: session.nickname ?? duplicate.nickname,
     );
     try {
       await _repo.saveChatSession(merged);

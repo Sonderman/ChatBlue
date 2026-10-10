@@ -31,6 +31,13 @@ class ChatSessionModel {
   /// repository seeds it from the single legacy `device['address']`.
   final Map<String, String> deviceAddresses;
 
+  /// User-chosen display name for this chat (home list long-press rename):
+  /// whenever it is set the UI shows it instead of [name] (see [title]).
+  /// Null/empty = not set. Display-only — [name] keeps being refreshed from
+  /// the live peer identity beneath it, so clearing the nickname falls back
+  /// to the current device name.
+  String? nickname;
+
   ChatSessionModel({
     required this.id,
     required this.name,
@@ -40,7 +47,21 @@ class ChatSessionModel {
     required this.device,
     this.transport,
     this.deviceAddresses = const {},
+    this.nickname,
   });
+
+  /// The title shown for this session: the user's [nickname] when set,
+  /// otherwise the peer's device [name]. Display-only — dialing, peer
+  /// matching and the wire identity keep using [name].
+  String get title {
+    final n = (nickname ?? '').trim();
+    return n.isEmpty ? name : n;
+  }
+
+  /// The newest message of this session — the home list's subtitle preview
+  /// ([messages] is newest-first everywhere), or null for an empty
+  /// conversation.
+  MessageModel? get lastMessage => messages.isEmpty ? null : messages.first;
 
   /// The stored address for [kind], or null when this session never learned
   /// that transport's address yet.
@@ -64,6 +85,7 @@ class ChatSessionModel {
       device: device,
       transport: transport,
       deviceAddresses: {...deviceAddresses, kind: a},
+      nickname: nickname,
     );
   }
 
@@ -176,6 +198,10 @@ class ChatSessionModel {
       },
       transport: transport,
       deviceAddresses: addresses,
+      // The user's chosen title rides every re-bind: a transport open must
+      // never drop the nickname (the name refresh above keeps working
+      // underneath it).
+      nickname: nickname,
     );
   }
 
@@ -189,6 +215,7 @@ class ChatSessionModel {
       'updatedAt': updatedAt.toIso8601String(),
       'transport': transport,
       'deviceAddresses': deviceAddresses,
+      'nickname': nickname,
     };
   }
 
@@ -212,6 +239,7 @@ class ChatSessionModel {
       updatedAt: DateTime.parse(json['updatedAt']),
       transport: json['transport'],
       deviceAddresses: addresses,
+      nickname: json['nickname'] as String?,
     );
   }
 }

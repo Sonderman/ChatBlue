@@ -153,9 +153,15 @@ class ChatAppBar extends StatelessWidget implements PreferredSizeWidget {
     final p = ChatPalette.of(context);
     final l10n = AppLocalizations.of(context)!;
     // Fallback order matters (BT carries a transport name immediately, WFD
-    // only after READY): transport name → peer-reported name → stored name.
-    final name =
-        controller.connectedDeviceName ?? (state.peerName.isNotEmpty ? state.peerName : state.chatSession.name);
+    // only after READY): a user-chosen nickname (home long-press rename)
+    // outranks every automatic name; otherwise transport name →
+    // peer-reported name → stored name.
+    final stored = state.chatSession;
+    final nickname = (stored.nickname ?? '').trim();
+    final name = nickname.isNotEmpty
+        ? nickname
+        : (controller.connectedDeviceName ??
+            (state.peerName.isNotEmpty ? state.peerName : stored.name));
     return AppBar(
       // Status bar icons follow the chat palette, not the app theme: the
       // chat bar stays dark navy on the light theme too.

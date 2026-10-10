@@ -268,6 +268,19 @@ class SessionRepository {
         .go();
   }
 
+  /// Sets (or clears — null/empty) a session's user-chosen nickname. The
+  /// device [SessionRow.name] is untouched: it keeps updating from the live
+  /// peer identity, so clearing the nickname falls back to the current
+  /// device name. The home list's `watchSessions` stream re-emits on the
+  /// row change; `updatedAt` is deliberately not bumped (a rename must not
+  /// reorder the list or look like new activity).
+  Future<void> setSessionNickname(String id, String? nickname) async {
+    final n = (nickname ?? '').trim();
+    await (_db.update(_db.sessions)..where((t) => t.id.equals(id))).write(
+      SessionsCompanion(nickname: Value(n.isEmpty ? null : n)),
+    );
+  }
+
   /// Turns media messages into deferred-download placeholders: drops the
   /// local file reference, records the byte size so the bubble can re-fetch
   /// the file from the peer, and clears any stale in-transfer flag. One
@@ -306,6 +319,7 @@ class SessionRepository {
         deviceAddresses: Value(
           s.deviceAddresses.isEmpty ? null : jsonEncode(s.deviceAddresses),
         ),
+        nickname: Value(s.nickname),
       );
 
   MessagesCompanion _messageCompanion(
@@ -344,6 +358,7 @@ class SessionRepository {
         },
         transport: row.transport,
         deviceAddresses: _decodeAddresses(row),
+        nickname: row.nickname,
       );
 
   /// Per-transport addresses of a session row: the stored JSON map, with

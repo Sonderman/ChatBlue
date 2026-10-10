@@ -29,3 +29,21 @@ final deleteChatSessionProvider =
     }
   },
 );
+
+/// Sets or clears a session's nickname (home list long-press rename) — the
+/// list stream re-emits automatically once the row changes. Null/empty
+/// clears the nickname and the device name shows again.
+final setSessionNicknameProvider =
+    Provider<Future<void> Function(ChatSessionModel, String?)>(
+  (ref) => (session, nickname) async {
+    try {
+      await ref
+          .read(sessionRepositoryProvider)
+          .setSessionNickname(session.id, nickname);
+    } catch (_) {
+      // Fail-open: veritabanı yoksa güncelleme sessizce atlanır (silme ile
+      // aynı davranış).
+      return;
+    }
+  },
+);

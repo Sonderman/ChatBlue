@@ -89,6 +89,17 @@ class $SessionsTable extends Sessions
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _nicknameMeta = const VerificationMeta(
+    'nickname',
+  );
+  @override
+  late final GeneratedColumn<String> nickname = GeneratedColumn<String>(
+    'nickname',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -99,6 +110,7 @@ class $SessionsTable extends Sessions
     deviceName,
     deviceAddress,
     deviceAddresses,
+    nickname,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -155,6 +167,12 @@ class $SessionsTable extends Sessions
         ),
       );
     }
+    if (data.containsKey('nickname')) {
+      context.handle(
+        _nicknameMeta,
+        nickname.isAcceptableOrUnknown(data['nickname']!, _nicknameMeta),
+      );
+    }
     return context;
   }
 
@@ -200,6 +218,10 @@ class $SessionsTable extends Sessions
         DriftSqlType.string,
         data['${effectivePrefix}device_addresses'],
       ),
+      nickname: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}nickname'],
+      ),
     );
   }
 
@@ -234,6 +256,13 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
   /// the column existed — the single [deviceAddress] then serves as the
   /// entry for [transport] (see SessionRepository._decodeAddresses).
   final String? deviceAddresses;
+
+  /// User-chosen display name for the chat (home list long-press rename):
+  /// shown instead of [name] wherever the session title renders. Null/empty
+  /// = not set; the stored [name] keeps updating from the live peer
+  /// identity underneath, so clearing the nickname falls back to the
+  /// current device name (see ChatSessionModel.title).
+  final String? nickname;
   const SessionRow({
     required this.id,
     required this.name,
@@ -243,6 +272,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
     this.deviceName,
     this.deviceAddress,
     this.deviceAddresses,
+    this.nickname,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -271,6 +301,9 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
     if (!nullToAbsent || deviceAddresses != null) {
       map['device_addresses'] = Variable<String>(deviceAddresses);
     }
+    if (!nullToAbsent || nickname != null) {
+      map['nickname'] = Variable<String>(nickname);
+    }
     return map;
   }
 
@@ -292,6 +325,9 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
       deviceAddresses: deviceAddresses == null && nullToAbsent
           ? const Value.absent()
           : Value(deviceAddresses),
+      nickname: nickname == null && nullToAbsent
+          ? const Value.absent()
+          : Value(nickname),
     );
   }
 
@@ -309,6 +345,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
       deviceName: serializer.fromJson<String?>(json['deviceName']),
       deviceAddress: serializer.fromJson<String?>(json['deviceAddress']),
       deviceAddresses: serializer.fromJson<String?>(json['deviceAddresses']),
+      nickname: serializer.fromJson<String?>(json['nickname']),
     );
   }
   @override
@@ -323,6 +360,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
       'deviceName': serializer.toJson<String?>(deviceName),
       'deviceAddress': serializer.toJson<String?>(deviceAddress),
       'deviceAddresses': serializer.toJson<String?>(deviceAddresses),
+      'nickname': serializer.toJson<String?>(nickname),
     };
   }
 
@@ -335,6 +373,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
     Value<String?> deviceName = const Value.absent(),
     Value<String?> deviceAddress = const Value.absent(),
     Value<String?> deviceAddresses = const Value.absent(),
+    Value<String?> nickname = const Value.absent(),
   }) => SessionRow(
     id: id ?? this.id,
     name: name ?? this.name,
@@ -348,6 +387,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
     deviceAddresses: deviceAddresses.present
         ? deviceAddresses.value
         : this.deviceAddresses,
+    nickname: nickname.present ? nickname.value : this.nickname,
   );
   SessionRow copyWithCompanion(SessionsCompanion data) {
     return SessionRow(
@@ -365,6 +405,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
       deviceAddresses: data.deviceAddresses.present
           ? data.deviceAddresses.value
           : this.deviceAddresses,
+      nickname: data.nickname.present ? data.nickname.value : this.nickname,
     );
   }
 
@@ -378,7 +419,8 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
           ..write('transport: $transport, ')
           ..write('deviceName: $deviceName, ')
           ..write('deviceAddress: $deviceAddress, ')
-          ..write('deviceAddresses: $deviceAddresses')
+          ..write('deviceAddresses: $deviceAddresses, ')
+          ..write('nickname: $nickname')
           ..write(')'))
         .toString();
   }
@@ -393,6 +435,7 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
     deviceName,
     deviceAddress,
     deviceAddresses,
+    nickname,
   );
   @override
   bool operator ==(Object other) =>
@@ -405,7 +448,8 @@ class SessionRow extends DataClass implements Insertable<SessionRow> {
           other.transport == this.transport &&
           other.deviceName == this.deviceName &&
           other.deviceAddress == this.deviceAddress &&
-          other.deviceAddresses == this.deviceAddresses);
+          other.deviceAddresses == this.deviceAddresses &&
+          other.nickname == this.nickname);
 }
 
 class SessionsCompanion extends UpdateCompanion<SessionRow> {
@@ -417,6 +461,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
   final Value<String?> deviceName;
   final Value<String?> deviceAddress;
   final Value<String?> deviceAddresses;
+  final Value<String?> nickname;
   final Value<int> rowid;
   const SessionsCompanion({
     this.id = const Value.absent(),
@@ -427,6 +472,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
     this.deviceName = const Value.absent(),
     this.deviceAddress = const Value.absent(),
     this.deviceAddresses = const Value.absent(),
+    this.nickname = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   SessionsCompanion.insert({
@@ -438,6 +484,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
     this.deviceName = const Value.absent(),
     this.deviceAddress = const Value.absent(),
     this.deviceAddresses = const Value.absent(),
+    this.nickname = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        name = Value(name),
@@ -452,6 +499,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
     Expression<String>? deviceName,
     Expression<String>? deviceAddress,
     Expression<String>? deviceAddresses,
+    Expression<String>? nickname,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -463,6 +511,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
       if (deviceName != null) 'device_name': deviceName,
       if (deviceAddress != null) 'device_address': deviceAddress,
       if (deviceAddresses != null) 'device_addresses': deviceAddresses,
+      if (nickname != null) 'nickname': nickname,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -476,6 +525,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
     Value<String?>? deviceName,
     Value<String?>? deviceAddress,
     Value<String?>? deviceAddresses,
+    Value<String?>? nickname,
     Value<int>? rowid,
   }) {
     return SessionsCompanion(
@@ -487,6 +537,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
       deviceName: deviceName ?? this.deviceName,
       deviceAddress: deviceAddress ?? this.deviceAddress,
       deviceAddresses: deviceAddresses ?? this.deviceAddresses,
+      nickname: nickname ?? this.nickname,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -522,6 +573,9 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
     if (deviceAddresses.present) {
       map['device_addresses'] = Variable<String>(deviceAddresses.value);
     }
+    if (nickname.present) {
+      map['nickname'] = Variable<String>(nickname.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -539,6 +593,7 @@ class SessionsCompanion extends UpdateCompanion<SessionRow> {
           ..write('deviceName: $deviceName, ')
           ..write('deviceAddress: $deviceAddress, ')
           ..write('deviceAddresses: $deviceAddresses, ')
+          ..write('nickname: $nickname, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -1605,6 +1660,7 @@ typedef $$SessionsTableCreateCompanionBuilder = SessionsCompanion Function({
   Value<String?> deviceName,
   Value<String?> deviceAddress,
   Value<String?> deviceAddresses,
+  Value<String?> nickname,
   Value<int> rowid,
 });
 typedef $$SessionsTableUpdateCompanionBuilder = SessionsCompanion Function({
@@ -1616,6 +1672,7 @@ typedef $$SessionsTableUpdateCompanionBuilder = SessionsCompanion Function({
   Value<String?> deviceName,
   Value<String?> deviceAddress,
   Value<String?> deviceAddresses,
+  Value<String?> nickname,
   Value<int> rowid,
 });
 
@@ -1693,6 +1750,11 @@ class $$SessionsTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<String> get nickname => $composableBuilder(
+    column: $table.nickname,
+    builder: (column) => ColumnFilters(column),
+  );
+
   Expression<bool> messagesRefs(
     Expression<bool> Function($$MessagesTableFilterComposer f) f,
   ) {
@@ -1767,6 +1829,11 @@ class $$SessionsTableOrderingComposer
     column: $table.deviceAddresses,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get nickname => $composableBuilder(
+    column: $table.nickname,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$SessionsTableAnnotationComposer
@@ -1807,6 +1874,9 @@ class $$SessionsTableAnnotationComposer
     column: $table.deviceAddresses,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get nickname =>
+      $composableBuilder(column: $table.nickname, builder: (column) => column);
 
   Expression<T> messagesRefs<T extends Object>(
     Expression<T> Function($$MessagesTableAnnotationComposer a) f,
@@ -1870,6 +1940,7 @@ class $$SessionsTableTableManager
                 Value<String?> deviceName = const Value.absent(),
                 Value<String?> deviceAddress = const Value.absent(),
                 Value<String?> deviceAddresses = const Value.absent(),
+                Value<String?> nickname = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => SessionsCompanion(
                 id: id,
@@ -1880,6 +1951,7 @@ class $$SessionsTableTableManager
                 deviceName: deviceName,
                 deviceAddress: deviceAddress,
                 deviceAddresses: deviceAddresses,
+                nickname: nickname,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -1892,6 +1964,7 @@ class $$SessionsTableTableManager
                 Value<String?> deviceName = const Value.absent(),
                 Value<String?> deviceAddress = const Value.absent(),
                 Value<String?> deviceAddresses = const Value.absent(),
+                Value<String?> nickname = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => SessionsCompanion.insert(
                 id: id,
@@ -1902,6 +1975,7 @@ class $$SessionsTableTableManager
                 deviceName: deviceName,
                 deviceAddress: deviceAddress,
                 deviceAddresses: deviceAddresses,
+                nickname: nickname,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

@@ -121,6 +121,43 @@ void main() {
     expect(await repo.loadChatSession('doomed'), isNull);
   });
 
+  test('setSessionNicknameProvider writes through; the stream re-emits',
+      () async {
+    final c = container();
+    addTearDown(c.dispose);
+    await repo.saveChatSession(session('peer-1', DateTime(2026, 10, 9, 12)));
+
+    final renamed = nextEmission(
+      c,
+      (list) => list.any((s) => s.id == 'peer-1' && s.nickname == 'J7'),
+    );
+    await pumpEventQueue(); // let the stream subscribe before the write
+    await c.read(setSessionNicknameProvider)(
+      session('peer-1', DateTime(2026, 10, 9, 12)),
+      'J7',
+    );
+
+    final updated = await renamed;
+    final row = updated.firstWhere((s) => s.id == 'peer-1');
+    expect(row.nickname, 'J7');
+    // The user title outranks the stored device name (the helper names the
+    // session after its id).
+    expect(row.title, 'J7');
+
+    // Clearing falls back to the device name — same stream contract.
+    final cleared = nextEmission(
+      c,
+      (list) => list.any((s) => s.id == 'peer-1' && s.nickname == null),
+    );
+    await pumpEventQueue();
+    await c.read(setSessionNicknameProvider)(
+      session('peer-1', DateTime(2026, 10, 9, 12)),
+      null,
+    );
+    final after = await cleared;
+    expect(after.firstWhere((s) => s.id == 'peer-1').title, 'peer-1');
+  });
+
   test('fail-open: provider renders an empty list without a database',
       () async {
     final c = ProviderContainer();

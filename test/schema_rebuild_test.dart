@@ -35,6 +35,10 @@ void main() {
     final extra = withV2Columns ? ', origin TEXT, origin_seq INTEGER' : '';
     // v4 added the message `delivery` column; later versions carry it too.
     final delivery = version >= 4 ? ', delivery TEXT' : '';
+    // v5 added the sessions `device_addresses` column, v6 the `nickname`
+    // column; later fixtures carry the earlier additions too.
+    final addresses = version >= 5 ? ', device_addresses TEXT' : '';
+    final nickname = version >= 6 ? ', nickname TEXT' : '';
     final raw = sqlite3.open(file.path);
     raw.execute('''
       CREATE TABLE sessions (
@@ -44,7 +48,7 @@ void main() {
         updated_at INTEGER NOT NULL,
         transport TEXT,
         device_name TEXT,
-        device_address TEXT,
+        device_address TEXT$addresses$nickname,
         PRIMARY KEY (id)
       )
     ''');
@@ -72,10 +76,19 @@ void main() {
         PRIMARY KEY (key)
       )
     ''');
-    raw.execute(
-      "INSERT INTO sessions (id, name, created_at, updated_at) "
-      "VALUES ('stale', 'stale', 1, 2)",
-    );
+    if (version >= 5) {
+      // The v5 shape carries the per-transport address map.
+      raw.execute(
+        "INSERT INTO sessions (id, name, created_at, updated_at, "
+        "device_addresses) VALUES ('stale', 'stale', 1, 2, "
+        "'{\"bt\":\"AA:BB:CC:DD:EE:FF\"}')",
+      );
+    } else {
+      raw.execute(
+        "INSERT INTO sessions (id, name, created_at, updated_at) "
+        "VALUES ('stale', 'stale', 1, 2)",
+      );
+    }
     raw.execute(
       "INSERT INTO messages (id, session_id, content, is_sent_by_me, "
       "timestamp, seq) VALUES ('m1', 'stale', 'old', 1, 3, 0)",
@@ -177,6 +190,29 @@ void main() {
       (await db.select(db.sessions).getSingle()).deviceAddresses,
       '{"bt":"AA:BB:CC:DD:EE:FF"}',
     );
+
+    await db.close();
+  });
+
+  test(
+      'migrates a shipped v5 file in place: data preserved, the nickname '
+      'column added', () async {
+    final file = legacyFile(version: 5);
+    final db = AppDatabase(NativeDatabase(file));
+
+    // No rebuild: every pre-existing row survives the upgrade, and the
+    // v5-era per-transport address map survives the v6 step untouched.
+    final sessionRow = await db.select(db.sessions).getSingle();
+    expect(sessionRow.name, 'stale');
+    expect(sessionRow.deviceAddresses, '{"bt":"AA:BB:CC:DD:EE:FF"}');
+    expect(await db.select(db.messages).get(), hasLength(1));
+
+    // The new column exists, migrated rows read back as NULL (no nickname
+    // set yet) and it is writable through the generated companion.
+    expect(sessionRow.nickname, isNull);
+    await (db.update(db.sessions)..where((t) => t.id.equals('stale')))
+        .write(const SessionsCompanion(nickname: Value('J7')));
+    expect((await db.select(db.sessions).getSingle()).nickname, 'J7');
 
     await db.close();
   });

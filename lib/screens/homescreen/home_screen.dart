@@ -125,12 +125,11 @@ class _ChatsTab extends ConsumerWidget {
         final String kind = s.transportKind;
         final bool isNearby = kind == ChatSessionModel.transportNearby;
         final bool isWifi = kind == ChatSessionModel.transportWifiDirect;
-        // Nearby sessions store the peer uid as the address — a uuid reads
-        // as noise, so the channel label is shown instead.
-        final String addressText =
-            isNearby ? l10n.nearbyTab : (s.device['address'] ?? '');
+        // Subtitle = the LAST message (the stored MAC/uid address no longer
+        // shows — it was noise under a real conversation) • activity time.
+        final String lastText = s.lastMessage?.text.trim() ?? '';
         final subtitle = StringBuffer()
-          ..write(addressText)
+          ..write(lastText.isEmpty ? l10n.noMessagesYet : lastText)
           ..write('  •  ')
           ..write(_formatDateTime(s.updatedAt));
 
@@ -138,12 +137,17 @@ class _ChatsTab extends ConsumerWidget {
           leading: CircleAvatar(
             backgroundColor: scheme.primaryContainer,
             child: Text(
-              (s.name.isNotEmpty ? s.name[0] : '?').toUpperCase(),
+              // A user nickname (when set) drives the avatar letter too.
+              (s.title.isNotEmpty ? s.title[0] : '?').toUpperCase(),
               style: TextStyle(color: scheme.onPrimaryContainer),
             ),
           ),
-          title: Text(s.name),
-          subtitle: Text(subtitle.toString()),
+          title: Text(s.title),
+          subtitle: Text(
+            subtitle.toString(),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
           // Transport badge: a Bluetooth or Wi‑Fi Direct icon at the
           // right edge, so the channel of every chat is visible at a
           // glance.
@@ -188,30 +192,90 @@ class _ChatsTab extends ConsumerWidget {
               );
             }
           },
-          onLongPress: () {
-            showDialog<void>(
-              context: context,
-              builder: (dialogContext) => AlertDialog(
-                title: Text(l10n.deleteChatTitle(s.name)),
-                content: Text(l10n.deleteChatMessage),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.of(dialogContext).pop(),
-                    child: Text(l10n.cancel),
-                  ),
-                  TextButton(
-                    onPressed: () {
-                      ref.read(deleteChatSessionProvider)(s);
-                      Navigator.of(dialogContext).pop();
-                    },
-                    child: Text(l10n.delete),
-                  ),
-                ],
-              ),
-            );
-          },
+          onLongPress: () => _showSessionActions(context, ref, s),
         );
       },
+    );
+  }
+
+  /// Long-press menu: set/clear the chat's nickname (the user-chosen title)
+  /// and delete the session. The nickname entry is the primary action; the
+  /// destructive delete keeps its own confirm dialog one tap behind it.
+  void _showSessionActions(
+      BuildContext context, WidgetRef ref, ChatSessionModel s) {
+    final l10n = AppLocalizations.of(context)!;
+    final scheme = Theme.of(context).colorScheme;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.badge_outlined),
+              title: Text(l10n.setNicknameTitle),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                _showNicknameDialog(context, ref, s);
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.delete_outline, color: scheme.error),
+              title: Text(l10n.delete, style: TextStyle(color: scheme.error)),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                _showDeleteDialog(context, ref, s);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The nickname dialog, prefilled with the current nickname (the device
+  /// name shows as the hint — that is what appears again while the field is
+  /// empty). Saving an empty field clears the nickname.
+  Future<void> _showNicknameDialog(
+      BuildContext context, WidgetRef ref, ChatSessionModel s) async {
+    if (!context.mounted) return;
+    final String? value = await showNicknameDialog(
+      context,
+      initial: s.nickname ?? '',
+      hint: s.name,
+    );
+    if (value == null) return; // Cancelled.
+    final normalized = value.trim();
+    if (normalized == (s.nickname ?? '')) return; // No change.
+    // The list re-renders from the drift stream — no manual refresh needed.
+    await ref.read(setSessionNicknameProvider)(s, normalized);
+  }
+
+  /// Deletes the session after confirmation — the pre-nickname long-press
+  /// flow, now reached through the action menu.
+  void _showDeleteDialog(
+      BuildContext context, WidgetRef ref, ChatSessionModel s) {
+    final l10n = AppLocalizations.of(context)!;
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(l10n.deleteChatTitle(s.title)),
+        content: Text(l10n.deleteChatMessage),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: Text(l10n.cancel),
+          ),
+          TextButton(
+            onPressed: () {
+              ref.read(deleteChatSessionProvider)(s);
+              Navigator.of(dialogContext).pop();
+            },
+            child: Text(l10n.delete),
+          ),
+        ],
+      ),
     );
   }
 
@@ -220,5 +284,83 @@ class _ChatsTab extends ConsumerWidget {
     final h = time.hour.toString().padLeft(2, '0');
     final m = time.minute.toString().padLeft(2, '0');
     return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} $h:$m';
+  }
+}
+
+/// Shows the nickname-entry dialog and resolves with the entered text, or
+/// null when the user cancelled. (Also clears the field when it is saved
+/// empty — the caller trims and persists.)
+///
+/// The TextEditingController is owned by the DIALOG'S state and disposed
+/// with it. Disposing a controller right after `showDialog` returns is a
+/// trap: the future completes at pop TIME, while the dialog is still
+/// animating out — any rebuild of the field during the exit (e.g. the
+/// app-wide rebuild the keyboard-close viewport-metrics resend triggers)
+/// then re-attaches to the disposed controller, "A TextEditingController
+/// was used after being disposed" is thrown inside the layout phase, the
+/// frame aborts, and the framework cascades into further assertions on
+/// device (`_dependents.isEmpty`, 'debugNeedsLayout', duplicate-global-key
+/// reports — device-reported). Owning the controller in the dialog's state
+/// keeps its lifetime exactly as long as the field needs it.
+Future<String?> showNicknameDialog(
+  BuildContext context, {
+  required String initial,
+  required String hint,
+}) {
+  return showDialog<String>(
+    context: context,
+    builder: (_) => _NicknameDialog(initial: initial, hint: hint),
+  );
+}
+
+/// The dialog content: owns its controller (see [showNicknameDialog]).
+class _NicknameDialog extends StatefulWidget {
+  const _NicknameDialog({required this.initial, required this.hint});
+
+  /// The current nickname the field starts with.
+  final String initial;
+
+  /// The device name shown as the hint while the field is empty.
+  final String hint;
+
+  @override
+  State<_NicknameDialog> createState() => _NicknameDialogState();
+}
+
+class _NicknameDialogState extends State<_NicknameDialog> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return AlertDialog(
+      title: Text(l10n.setNicknameTitle),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: InputDecoration(
+          labelText: l10n.nicknameLabel,
+          hintText: widget.hint,
+        ),
+        onSubmitted: (v) => Navigator.of(context).pop(v),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(l10n.cancel),
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          child: Text(l10n.saveAction),
+        ),
+      ],
+    );
   }
 }

@@ -29,6 +29,7 @@ ChatSessionModel sessionFixture({
   String? transport = ChatSessionModel.transportBluetooth,
   Map<String, dynamic>? device,
   Map<String, String> deviceAddresses = const {},
+  String? nickname,
 }) =>
     ChatSessionModel(
       id: id,
@@ -39,6 +40,7 @@ ChatSessionModel sessionFixture({
       device: device ?? {'name': name, 'address': 'AA:BB:CC:DD:EE:FF'},
       transport: transport,
       deviceAddresses: deviceAddresses,
+      nickname: nickname,
     );
 
 void main() {
@@ -386,6 +388,129 @@ void main() {
       state = stateOf(c2, arg2);
       expect(state.chatSession.id, 'DC:6A:E7:41:74:E6');
       expect(state.messages, hasLength(20));
+    });
+
+    test(
+        'an absorb adopts the nickname of the absorbed row when the live '
+        'row has none', () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final repo = SessionRepository(database);
+      // The BT-era row the user had nicknamed.
+      await repo.saveChatSession(
+        sessionFixture(
+          id: 'DC:6A:E7:41:74:E6',
+          name: 'Redmi Note 10 Pro',
+          transport: ChatSessionModel.transportBluetooth,
+          device: {'name': 'Redmi Note 10 Pro', 'address': 'DC:6A:E7:41:74:E6'},
+          nickname: 'Kanka',
+          messages: [
+            MessageModel(
+              id: 'm-bt',
+              text: 'bluetooth era',
+              isSentByMe: true,
+              timestamp: DateTime(2026, 10, 10, 14),
+            ),
+          ],
+        ),
+      );
+      // The WFD-era row keyed by the peer's uid — the row THIS open hits
+      // directly; no nickname of its own.
+      await repo.saveChatSession(
+        sessionFixture(
+          id: 'uid-1',
+          name: 'Redmi Note 10 Pro',
+          transport: ChatSessionModel.transportWifiDirect,
+          device: {'name': 'Redmi Note 10 Pro', 'address': 'be:57:7a:fe:d5:a0'},
+          messages: [
+            MessageModel(
+              id: 'm-wfd',
+              text: 'wifi era',
+              isSentByMe: false,
+              timestamp: DateTime(2026, 10, 10, 15),
+            ),
+          ],
+        ),
+      );
+
+      final b = FakeChatBinding(transport: ChatSessionModel.transportWifiDirect)
+        ..deviceId = 'uid-1'
+        ..deviceKey = 'be:57:7a:fe:d5:a0'
+        ..deviceName = 'Redmi Note 10 Pro';
+      final c = container(b: b, database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportWifiDirect);
+      open(c, arg);
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
+
+      final state = stateOf(c, arg);
+      expect(state.chatSession.nickname, 'Kanka',
+          reason: 'the sibling absorb must keep the user nickname');
+      expect(state.chatSession.title, 'Kanka');
+
+      // The merged single row persists it; the absorbed row is gone.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final stored = await repo.loadChatSession('uid-1');
+      expect(stored!.nickname, 'Kanka');
+      expect(stored.title, 'Kanka');
+      expect(await repo.loadChatSession('DC:6A:E7:41:74:E6'), isNull);
+    });
+
+    test(
+        'a re-keyed open carries the nickname instead of dropping the user '
+        'title', () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(() async {
+        await pumpEventQueue();
+        await database.close();
+      });
+      final repo = SessionRepository(database);
+      // Stored under the peer's stable uid (created over Wi‑Fi Direct),
+      // carrying the user's nickname and a small history.
+      await repo.saveChatSession(
+        sessionFixture(
+          id: 'uid-1',
+          name: 'Redmi Note 10 Pro',
+          transport: ChatSessionModel.transportWifiDirect,
+          device: {'name': 'Redmi Note 10 Pro', 'address': 'be:57:7a:fe:d5:a0'},
+          nickname: 'Anem',
+          messages: [
+            MessageModel(
+              id: 'm1',
+              text: 'hello',
+              isSentByMe: true,
+              timestamp: DateTime(2026, 10, 6, 12),
+            ),
+          ],
+        ),
+      );
+
+      // A Bluetooth reconnect: the computed key is the MAC — a miss that
+      // matches the stored row by name and re-keys it (reboundTo with the
+      // new id). The nickname must ride the re-bind.
+      binding.deviceKey = 'DC:6A:E7:41:74:E6';
+      binding.deviceName = 'Redmi Note 10 Pro';
+      binding.emitConnection(true);
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      open(c, arg);
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await pumpEventQueue();
+
+      final state = stateOf(c, arg);
+      expect(state.chatSession.id, 'DC:6A:E7:41:74:E6');
+      expect(state.chatSession.nickname, 'Anem',
+          reason: 'the re-key must carry the user nickname');
+      expect(state.chatSession.title, 'Anem');
+
+      final stored = await repo.loadChatSession('DC:6A:E7:41:74:E6');
+      expect(stored!.nickname, 'Anem');
+      expect(stored.title, 'Anem');
+      expect(await repo.loadChatSession('uid-1'), isNull);
     });
   });
 

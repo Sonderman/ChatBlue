@@ -340,5 +340,84 @@ void main() {
       expect(rebound.device['address'], '34:8A:7B:B4:5B:9D');
       expect(rebound.transport, ChatSessionModel.transportBluetooth);
     });
+
+    test('title prefers the user nickname and falls back to the name', () {
+      final session = ChatSessionModel(
+        id: 'sess-1',
+        name: 'Galaxy J7 Prime',
+        createdAt: DateTime(2026, 10, 10),
+        updatedAt: DateTime(2026, 10, 10),
+        messages: const [],
+        device: const {},
+        nickname: 'Babam',
+      );
+      expect(session.title, 'Babam');
+
+      // Blank/whitespace nicknames are "not set" — the device name shows.
+      session.nickname = '   ';
+      expect(session.title, 'Galaxy J7 Prime');
+      session.nickname = null;
+      expect(session.title, 'Galaxy J7 Prime');
+    });
+
+    test('lastMessage is the newest message; null on an empty conversation',
+        () {
+      final session = ChatSessionModel(
+        id: 'sess-1',
+        name: 'PeerOne',
+        createdAt: DateTime(2026, 10, 10),
+        updatedAt: DateTime(2026, 10, 10),
+        messages: [
+          MessageModel(
+            id: 'm2',
+            text: 'newest',
+            isSentByMe: true,
+            timestamp: DateTime(2026, 10, 10, 12),
+          ),
+          MessageModel(
+            id: 'm1',
+            text: 'older',
+            isSentByMe: false,
+            timestamp: DateTime(2026, 10, 10, 11),
+          ),
+        ],
+        device: const {},
+      );
+      expect(session.lastMessage?.text, 'newest');
+
+      session.messages = const [];
+      expect(session.lastMessage, isNull);
+    });
+
+    test('the nickname rides every copy path (re-bind, address learn, json)',
+        () {
+      final session = ChatSessionModel(
+        id: 'sess-1',
+        name: 'PeerOne',
+        createdAt: DateTime(2026, 10, 10),
+        updatedAt: DateTime(2026, 10, 10),
+        messages: const [],
+        device: const {'name': 'PeerOne', 'address': 'AA:BB:CC:DD:EE:FF'},
+        transport: ChatSessionModel.transportBluetooth,
+        nickname: 'Kanka',
+      );
+
+      // A transport open re-binds the identity — the nickname must survive
+      // (and the live name refresh keeps working underneath it).
+      final rebound = session.reboundTo(
+        peerName: 'PeerOne Renamed',
+        transport: ChatSessionModel.transportBluetooth,
+      );
+      expect(rebound.nickname, 'Kanka');
+      expect(rebound.title, 'Kanka');
+      expect(rebound.name, 'PeerOne Renamed');
+
+      final learned = session.recordingPeerAddress('wfd', '66:55:44:33:22:11');
+      expect(learned.nickname, 'Kanka');
+
+      final restored = ChatSessionModel.fromJson(session.toJson());
+      expect(restored.nickname, 'Kanka');
+      expect(restored.title, 'Kanka');
+    });
   });
 }
