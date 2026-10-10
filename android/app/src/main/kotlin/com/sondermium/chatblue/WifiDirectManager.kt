@@ -93,6 +93,11 @@ class WifiDirectManager(private val context: Context) {
     private companion object {
         const val FRAME_TYPE_TEXT: Byte = 1
         const val FRAME_TYPE_BYTES: Byte = 2
+
+        /// Upper bound for one frame's declared payload length — see the
+        /// BluetoothClassicManager note (malformed-header hardening).
+        const val MAX_FRAME_BYTES: Int = 64 * 1024 * 1024
+
         const val PORT: Int = 8988 // Align with Android Wi‑Fi Direct sample conventions
 
         /// Backoff before the connect retry: after a group teardown the P2P
@@ -647,9 +652,11 @@ class WifiDirectManager(private val context: Context) {
                                   ((accumulator[2].toInt() and 0xFF) shl 16) or
                                   ((accumulator[3].toInt() and 0xFF) shl 8) or
                                   (accumulator[4].toInt() and 0xFF)
-                        val cur = kotlin.math.max(0, kotlin.math.min(len, accumulator.size - 5))
-                        val kind = if (type == FRAME_TYPE_BYTES) "bytes" else "text"
-                        onTransferProgress?.invoke("in", cur, len, kind)
+                        if (len in 0..MAX_FRAME_BYTES) {
+                            val cur = kotlin.math.max(0, kotlin.math.min(len, accumulator.size - 5))
+                            val kind = if (type == FRAME_TYPE_BYTES) "bytes" else "text"
+                            onTransferProgress?.invoke("in", cur, len, kind)
+                        }
                     }
                     while (accumulator.size >= 5) {
                         val type = accumulator[0]
@@ -657,6 +664,16 @@ class WifiDirectManager(private val context: Context) {
                                   ((accumulator[2].toInt() and 0xFF) shl 16) or
                                   ((accumulator[3].toInt() and 0xFF) shl 8) or
                                   (accumulator[4].toInt() and 0xFF)
+                        if (len < 0 || len > MAX_FRAME_BYTES) {
+                            // Signed length reassembly: a negative (or an
+                            // overflowed 5 + len) value slipped past the
+                            // completeness check and crashed the reader in
+                            // copyOfRange — uncaught, that kills the app.
+                            lastReason = "protocol error: invalid frame length $len"
+                            onSocketError?.invoke("Protocol error: invalid frame length: $len")
+                            active.set(false)
+                            break
+                        }
                         if (accumulator.size < 5 + len) break
                         val payload = accumulator.copyOfRange(5, 5 + len)
                         accumulator = accumulator.copyOfRange(5 + len, accumulator.size)

@@ -60,6 +60,11 @@ class BluetoothClassicManager(private val context: Context) {
     private companion object {
         const val FRAME_TYPE_TEXT: Byte = 1
         const val FRAME_TYPE_BYTES: Byte = 2
+
+        /// Upper bound for one frame's declared payload length. Legit
+        /// traffic stays far below this (compressed images; the sync media
+        /// cap is 16 MB); anything larger is a malformed or hostile header.
+        const val MAX_FRAME_BYTES: Int = 64 * 1024 * 1024
     }
 
     fun setScanCallbacks(
@@ -432,9 +437,11 @@ class BluetoothClassicManager(private val context: Context) {
                                   ((accumulator[2].toInt() and 0xFF) shl 16) or
                                   ((accumulator[3].toInt() and 0xFF) shl 8) or
                                   (accumulator[4].toInt() and 0xFF)
-                        val cur = kotlin.math.max(0, kotlin.math.min(len, accumulator.size - 5))
-                        val kind = if (type == FRAME_TYPE_BYTES) "bytes" else "text"
-                        onTransferProgress?.invoke("in", cur, len, kind)
+                        if (len in 0..MAX_FRAME_BYTES) {
+                            val cur = kotlin.math.max(0, kotlin.math.min(len, accumulator.size - 5))
+                            val kind = if (type == FRAME_TYPE_BYTES) "bytes" else "text"
+                            onTransferProgress?.invoke("in", cur, len, kind)
+                        }
                     }
                     // Decode frames: [type(1)][len(4)][payload]
                     while (accumulator.size >= 5) {
@@ -443,6 +450,16 @@ class BluetoothClassicManager(private val context: Context) {
                                   ((accumulator[2].toInt() and 0xFF) shl 16) or
                                   ((accumulator[3].toInt() and 0xFF) shl 8) or
                                   (accumulator[4].toInt() and 0xFF)
+                        if (len < 0 || len > MAX_FRAME_BYTES) {
+                            // Signed length reassembly: a negative (or an
+                            // overflowed 5 + len) value slipped past the
+                            // completeness check and crashed the reader in
+                            // copyOfRange — uncaught, that kills the app.
+                            lastReason = "protocol error: invalid frame length $len"
+                            onSocketError?.invoke("Protocol error: invalid frame length: $len")
+                            active.set(false)
+                            break
+                        }
                         if (accumulator.size < 5 + len) break
                         val payload = accumulator.copyOfRange(5, 5 + len)
                         accumulator = accumulator.copyOfRange(5 + len, accumulator.size)

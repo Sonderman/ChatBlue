@@ -322,7 +322,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
   }
 
   Future<void> startScan() async {
-    state = state.copyWith(lastConnectError: null);
+    state = state.copyWith(clearLastConnectError: true);
     await refreshStatus();
     if (!state.isPlayServicesAvailable) {
       state = state.copyWith(lastConnectError: _t('playServicesRequired'));
@@ -362,7 +362,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
     _pendingConnectEndpointId = endpointId;
     _cancelledEndpointId = null;
     _dialSettle = Completer<void>();
-    state = state.copyWith(lastConnectError: null);
+    state = state.copyWith(clearLastConnectError: true);
     if (kDebugMode) debugPrint('[nearby] connect start: $endpointId');
 
     // Deliberately NO stopScan() here: the request must go out while
@@ -476,7 +476,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       state = state.copyWith(lastConnectError: _t('noDeviceAddressMessage'));
       return false;
     }
-    state = state.copyWith(lastConnectError: null);
+    state = state.copyWith(clearLastConnectError: true);
     await refreshStatus();
     if (!state.isPlayServicesAvailable) {
       state = state.copyWith(lastConnectError: _t('playServicesRequired'));

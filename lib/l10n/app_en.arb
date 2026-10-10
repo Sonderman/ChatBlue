@@ -95,6 +95,7 @@
   "imageCaption": "[Image] ({size} bytes)",
   "imageSendFailed": "[Failed to send image]",
   "imageReceiveFailed": "[Failed to receive image]",
+  "audioSendFailed": "[Failed to send voice message]",
   "cannotConnectTitle": "Cannot connect",
   "noDeviceAddressMessage": "No device address stored for this chat.",
   "invalidBtAddressMessage": "The stored Bluetooth address is invalid. Reconnect from the Bluetooth tab.",

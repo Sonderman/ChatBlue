@@ -233,6 +233,13 @@ class BluetoothScanScreen extends ConsumerWidget {
     final isConnected = ref.read(btTransportProvider).isConnected;
     final awaiting = ref.read(btTransportProvider.notifier).isAwaitingAcceptance;
     if (connected == false && !isConnected && !awaiting) {
+      // A declined request is announced by the transport's own notice card
+      // — don't overwrite it with a generic failure card (WFD/Nearby
+      // parity: both skip their card when the reason is the decline).
+      if (ref.read(btTransportProvider).lastConnectError ==
+          l10n.connectionDeclinedMessage) {
+        return;
+      }
       ConnectionNotice.show(
         title: l10n.couldNotConnectTitle,
         message: l10n.couldNotConnectMessage,

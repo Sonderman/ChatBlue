@@ -1092,4 +1092,105 @@ void main() {
       expect(stateOf(c, a).messages.length, count);
     });
   });
+
+  group('stale-state cleanup', () {
+    test('a late identity merge keeps the newest-first message order',
+        () async {
+      final database = AppDatabase(NativeDatabase.memory());
+      addTearDown(database.close);
+      final repo = SessionRepository(database);
+      final older = MessageModel(
+        id: 'm-old',
+        text: 'older',
+        isSentByMe: true,
+        timestamp: DateTime(2026, 1, 1, 10),
+      );
+      final newer = MessageModel(
+        id: 'm-new',
+        text: 'newer',
+        isSentByMe: false,
+        timestamp: DateTime(2026, 1, 1, 11),
+      );
+      await repo.saveChatSession(
+        sessionFixture(
+          id: 'stored-1',
+          name: 'PeerOne',
+          messages: [newer, older],
+        ),
+      );
+
+      final c = container(database: database);
+      addTearDown(c.dispose);
+      // Opened with an unknown identity: the key MISSes and a fresh (empty)
+      // session is created — exactly the late-identity scenario.
+      final arg = ChatOpenArg(transport: ChatSessionModel.transportBluetooth);
+      open(c, arg);
+      await pumpEventQueue();
+      expect(stateOf(c, arg).messages, isEmpty);
+
+      // The identity frame lands: the stored session for this peer is
+      // adopted into the fresh one.
+      binding.deviceName = 'PeerOne';
+      binding.emitPeerName('PeerOne');
+      await pumpEventQueue();
+      await pumpEventQueue();
+
+      final state = stateOf(c, arg);
+      expect(
+        state.messages.map((m) => m.id).toList(),
+        ['m-new', 'm-old'],
+        reason: 'the merge sorted ascending — the rendered (reverse: true) '
+            'and persisted list would show the whole chat upside down',
+      );
+      // The duplicate is gone and the merged history is stored under the
+      // live session id, order preserved.
+      expect(await repo.loadChatSession('stored-1'), isNull);
+      final merged = await repo.loadChatSession(state.chatSession.id);
+      expect(merged!.messages.map((m) => m.id).toList(), ['m-new', 'm-old']);
+
+      // Let the debounced merge save land while the database is still open:
+      // the dispose-time flush would otherwise race the tearDown close and
+      // log a rollback error.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+
+    test('a voice announcement from a dropped link does not misroute the '
+        'next image', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      // Voice announcement arrives…
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_AUDIO@@{"duration":"0:03"}',
+        kind: 'text',
+      );
+      // …and the link drops before the audio bytes.
+      binding.emitConnection(false);
+      await pumpEventQueue();
+
+      // Reconnect: the peer's next IMAGE bytes must land as an image, not
+      // be saved as a .m4a voice message off the stale announcement.
+      binding.emitConnection(true);
+      binding.emitData(Uint8List.fromList([1, 2, 3, 4]), '', kind: 'bytes');
+      await pumpEventQueue();
+      await pumpEventQueue();
+
+      final msgs = stateOf(c, arg).messages;
+      expect(msgs.any((m) => m.transferKind == 'audio'), isFalse,
+          reason: 'stale _pendingAudioMeta routed image bytes to the audio '
+              'handler');
+      expect(msgs.any((m) => m.imagePath != null), isTrue);
+
+      // Drain the debounced finalize save the same way.
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+    });
+  });
 }

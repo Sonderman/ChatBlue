@@ -309,6 +309,38 @@ void main() {
       expect(state.connectedDevice?.address, 'BB:BB:BB:BB:BB:BB');
       expect(state.connectedDevice?.name, 'PeerB');
     });
+
+    test(
+        'a fresh dial drops the previous failure reason (stale reason never '
+        'masquerades as this dial result)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+      final notifier = c.read(btTransportProvider.notifier);
+
+      // A previous attempt left a failure reason behind (invalid stored
+      // address — the poisoned-uid class).
+      expect(
+        await notifier.connectToPeer('65eab5b0-4d42-493f-acfa-74c315e46cc6'),
+        isFalse,
+      );
+      expect(
+        c.read(btTransportProvider).lastConnectError,
+        AppLocalizationsEn().invalidBtAddressMessage,
+      );
+
+      // The next dial must WIPE it up front: a stale reason would otherwise
+      // leak into this attempt (the WFD session search bails early on a
+      // non-null reason, and the screens' declined-equality guards can
+      // suppress the next failure's notice when the stale text is the
+      // declined message).
+      final connectFuture = notifier.connectToPeer('AA:BB:CC:DD:EE:FF');
+      expect(c.read(btTransportProvider).lastConnectError, isNull);
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:BB:CC:DD:EE:FF', name: 'PeerOne'),
+      );
+      expect(await connectFuture, isTrue);
+    });
   });
 
   group('Wi-Fi Direct', () {

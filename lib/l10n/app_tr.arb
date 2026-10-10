@@ -95,6 +95,7 @@
   "imageCaption": "[Görsel] ({size} bytes)",
   "imageSendFailed": "[Görsel gönderilemedi]",
   "imageReceiveFailed": "[Görsel alınamadı]",
+  "audioSendFailed": "[Ses gönderilemedi]",
   "cannotConnectTitle": "Bağlanılamıyor",
   "noDeviceAddressMessage": "Bu sohbet için kayıtlı bir cihaz adresi yok.",
   "invalidBtAddressMessage": "Kayıtlı Bluetooth adresi geçersiz. Bluetooth sekmesinden yeniden bağlanın.",

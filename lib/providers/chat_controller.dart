@@ -553,6 +553,10 @@ class ChatController extends Notifier<ChatState>
     final Future<void> flush = _flushPendingSave();
     // Discard queued sends: there is no socket after the chat closes.
     _sendQueue.clear();
+    // A voice announcement whose bytes never arrived must not survive the
+    // teardown: the next connection's first bytes frame would be routed to
+    // the audio handler and saved as a .m4a instead of an image.
+    _pendingAudioMeta = null;
     // No peer answers deferred-download requests once the chat closes.
     for (final t in _fetchWatchdogs.values) {
       t.cancel();
@@ -588,6 +592,9 @@ class ChatController extends Notifier<ChatState>
       _sendHistorySync();
     } else {
       _syncSentForSession = false;
+      // Same for an announcement whose bytes died with the link: without
+      // this clear the next connection's first bytes frame misroutes.
+      _pendingAudioMeta = null;
       // A dropped link kills any in-flight byte transfer: resolve its
       // bubble now instead of leaving it stuck at its last reading.
       _failActiveTransfers();
@@ -723,7 +730,11 @@ class ChatController extends Notifier<ChatState>
               '${m.text}|${m.imagePath}';
       if (seen.add(k)) combined.add(m);
     }
-    combined.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    // Newest-first, matching the list contract everywhere else (live frames
+    // are inserted at index 0; the list renders with reverse: true and the
+    // repo persists index order) — an ascending merge showed (and persisted)
+    // the whole conversation upside down.
+    combined.sort((a, b) => b.timestamp.compareTo(a.timestamp));
     final session = state.chatSession;
     final merged = ChatSessionModel(
       id: session.id,
@@ -1681,6 +1692,9 @@ class ChatController extends Notifier<ChatState>
   /// progress event (a blocked write unblocking) cannot recreate a bubble.
   void _failOutgoingTransfer() {
     if (_closed) return;
+    // Captured BEFORE the cleanup below: the failed transfer's kind picks
+    // its label (a voice failure must not read "image").
+    final wasAudio = _pendingOutgoingAudioText != null;
     _outgoingStallTimer?.cancel();
     _outgoingStallTimer = null;
     _outgoingTransferFailed = true;
@@ -1700,7 +1714,7 @@ class ChatController extends Notifier<ChatState>
     if (idx == -1) return;
     final l10n = ref.read(appLocalizationsProvider);
     msgs[idx] = msgs[idx].copyWith(
-      text: l10n.imageSendFailed,
+      text: wasAudio ? l10n.audioSendFailed : l10n.imageSendFailed,
       isTransferring: false,
     );
     state = state.copyWith(messages: msgs);
@@ -1964,23 +1978,13 @@ class ChatController extends Notifier<ChatState>
         await _binding.sendMessage(job.text!);
       }
     } catch (_) {
+      // A thrown send resolves the transfer through the same failure path
+      // the stall watchdog and disconnects use: every pending marker is
+      // cleared (audio text included) and only the transfer's OWN bubble is
+      // marked — the old inline fallback could overwrite the newest message
+      // (index 0) when no progress event had ever arrived.
       if (job.kind == _SendKind.bytes && !_closed) {
-        final msgs = List.of(state.messages);
-        final int? idx = _outgoingProgressId == null
-            ? (msgs.isNotEmpty ? 0 : null)
-            : msgs.indexWhere((m) => m.id == _outgoingProgressId);
-        if (idx != null && idx >= 0 && idx < msgs.length) {
-          final l10n = ref.read(appLocalizationsProvider);
-          msgs[idx] = msgs[idx].copyWith(
-            text: l10n.imageSendFailed,
-            isTransferring: false,
-          );
-          state = state.copyWith(messages: msgs);
-        }
-        _pendingOutgoingBytes = null;
-        _outgoingProgressId = null;
-        _sendingImagePath = null;
-        _outgoingTransferFailed = true;
+        _failOutgoingTransfer();
       }
     }
     // Even when the future completes without any progress events, the next

@@ -106,6 +106,10 @@ class NearbyManager(private val context: Context) {
         const val FRAME_TYPE_TEXT: Byte = 1
         const val FRAME_TYPE_BYTES: Byte = 2
 
+        /// Upper bound for one frame's declared payload length — see the
+        /// BluetoothClassicManager note (malformed-header hardening).
+        const val MAX_FRAME_BYTES: Int = 64 * 1024 * 1024
+
         /// Outgoing frame chunk size (BYTES payloads are capped at
         /// ConnectionsClient.MAX_BYTES_DATA_SIZE ≈ 1 MB; stay well under).
         const val CHUNK_BYTES: Int = 262144
@@ -476,12 +480,23 @@ class NearbyManager(private val context: Context) {
         if (accumulator.size >= 5) {
             val type = accumulator[0]
             val len = frameLength()
-            val cur = maxOf(0, minOf(len, accumulator.size - 5))
-            onTransferProgress?.invoke("in", cur, len, kindOf(type))
+            if (len in 0..MAX_FRAME_BYTES) {
+                val cur = maxOf(0, minOf(len, accumulator.size - 5))
+                onTransferProgress?.invoke("in", cur, len, kindOf(type))
+            }
         }
         while (accumulator.size >= 5) {
             val type = accumulator[0]
             val len = frameLength()
+            if (len < 0 || len > MAX_FRAME_BYTES) {
+                // Signed length reassembly: an invalid value slipped past
+                // the completeness check and crashed the callback thread in
+                // copyOfRange (uncaught -> process death). Fail the link
+                // clearly instead of parsing garbage.
+                onSocketError?.invoke("Protocol error: invalid frame length: $len")
+                disconnect()
+                return
+            }
             if (accumulator.size < 5 + len) break
             val payload = accumulator.copyOfRange(5, 5 + len)
             accumulator = accumulator.copyOfRange(5 + len, accumulator.size)

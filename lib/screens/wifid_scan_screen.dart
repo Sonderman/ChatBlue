@@ -25,8 +25,14 @@ class _WifiDirectScanScreenState extends ConsumerState<WifiDirectScanScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     // Fresh radio + flow state on mount: the toggles can change outside
-    // the app (quick settings) between sessions.
-    unawaited(ref.read(wdTransportProvider.notifier).onAppResumed());
+    // the app (quick settings) between sessions. Deferred one frame: the
+    // notifier's synchronous state write inside the widget-build stack
+    // trips Riverpod's debug guard — `unawaited` swallowed the throw, so
+    // the mount refresh was silently dead in debug builds.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(ref.read(wdTransportProvider.notifier).onAppResumed());
+    });
   }
 
   @override

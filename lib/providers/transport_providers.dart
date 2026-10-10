@@ -537,7 +537,7 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     }
     // Fresh attempt: drop the previous failure reason so a stale reason
     // (e.g. a previous decline) can never masquerade as this dial's result.
-    state = state.copyWith(lastConnectError: null);
+    state = state.copyWith(clearLastConnectError: true);
     final Completer<bool> completer = Completer<bool>();
     _pendingConnectCompleter = completer;
     _dialSettle = Completer<void>();
@@ -975,7 +975,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
     required String? address,
     String? name,
   }) async {
-    state = state.copyWith(lastConnectError: null);
+    state = state.copyWith(clearLastConnectError: true);
     await _refreshWifiState();
     if (!state.isWifiOn) {
       await enableWifi();
@@ -1192,7 +1192,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
     _outgoingConnect = true;
     _connectInitiatedAt = DateTime.now();
     _lastConnectAddress = address;
-    state = state.copyWith(lastConnectError: null);
+    state = state.copyWith(clearLastConnectError: true);
     if (kDebugMode) {
       debugPrint('connecting to device: $address');
     }

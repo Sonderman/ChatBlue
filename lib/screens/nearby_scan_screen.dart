@@ -30,8 +30,14 @@ class _NearbyScanScreenState extends ConsumerState<NearbyScanScreen>
     WidgetsBinding.instance.addObserver(this);
     // Fresh precondition + flow state on mount: permissions and the
     // location / Wi‑Fi / Bluetooth toggles can change outside the app
-    // between visits.
-    unawaited(ref.read(nearbyTransportProvider.notifier).onAppResumed());
+    // between visits. Deferred one frame: the notifier's synchronous state
+    // write inside the widget-build stack trips Riverpod's debug guard —
+    // `unawaited` swallowed the throw, so the mount refresh was silently
+    // dead in debug builds.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(ref.read(nearbyTransportProvider.notifier).onAppResumed());
+    });
   }
 
   @override
