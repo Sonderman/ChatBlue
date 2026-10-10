@@ -248,7 +248,18 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
     _service.onSocketDisconnected = (reason) {
       _settleDial();
       final bool wasConnected = state.isConnected;
-      state = state.copyWith(isConnected: false);
+      // The device binding describes a LIVE link — a stale peer kept across
+      // disconnects used to survive into the NEXT connection: the READY
+      // frame binds `connectedDevice ?? _pendingRemote`, so dialing device B
+      // after device A reopened A's session (POCO's chat and history) while
+      // B's peer sat on the other end — and the history sync then pushed
+      // A's conversation to B. (Device-reported: Redmi→J7 opened the POCO
+      // chat.)
+      state = state.copyWith(
+        isConnected: false,
+        connectedDevice: null,
+        clearConnectedDevice: true,
+      );
       ConnectionRequestBanner.dismiss();
       // Keep the initiation window while OUR dial is still in flight: a
       // disconnect event during the attempt (native cleanup of a previous
@@ -484,7 +495,15 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
       _connectInitiatedAt = null;
       ConnectionRequestBanner.dismiss();
       state = state.copyWith(isConnected: true);
-      state = state.copyWith(connectedDevice: state.connectedDevice ?? _pendingRemote);
+      // _pendingRemote is the CURRENT socket's remote (set by
+      // onSocketConnected): it must WIN over a leftover binding — the old
+      // `connectedDevice ?? _pendingRemote` order reopened the PREVIOUS
+      // peer's session on this connection (device-reported: Redmi→J7 opened
+      // the POCO chat). A second READY for the same link (pending already
+      // consumed) still preserves the device bound by the first.
+      state = state.copyWith(
+        connectedDevice: _pendingRemote ?? state.connectedDevice,
+      );
       _pendingRemote = null;
       _openChat();
       return;
@@ -1353,8 +1372,14 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
       ConnectionRequestBanner.dismiss();
       state = state.copyWith(isConnected: true);
       state = state.copyWith(peers: const []);
+      // _pendingRemote is the CURRENT socket's peer (set by
+      // onSocketConnected): it wins over a leftover binding — the old
+      // `?? _pendingRemote` order kept the previous peer's NAME (the stable
+      // WFD MAC may rotate, but the name feeds the session-merge fallback
+      // and could reopen the wrong chat — the BT twin of this bug was
+      // device-reported).
       state = state.copyWith(
-        connectedDevice: state.connectedDevice ?? _pendingRemote,
+        connectedDevice: _pendingRemote ?? state.connectedDevice,
       );
       if (state.connectedDevice != null) {
         final current = state.connectedDevice!;
@@ -1524,7 +1549,15 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
     _service.onSocketDisconnected = (reason) {
       _settleDial();
       final bool wasConnected = state.isConnected;
-      state = state.copyWith(isConnected: false);
+      // Same stale-binding rule as the BT transport: the device binding
+      // only describes a live link — keeping it across disconnects let the
+      // NEXT dial's READY reopen the previous peer's session (with its
+      // history) while the new peer sat on the other end.
+      state = state.copyWith(
+        isConnected: false,
+        connectedDevice: null,
+        clearConnectedDevice: true,
+      );
       ConnectionRequestBanner.dismiss();
       // Same window rule as the BT transport: don't wipe the initiation
       // window while our dial is in flight (a mid-attempt disconnect must

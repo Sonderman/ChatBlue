@@ -231,6 +231,31 @@ class ChatController extends Notifier<ChatState>
   String? _outgoingProgressId;
   String? _incomingProgressId;
 
+  /// A bytes transfer that stops producing progress events is dead — a BT
+  /// link can die silently (or a frame's tail / a single platform-channel
+  /// event can be lost) and nothing else ever resolves the bubble: the user
+  /// is left staring at an eternal "100%" that the rounding produces even at
+  /// 99.5%. One watchdog per direction; every bytes progress event re-arms
+  /// its timer, a fire converts the stuck bubble into a visible failure.
+  /// Overridable in tests (the suite runs with milliseconds, not 20 s).
+  @visibleForTesting
+  static Duration transferStallTimeout = const Duration(seconds: 20);
+  Timer? _incomingStallTimer;
+  Timer? _outgoingStallTimer;
+
+  /// True while the current INCOMING bytes transfer has been declared dead
+  /// (watchdog fired / persist failed). Suppresses ghost progress bubbles
+  /// from a late trickle of the same stale frame; cleared when a fresh
+  /// frame starts (its first progress event reads ≤ one accumulation
+  /// window) or when the data event arrives late and resurrects the bubble.
+  bool _incomingTransferFailed = false;
+
+  /// Same for OUTGOING: set when the transfer was declared dead, cleared
+  /// when a new bytes job starts draining (see the guard in
+  /// [_updateOutgoingProgress] — a late unblocking write used to recreate
+  /// the bubble the watchdog had just failed).
+  bool _outgoingTransferFailed = false;
+
   // Holds bytes for the currently sending image to convert the progress
   // bubble into a final image message.
   Uint8List? _pendingOutgoingBytes;
@@ -518,6 +543,10 @@ class ChatController extends Notifier<ChatState>
 
   void _teardown({required bool disconnectTransport}) {
     _saveDebounce?.cancel();
+    _incomingStallTimer?.cancel();
+    _incomingStallTimer = null;
+    _outgoingStallTimer?.cancel();
+    _outgoingStallTimer = null;
     // Capture the flush future: the pending write must land. Calling
     // _flushPendingSave() again later would be a no-op (the debounce is
     // already consumed).
@@ -559,6 +588,9 @@ class ChatController extends Notifier<ChatState>
       _sendHistorySync();
     } else {
       _syncSentForSession = false;
+      // A dropped link kills any in-flight byte transfer: resolve its
+      // bubble now instead of leaving it stuck at its last reading.
+      _failActiveTransfers();
     }
   }
 
@@ -863,15 +895,23 @@ class ChatController extends Notifier<ChatState>
       if (direction == 'out') {
         state = state.copyWith(outgoingTransfer: transfer);
         if (kind == 'bytes') {
+          _armOutgoingStallWatchdog();
           _updateOutgoingProgress(transfer);
         }
       } else {
         state = state.copyWith(incomingTransfer: transfer);
-        // For incoming, only render intermediate progress; finalization
-        // happens when the actual data bytes arrive in onSocketData.
-        if (kind == 'bytes' &&
-            !(transfer.total > 0 && transfer.current >= transfer.total)) {
-          _updateIncomingProgress(transfer);
+        if (kind == 'bytes') {
+          _armIncomingStallWatchdog();
+          // A reading within the first accumulation window marks a fresh
+          // frame: a previously failed attempt is no longer "dead" (the
+          // peer may simply retry the same picture).
+          if (transfer.current <= 4096) _incomingTransferFailed = false;
+          if (!_incomingTransferFailed) {
+            // The FINAL (current >= total) event must land too: the bubble
+            // then carries the exact byte count, which is what tells a
+            // complete-but-stuck frame apart from a stalled wire.
+            _updateIncomingProgress(transfer);
+          }
         }
       }
       if (kDebugMode && showDebugLogs) {
@@ -933,6 +973,9 @@ class ChatController extends Notifier<ChatState>
       _syncPrefix +
           jsonEncode({
             'type': 'manifest',
+            // Data-plane protocol version: absent on pre-versioning builds
+            // (read as v1). A mismatch against the peer's is logged.
+            'pv': syncProtocolVersion,
             'items': [
               for (final e in counts.entries) {'h': e.key, 'n': e.value},
             ],
@@ -988,6 +1031,21 @@ class ChatController extends Notifier<ChatState>
     _fetchWatchdogs.remove(id)?.cancel();
   }
 
+  /// Logs the peer's data-plane protocol version (carried by its sync
+  /// manifest). Absent on builds older than the versioning round → read as
+  /// v1. A mismatch prints both versions so an incompatible pair of builds
+  /// (two phones, different installs) is identifiable from the logs in one
+  /// line.
+  void _logPeerProtocolVersion(Object? raw) {
+    final int peer = raw is int ? raw : 1;
+    if (kDebugMode && showDebugLogs) {
+      debugPrint(
+        'Sync protocol: peer v$peer, local v$syncProtocolVersion'
+        '${peer == syncProtocolVersion ? '' : ' — MISMATCH'}',
+      );
+    }
+  }
+
   /// Dispatches an incoming sync packet by its `type`:
   /// - `manifest`  → compare against local messages, request what's missing
   /// - `request`   → send the requested messages (as `message` packets)
@@ -1004,6 +1062,7 @@ class ChatController extends Notifier<ChatState>
         case 'message':
           await _applySyncMessages(decoded['messages']);
         case 'manifest':
+          _logPeerProtocolVersion(decoded['pv']);
           await _handleSyncManifest(decoded['items']);
         case 'request':
           await _handleSyncRequest(decoded['items']);
@@ -1400,10 +1459,25 @@ class ChatController extends Notifier<ChatState>
     // second transfer) are not clobbered by a stale write-back.
     final targetId = _incomingProgressId;
     _incomingProgressId = null;
+    _incomingStallTimer?.cancel();
+    _incomingStallTimer = null;
 
-    final filePath = await _persistIncomingBytes(bytes, 'jpg');
+    final String filePath;
+    try {
+      filePath = await _persistIncomingBytes(bytes, 'jpg');
+    } catch (e) {
+      // A failed disk write used to strand the progress bubble at its last
+      // reading (an unhandled async error the UI never reflected).
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Incoming image persist failed: $e');
+      }
+      if (_closed) return;
+      _failIncomingTransfer();
+      return;
+    }
     if (_closed) return;
 
+    _incomingTransferFailed = false;
     final l10n = ref.read(appLocalizationsProvider);
     final caption = l10n.imageCaption('${bytes.lengthInBytes}');
     final msgs = List.of(state.messages);
@@ -1414,6 +1488,17 @@ class ChatController extends Notifier<ChatState>
       // any incoming progress bubble still in the list.
       idx = msgs.indexWhere(
         (m) => m.isTransferring && m.transferKind == 'bytes' && !m.isSentByMe,
+      );
+    }
+    if (idx == -1) {
+      // The stall watchdog may have failed the bubble before a late tail
+      // arrived: resurrect that placeholder instead of appending a second
+      // message for the same picture.
+      idx = msgs.indexWhere(
+        (m) =>
+            !m.isSentByMe &&
+            m.imagePath == null &&
+            m.text == l10n.imageReceiveFailed,
       );
     }
     if (idx != -1) {
@@ -1447,6 +1532,10 @@ class ChatController extends Notifier<ChatState>
         ? -1
         : msgs.indexWhere((m) => m.id == _outgoingProgressId);
     if (idx == -1) {
+      // A straggler event after the transfer was declared dead (blocked
+      // write unblocking late) must not plant a ghost bubble that nothing
+      // will ever resolve; a fresh job clears the flag.
+      if (_outgoingTransferFailed) return;
       _outgoingProgressId = null;
       final bubble = _newProgressBubble(isSentByMe: true, state: transfer);
       _outgoingProgressId = bubble.id;
@@ -1501,6 +1590,14 @@ class ChatController extends Notifier<ChatState>
         ? -1
         : msgs.indexWhere((m) => m.id == _incomingProgressId);
     if (idx == -1) {
+      // Only genuine intermediate readings create a bubble: a straggler
+      // FINAL event (fired after the data frame already consumed the id)
+      // must not plant a ghost bubble that nothing will resolve. Tiny
+      // single-read images never show a progress bubble — the data frame
+      // inserts its message directly (same as before). Degenerate
+      // zero-total readings still create (an RF-5 counter-case), and the
+      // stall watchdog resolves them like any other dead transfer.
+      if (transfer.total > 0 && transfer.current >= transfer.total) return;
       _incomingProgressId = null;
       final bubble = _newProgressBubble(isSentByMe: false, state: transfer);
       _incomingProgressId = bubble.id;
@@ -1511,10 +1608,110 @@ class ChatController extends Notifier<ChatState>
         text: _progressPercent(transfer),
         transferCurrent: transfer.current,
         transferTotal: transfer.total,
-        isTransferring: transfer.current < transfer.total,
+        // Stays a progress bubble even after the final progress event: the
+        // data frame is what finalizes it — or the stall watchdog fails it.
+        isTransferring: true,
       );
     }
     state = state.copyWith(messages: msgs);
+  }
+
+  /// (Re)arms the stall watchdog for the INCOMING bytes transfer. A healthy
+  /// transfer emits a progress event per socket read (tens of milliseconds
+  /// apart); a timed-out silent gap means the link died mid-frame or a
+  /// frame tail / platform event was lost — nothing else would ever resolve
+  /// the bubble, which is exactly the "receiving 100% forever" bug.
+  void _armIncomingStallWatchdog() {
+    _incomingStallTimer?.cancel();
+    _incomingStallTimer = Timer(transferStallTimeout, () {
+      _incomingStallTimer = null;
+      if (_closed) return;
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Incoming transfer stalled — failing its bubble');
+      }
+      _failIncomingTransfer();
+    });
+  }
+
+  /// Same for the OUTGOING bytes transfer: a write loop blocked on a dead
+  /// link emits no further progress and its send future never completes.
+  void _armOutgoingStallWatchdog() {
+    _outgoingStallTimer?.cancel();
+    _outgoingStallTimer = Timer(transferStallTimeout, () {
+      _outgoingStallTimer = null;
+      if (_closed) return;
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Outgoing transfer stalled — failing its bubble');
+      }
+      _failOutgoingTransfer();
+    });
+  }
+
+  /// Converts the in-flight incoming bytes bubble into a visible failure.
+  /// Called by the stall watchdog, a failed disk write, and on disconnect —
+  /// without it the bubble sat at its last reading (rounded up to a
+  /// deceptive "100%") forever, even after the link was long gone.
+  void _failIncomingTransfer() {
+    if (_closed) return;
+    _incomingStallTimer?.cancel();
+    _incomingStallTimer = null;
+    _incomingTransferFailed = true;
+    final msgs = List.of(state.messages);
+    int idx = _incomingProgressId == null
+        ? -1
+        : msgs.indexWhere((m) => m.id == _incomingProgressId);
+    if (idx == -1) {
+      idx = msgs.indexWhere(
+        (m) => m.isTransferring && m.transferKind == 'bytes' && !m.isSentByMe,
+      );
+    }
+    _incomingProgressId = null;
+    if (idx == -1) return;
+    final l10n = ref.read(appLocalizationsProvider);
+    msgs[idx] = msgs[idx].copyWith(
+      text: l10n.imageReceiveFailed,
+      isTransferring: false,
+    );
+    state = state.copyWith(messages: msgs);
+    _scheduleSave();
+  }
+
+  /// Same for the outgoing bubble (see [_failIncomingTransfer]). Also drops
+  /// the pending payload and flags the transfer dead so a late straggler
+  /// progress event (a blocked write unblocking) cannot recreate a bubble.
+  void _failOutgoingTransfer() {
+    if (_closed) return;
+    _outgoingStallTimer?.cancel();
+    _outgoingStallTimer = null;
+    _outgoingTransferFailed = true;
+    final msgs = List.of(state.messages);
+    int idx = _outgoingProgressId == null
+        ? -1
+        : msgs.indexWhere((m) => m.id == _outgoingProgressId);
+    if (idx == -1) {
+      idx = msgs.indexWhere(
+        (m) => m.isTransferring && m.transferKind == 'bytes' && m.isSentByMe,
+      );
+    }
+    _outgoingProgressId = null;
+    _pendingOutgoingBytes = null;
+    _pendingOutgoingAudioText = null;
+    _sendingImagePath = null;
+    if (idx == -1) return;
+    final l10n = ref.read(appLocalizationsProvider);
+    msgs[idx] = msgs[idx].copyWith(
+      text: l10n.imageSendFailed,
+      isTransferring: false,
+    );
+    state = state.copyWith(messages: msgs);
+    _scheduleSave();
+  }
+
+  /// Fails every in-flight byte transfer — a dropped link resolves all of
+  /// them NOW instead of leaving "100%" bubbles behind.
+  void _failActiveTransfers() {
+    _failIncomingTransfer();
+    _failOutgoingTransfer();
   }
 
   MessageModel _newProgressBubble({
@@ -1754,6 +1951,9 @@ class ChatController extends Notifier<ChatState>
   Future<void> _processSendJob(_OutgoingJob job) async {
     try {
       if (job.kind == _SendKind.bytes) {
+        // A fresh job revives the outgoing transfer state: the previous
+        // one's failure flag must not suppress this job's progress bubbles.
+        _outgoingTransferFailed = false;
         // Wire these before sendBytes so progress callbacks can finalize the
         // bubble; cleared on completion/failure in _updateOutgoingProgress.
         _pendingOutgoingBytes = job.bytes;
@@ -1780,6 +1980,7 @@ class ChatController extends Notifier<ChatState>
         _pendingOutgoingBytes = null;
         _outgoingProgressId = null;
         _sendingImagePath = null;
+        _outgoingTransferFailed = true;
       }
     }
     // Even when the future completes without any progress events, the next
@@ -1972,10 +2173,23 @@ class ChatController extends Notifier<ChatState>
     // is re-read afterwards (see _handleIncomingImage).
     final targetId = _incomingProgressId;
     _incomingProgressId = null;
+    _incomingStallTimer?.cancel();
+    _incomingStallTimer = null;
 
-    final filePath = await _persistIncomingBytes(bytes, 'm4a');
+    final String filePath;
+    try {
+      filePath = await _persistIncomingBytes(bytes, 'm4a');
+    } catch (e) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Incoming audio persist failed: $e');
+      }
+      if (_closed) return;
+      _failIncomingTransfer();
+      return;
+    }
     if (_closed) return;
 
+    _incomingTransferFailed = false;
     final msgs = List.of(state.messages);
     int idx =
         targetId == null ? -1 : msgs.indexWhere((m) => m.id == targetId);

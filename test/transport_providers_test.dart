@@ -230,6 +230,85 @@ void main() {
       );
       expect(c.read(btTransportProvider).isConnected, isFalse);
     });
+
+    test(
+        'a dropped link clears the bound device: the next dial binds ITS '
+        'peer, never the previous one (device-reported: Redmi→J7 opened the '
+        'POCO chat)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(btTransportProvider.notifier);
+      // First connection: Peer A (the POCO).
+      final connectA = notifier.connectToPeer('AA:AA:AA:AA:AA:AA');
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:AA:AA:AA:AA:AA', name: 'PeerA'),
+      );
+      await connectA;
+      service.onSocketData!(Uint8List(0), '@@CHATBLUE_CONNECT@@', kind: 'text');
+      await pumpEventQueue();
+      expect(c.read(btTransportProvider).connectedDevice?.address,
+          'AA:AA:AA:AA:AA:AA');
+
+      // Peer A drops: the binding must not survive its link — a stale
+      // binding would let the NEXT READY reopen A's session.
+      service.onSocketDisconnected?.call('remote closed');
+      expect(c.read(btTransportProvider).connectedDevice, isNull,
+          reason: 'the dead link left its device bound');
+
+      // Second dial: Peer B (the J7). Its READY must bind B, not A.
+      final connectB = notifier.connectToPeer('BB:BB:BB:BB:BB:BB');
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'BB:BB:BB:BB:BB:BB', name: 'PeerB'),
+      );
+      await connectB;
+      service.onSocketData!(Uint8List(0), '@@CHATBLUE_CONNECT@@', kind: 'text');
+      await pumpEventQueue();
+      final state = c.read(btTransportProvider);
+      expect(state.isConnected, isTrue);
+      expect(state.connectedDevice?.address, 'BB:BB:BB:BB:BB:BB');
+      expect(state.connectedDevice?.name, 'PeerB',
+          reason: 'the previous peer leaked into this binding — its chat '
+              'would open with the wrong session and sync the wrong history');
+    });
+
+    test(
+        'a READY arriving after a silent socket replacement binds the fresh '
+        'peer (no disconnect event needed)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(btTransportProvider.notifier);
+      // Bind Peer A.
+      final connectA = notifier.connectToPeer('AA:AA:AA:AA:AA:AA');
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'AA:AA:AA:AA:AA:AA', name: 'PeerA'),
+      );
+      await connectA;
+      service.onSocketData!(Uint8List(0), '@@CHATBLUE_CONNECT@@', kind: 'text');
+      await pumpEventQueue();
+      expect(c.read(btTransportProvider).connectedDevice?.address,
+          'AA:AA:AA:AA:AA:AA');
+
+      // The native layer replaces the socket with Peer B WITHOUT a
+      // disconnect event (single-socket replacement). The next dial's
+      // READY must prefer the CURRENT socket's remote over the leftover
+      // binding — the old `?? _pendingRemote` order kept A and reopened
+      // A's session (the defensive half of the device-reported bug).
+      final connectB = notifier.connectToPeer('BB:BB:BB:BB:BB:BB');
+      service.onSocketConnected?.call(
+        BtDeviceInfo(address: 'BB:BB:BB:BB:BB:BB', name: 'PeerB'),
+      );
+      await connectB;
+      service.onSocketData!(Uint8List(0), '@@CHATBLUE_CONNECT@@', kind: 'text');
+      await pumpEventQueue();
+      final state = c.read(btTransportProvider);
+      expect(state.isConnected, isTrue);
+      expect(state.connectedDevice?.address, 'BB:BB:BB:BB:BB:BB');
+      expect(state.connectedDevice?.name, 'PeerB');
+    });
   });
 
   group('Wi-Fi Direct', () {
@@ -408,6 +487,46 @@ void main() {
         WdPeerInfo(deviceAddress: 'p2p-1', deviceName: 'Redmi'),
       );
       expect(notifier.isAwaitingAcceptance, isTrue);
+    });
+
+    test(
+        'a dropped link clears the bound peer: the next dial binds ITS peer '
+        '(the previous name must not leak into the binding)', () async {
+      final c = container();
+      addTearDown(c.dispose);
+      await pumpEventQueue();
+
+      final notifier = c.read(wdTransportProvider.notifier);
+      service.wifiEnabled = true;
+
+      // First connection: Peer A.
+      final connectA = notifier.connectToPeer('p2p-1');
+      service.onSocketConnected?.call(
+        WdPeerInfo(deviceAddress: 'p2p-1', deviceName: 'PeerA'),
+      );
+      expect(await connectA, isTrue);
+      service.onSocketData!(Uint8List(0), '@@CHATBLUE_CONNECT@@', kind: 'text');
+      await pumpEventQueue();
+      expect(c.read(wdTransportProvider).connectedDevice?.deviceName, 'PeerA');
+
+      // Peer A drops: the binding must not survive its link.
+      service.onSocketDisconnected?.call('remote closed');
+      expect(c.read(wdTransportProvider).connectedDevice, isNull,
+          reason: 'the dead link left its peer bound');
+
+      // Second dial: its READY must bind the NEW peer.
+      final connectB = notifier.connectToPeer('p2p-2');
+      service.onSocketConnected?.call(
+        WdPeerInfo(deviceAddress: 'p2p-2', deviceName: 'PeerB'),
+      );
+      expect(await connectB, isTrue);
+      service.onSocketData!(Uint8List(0), '@@CHATBLUE_CONNECT@@', kind: 'text');
+      await pumpEventQueue();
+      final state = c.read(wdTransportProvider);
+      expect(state.isConnected, isTrue);
+      expect(state.connectedDevice?.deviceName, 'PeerB',
+          reason: 'the previous peer name leaked into this binding — the '
+              'session-merge fallback could reopen the wrong chat');
     });
   });
 }

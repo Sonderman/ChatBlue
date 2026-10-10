@@ -907,7 +907,12 @@ class ChatMessageBubble extends StatelessWidget {
   Widget _progressBubble(ChatPalette p, bool mine, AppLocalizations l10n) {
     final current = message.transferCurrent ?? 0;
     final total = message.transferTotal ?? 0;
-    final pct = total == 0 ? 0 : (current / total * 100).toStringAsFixed(0);
+    // Never render 100% before the transfer truly completed: rounding
+    // turned a stalled 99.7% into a deceptive "100%" that read as done
+    // (the stall watchdog resolves such bubbles, but the reading itself
+    // must stay honest in the meantime).
+    final int pctNum = total == 0 ? 0 : ((current / total) * 100).round();
+    final int pct = (current < total && pctNum >= 100) ? 99 : pctNum;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,

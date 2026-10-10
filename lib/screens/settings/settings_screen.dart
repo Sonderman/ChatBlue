@@ -17,6 +17,7 @@ class SettingsScreen extends ConsumerWidget {
     final scheme = Theme.of(context).colorScheme;
     final themeMode = ref.watch(themeModeProvider);
     final locale = ref.watch(localeProvider);
+    final packageInfo = ref.watch(packageInfoProvider).value;
 
     return Scaffold(
       appBar: AppBar(title: Text(l10n.settingsTab)),
@@ -41,22 +42,35 @@ class SettingsScreen extends ConsumerWidget {
                   ],
                 ),
                 const SizedBox(height: 12),
+                // Segment labels scale down instead of wrapping/clipping when
+                // squeezed: MIUI/HyperOS runs a larger system font scale and
+                // the widest theme label ("System") used to be cut off inside
+                // its equal-width segment box on those devices.
                 SegmentedButton<ThemeMode>(
                   segments: [
                     ButtonSegment(
                       value: ThemeMode.system,
                       icon: const Icon(Icons.brightness_auto_outlined),
-                      label: Text(l10n.themeSystem),
+                      label: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(l10n.themeSystem),
+                      ),
                     ),
                     ButtonSegment(
                       value: ThemeMode.light,
                       icon: const Icon(Icons.light_mode_outlined),
-                      label: Text(l10n.themeLight),
+                      label: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(l10n.themeLight),
+                      ),
                     ),
                     ButtonSegment(
                       value: ThemeMode.dark,
                       icon: const Icon(Icons.dark_mode_outlined),
-                      label: Text(l10n.themeDark),
+                      label: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(l10n.themeDark),
+                      ),
                     ),
                   ],
                   selected: {themeMode},
@@ -94,11 +108,17 @@ class SettingsScreen extends ConsumerWidget {
                   segments: [
                     ButtonSegment(
                       value: const Locale('en', 'US'),
-                      label: Text(l10n.languageEnglish),
+                      label: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(l10n.languageEnglish),
+                      ),
                     ),
                     ButtonSegment(
                       value: const Locale('tr', 'TR'),
-                      label: Text(l10n.languageTurkish),
+                      label: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(l10n.languageTurkish),
+                      ),
                     ),
                   ],
                   selected: {locale},
@@ -127,7 +147,16 @@ class SettingsScreen extends ConsumerWidget {
                     Icon(Icons.chat_bubble_outline, color: scheme.onPrimaryContainer),
               ),
               title: Text(appName),
-              subtitle: Text(l10n.versionLabel(appVersion)),
+              // Real installed version + build code (pubspec `version:` is
+              // the single source of truth; the constant is only the
+              // headless fallback when the platform info is unavailable).
+              subtitle: Text(
+                l10n.versionLabel(
+                  packageInfo == null
+                      ? appVersion
+                      : '${packageInfo.version} (build ${packageInfo.buildNumber})',
+                ),
+              ),
             ),
           ),
         ],

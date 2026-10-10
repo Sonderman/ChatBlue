@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:chatblue/config.dart';
 import 'package:chatblue/controllers/chat_transport_binding.dart';
 import 'package:chatblue/core/models/chatsession_model.dart';
 import 'package:chatblue/core/models/message_model.dart';
@@ -544,6 +545,58 @@ void main() {
       await pumpEventQueue();
       expect(stateOf(c, arg).messages.length, before);
     });
+
+    test('manifest carries the sync protocol version; an older peer without '
+        'it is read as v1 and still synced', () async {
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final arg = ChatOpenArg(
+        transport: ChatSessionModel.transportBluetooth,
+        session: sessionFixture(
+          messages: [
+            MessageModel(
+              id: 'm1',
+              text: 'hello',
+              isSentByMe: true,
+              timestamp: DateTime.now(),
+            ),
+          ],
+        ),
+      );
+      open(c, arg);
+      await pumpEventQueue();
+
+      // Our manifest advertises the local data-plane protocol version.
+      final manifest = binding.sentMessages
+          .firstWhere((m) => m.contains('"type":"manifest"'));
+      final decoded =
+          jsonDecode(manifest.substring('@@CHATBLUE_SYNC@@'.length))
+              as Map<String, dynamic>;
+      expect(decoded['pv'], syncProtocolVersion);
+
+      // A pre-versioning peer's manifest (no `pv`) is treated as v1 and the
+      // flow continues: the missing item is requested.
+      final peerHash =
+          't:${sha256.convert(utf8.encode('legacy-peer')).toString()}';
+      binding.emitData(
+        Uint8List(0),
+        '@@CHATBLUE_SYNC@@${jsonEncode({
+          'type': 'manifest',
+          'items': [
+            {'h': peerHash, 'n': 1},
+          ],
+        })}',
+        kind: 'text',
+      );
+      await pumpEventQueue();
+      expect(
+        binding.sentMessages.any(
+          (m) => m.contains('"type":"request"') && m.contains(peerHash),
+        ),
+        isTrue,
+      );
+    });
   });
 
   group('teardown', () {
@@ -805,6 +858,238 @@ void main() {
       final stored = await SessionRepository(database).loadChatSession('sess-1');
       expect(stored!.messages, isEmpty,
           reason: 'a pending save resurrected the cleared conversation');
+    });
+  });
+
+  group('transfer stall handling', () {
+    // The stall watchdog runs on real timers: shrink it to test speed and
+    // always restore the production value.
+    late Duration originalTimeout;
+
+    setUp(() {
+      originalTimeout = ChatController.transferStallTimeout;
+    });
+
+    tearDown(() {
+      ChatController.transferStallTimeout = originalTimeout;
+    });
+
+    /// Media finalizes write through compute: give the isolate real time.
+    Future<void> settleMedia() async {
+      await pumpEventQueue();
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      await pumpEventQueue();
+    }
+
+    ChatOpenArg arg() => ChatOpenArg(
+          transport: ChatSessionModel.transportBluetooth,
+          session: sessionFixture(),
+        );
+
+    test('a stalled incoming transfer fails visibly after the timeout', () async {
+      ChatController.transferStallTimeout = const Duration(milliseconds: 250);
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final a = arg();
+      open(c, a);
+      await pumpEventQueue();
+
+      // Native readings arrive until the wire dies at ~99.7% (which used to
+      // render as a deceptive, eternal "100%").
+      binding.emitProgress(
+          direction: 'in', current: 4096, total: 358000, kind: 'bytes');
+      binding.emitProgress(
+          direction: 'in', current: 357000, total: 358000, kind: 'bytes');
+      await pumpEventQueue();
+      expect(stateOf(c, a).messages.first.isTransferring, isTrue);
+
+      // No further event: the watchdog must resolve the bubble.
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      await pumpEventQueue();
+
+      final bubble = stateOf(c, a).messages.first;
+      expect(bubble.isTransferring, isFalse,
+          reason: 'the stall watchdog never resolved the bubble');
+      expect(bubble.text, '[Failed to receive image]');
+
+      // A late trickle of the SAME stale frame must not re-plant a ghost
+      // progress bubble.
+      final count = stateOf(c, a).messages.length;
+      binding.emitProgress(
+          direction: 'in', current: 357500, total: 358000, kind: 'bytes');
+      await pumpEventQueue();
+      expect(stateOf(c, a).messages.length, count);
+      expect(
+        stateOf(c, a).messages.any((m) => m.isTransferring),
+        isFalse,
+        reason: 'a straggler event recreated a stuck bubble',
+      );
+    });
+
+    test('the exact byte count of the final reading is kept', () async {
+      ChatController.transferStallTimeout = const Duration(seconds: 60);
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final a = arg();
+      open(c, a);
+      await pumpEventQueue();
+
+      binding.emitProgress(
+          direction: 'in', current: 50000, total: 358000, kind: 'bytes');
+      binding.emitProgress(
+          direction: 'in', current: 358000, total: 358000, kind: 'bytes');
+      await pumpEventQueue();
+
+      // The final (current == total) reading must land on the bubble BUT
+      // it must stay a progress bubble: only the data frame concludes it.
+      // This reading is what tells a complete frame apart from a stalled
+      // wire during on-device diagnosis.
+      final bubble = stateOf(c, a).messages.first;
+      expect(bubble.transferCurrent, 358000);
+      expect(bubble.isTransferring, isTrue);
+
+      binding.emitData(Uint8List(200), '', kind: 'bytes');
+      await settleMedia();
+      final done = stateOf(c, a).messages.first;
+      expect(done.imagePath, isNotNull);
+      expect(done.isTransferring, isFalse);
+    });
+
+    test('a post-finalize straggler event plants no ghost bubble', () async {
+      ChatController.transferStallTimeout = const Duration(seconds: 60);
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final a = arg();
+      open(c, a);
+      await pumpEventQueue();
+
+      binding.emitProgress(
+          direction: 'in', current: 4096, total: 100000, kind: 'bytes');
+      binding.emitData(Uint8List(200), '', kind: 'bytes');
+      await settleMedia();
+      expect(stateOf(c, a).messages.first.imagePath, isNotNull);
+
+      // The native decode path emits one more final progress event right
+      // after the data dispatch; with the id consumed it must be ignored.
+      binding.emitProgress(
+          direction: 'in', current: 100000, total: 100000, kind: 'bytes');
+      await pumpEventQueue();
+
+      final msgs = stateOf(c, a).messages;
+      expect(msgs.length, 1);
+      expect(msgs.any((m) => m.isTransferring), isFalse,
+          reason: 'a post-completion final event created a ghost bubble');
+    });
+
+    test('a disconnect fails the in-flight transfer immediately', () async {
+      ChatController.transferStallTimeout = const Duration(seconds: 60);
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final a = arg();
+      open(c, a);
+      await pumpEventQueue();
+
+      binding.emitProgress(
+          direction: 'in', current: 10000, total: 358000, kind: 'bytes');
+      await pumpEventQueue();
+      expect(stateOf(c, a).messages.first.isTransferring, isTrue);
+
+      binding.emitConnection(false);
+      await pumpEventQueue();
+
+      final bubble = stateOf(c, a).messages.first;
+      expect(bubble.isTransferring, isFalse,
+          reason: 'a dropped link left the transfer bubble stuck');
+      expect(bubble.text, '[Failed to receive image]');
+    });
+
+    test('a late tail resurrects the failed bubble instead of duplicating',
+        () async {
+      ChatController.transferStallTimeout = const Duration(milliseconds: 250);
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final a = arg();
+      open(c, a);
+      await pumpEventQueue();
+
+      binding.emitProgress(
+          direction: 'in', current: 4096, total: 358000, kind: 'bytes');
+      binding.emitProgress(
+          direction: 'in', current: 357000, total: 358000, kind: 'bytes');
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      await pumpEventQueue();
+      expect(stateOf(c, a).messages.first.text, '[Failed to receive image]');
+
+      // The tail finally arrives: the image lands in the failed bubble.
+      binding.emitData(Uint8List(200), '', kind: 'bytes');
+      await settleMedia();
+
+      final msgs = stateOf(c, a).messages;
+      expect(msgs.length, 1,
+          reason: 'failed placeholder plus image: duplicated message');
+      expect(msgs.first.imagePath, isNotNull);
+    });
+
+    test('a completed incoming transfer is not failed by the watchdog',
+        () async {
+      ChatController.transferStallTimeout = const Duration(milliseconds: 250);
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final a = arg();
+      open(c, a);
+      await pumpEventQueue();
+
+      binding.emitProgress(
+          direction: 'in', current: 4096, total: 358000, kind: 'bytes');
+      binding.emitProgress(
+          direction: 'in', current: 358000, total: 358000, kind: 'bytes');
+      binding.emitData(Uint8List(200), '', kind: 'bytes');
+      await settleMedia();
+
+      // The data-frame finalize cancelled the watchdog; waiting it out must
+      // not corrupt the finished image message.
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      await pumpEventQueue();
+
+      final msgs = stateOf(c, a).messages;
+      expect(msgs.first.imagePath, isNotNull);
+      expect(msgs.first.isTransferring, isFalse);
+      expect(msgs.first.text.startsWith('[Image]'), isTrue);
+    });
+
+    test('an outgoing stalled transfer fails visibly', () async {
+      ChatController.transferStallTimeout = const Duration(milliseconds: 250);
+      binding.connected = true;
+      final c = container();
+      addTearDown(c.dispose);
+      final a = arg();
+      open(c, a);
+      await pumpEventQueue();
+
+      binding.emitProgress(
+          direction: 'out', current: 8192, total: 358000, kind: 'bytes');
+      await pumpEventQueue();
+      expect(stateOf(c, a).messages.first.isTransferring, isTrue);
+
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      await pumpEventQueue();
+      final bubble = stateOf(c, a).messages.first;
+      expect(bubble.isTransferring, isFalse);
+      expect(bubble.text, '[Failed to send image]');
+
+      // A blocked write unblocking late emits straggler events: they must
+      // not recreate the bubble the watchdog just failed.
+      final count = stateOf(c, a).messages.length;
+      binding.emitProgress(
+          direction: 'out', current: 16384, total: 358000, kind: 'bytes');
+      await pumpEventQueue();
+      expect(stateOf(c, a).messages.length, count);
     });
   });
 }

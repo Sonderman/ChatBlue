@@ -94,6 +94,7 @@
   "cameraSource": "Camera",
   "imageCaption": "[Image] ({size} bytes)",
   "imageSendFailed": "[Failed to send image]",
+  "imageReceiveFailed": "[Failed to receive image]",
   "cannotConnectTitle": "Cannot connect",
   "noDeviceAddressMessage": "No device address stored for this chat.",
   "invalidBtAddressMessage": "The stored Bluetooth address is invalid. Reconnect from the Bluetooth tab.",

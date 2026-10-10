@@ -5,6 +5,7 @@ import 'package:chatblue/l10n/app_localizations.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 /// Global navigator key — controller'lar context'siz navigasyon için kullanır;
 /// `main.dart`'taki MaterialApp'e bağlanır.
@@ -94,4 +95,13 @@ final appDatabaseProvider = Provider<AppDatabase>(
 /// Sohbet verisi deposu (drift). Tüm chat kodu bu provider üzerinden erişir.
 final sessionRepositoryProvider = Provider<SessionRepository>(
   (ref) => SessionRepository(ref.watch(appDatabaseProvider)),
+);
+
+/// Installed package info (versionName + versionCode). The About screen
+/// reads the ACTUAL APK metadata through this, so the shown version always
+/// matches the build on the device — single source of truth: pubspec
+/// `version: X.Y.Z+N`. Fail-open: an error (headless/test sessions) leaves
+/// `.value` null and the About screen falls back to [appVersion].
+final packageInfoProvider = FutureProvider<PackageInfo>(
+  (ref) => PackageInfo.fromPlatform(),
 );

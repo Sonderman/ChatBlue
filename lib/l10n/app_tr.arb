@@ -94,6 +94,7 @@
   "cameraSource": "Kamera",
   "imageCaption": "[Görsel] ({size} bytes)",
   "imageSendFailed": "[Görsel gönderilemedi]",
+  "imageReceiveFailed": "[Görsel alınamadı]",
   "cannotConnectTitle": "Bağlanılamıyor",
   "noDeviceAddressMessage": "Bu sohbet için kayıtlı bir cihaz adresi yok.",
   "invalidBtAddressMessage": "Kayıtlı Bluetooth adresi geçersiz. Bluetooth sekmesinden yeniden bağlanın.",
