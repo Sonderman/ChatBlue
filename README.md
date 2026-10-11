@@ -62,7 +62,7 @@ Depending on the Android version and the transport in use, the app may request:
 - Location (ACCESS_FINE_LOCATION / ACCESS_COARSE_LOCATION): required by the platform for device discovery; Nearby Connections also requires location services to be on
 - NEARBY_WIFI_DEVICES (Android 13+): Wi-Fi Direct and Nearby
 - Microphone (RECORD_AUDIO): voice messages
-- READ_MEDIA_IMAGES / storage (older versions): saving received images to the gallery
+- Storage permissions (older Android versions only): saving received images to the gallery
 - No install-packages permission is used: APKs received over chat are saved to the Downloads folder and installed from the system file manager
 
 ### Getting Started

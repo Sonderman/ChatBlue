@@ -16,8 +16,11 @@
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-<!-- Media/storage permissions for saving images to gallery (Android 13+ uses READ_MEDIA_IMAGES) -->
-<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+<!-- Storage permissions for the legacy save path (old Android only).
+     READ_MEDIA_IMAGES is deliberately NOT declared: it is restricted by
+     Play's Photo and Video Permissions policy and the app has no qualifying
+     core use case — picking uses the system photo picker and saving goes
+     through MediaStore (no read access needed). -->
 <!-- For Android <= 12 -->
 <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" tools:replace="android:maxSdkVersion" />
 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />

@@ -63,7 +63,7 @@
     <li><strong>Nearby devices &mdash; Bluetooth / Wi&#8209;Fi</strong> (BLUETOOTH_SCAN, BLUETOOTH_CONNECT, BLUETOOTH_ADVERTISE, BLUETOOTH, BLUETOOTH_ADMIN, NEARBY_WIFI_DEVICES, ACCESS_WIFI_STATE, CHANGE_WIFI_STATE): to discover nearby devices, advertise your device to them, and open the direct radio links the app works over.</li>
     <li><strong>Location</strong> (ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION): Android requires a location permission for apps that scan for nearby Bluetooth/Wi&#8209;Fi devices; it is used only for device discovery. The app does not track your location, and a location is shared only if you explicitly attach one to a message.</li>
     <li><strong>Microphone</strong> (RECORD_AUDIO): only while you are recording a voice message. The recording stays on your device unless you send it.</li>
-    <li><strong>Photos and files</strong> (READ_MEDIA_IMAGES; READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE on older Android versions): to let you pick an image or file to send, and to save what you receive.</li>
+    <li><strong>Photos and files</strong> (storage permissions only on older Android versions &mdash; recent versions need none for picking or saving): to let you pick an image or file to send, and to save what you receive.</li>
     <li><strong>Network</strong> (INTERNET, ACCESS_NETWORK_STATE): used only to open direct device-to-device sockets on the local network (Wi&#8209;Fi Direct); the app runs no servers and does not transmit your content over the internet.</li>
   </ul>
   <p>The app does not use the camera, contacts, calendar or phone data.</p>
@@ -120,7 +120,7 @@
     <li><strong>Yakındaki cihazlar &mdash; Bluetooth / Wi&#8209;Fi</strong> (BLUETOOTH_SCAN, BLUETOOTH_CONNECT, BLUETOOTH_ADVERTISE, BLUETOOTH, BLUETOOTH_ADMIN, NEARBY_WIFI_DEVICES, ACCESS_WIFI_STATE, CHANGE_WIFI_STATE): yakındaki cihazları keşfetmek, cihazınızı onlara duyurmak ve uygulamanın &ccedil;alıştığı doğrudan radyo bağlantılarını a&ccedil;mak i&ccedil;in.</li>
     <li><strong>Konum</strong> (ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION): Android, yakındaki Bluetooth/Wi&#8209;Fi cihazlarını tarayan uygulamalar i&ccedil;in konum izni şartı koyar; yalnızca cihaz keşfi i&ccedil;in kullanılır. Uygulama konumunuzu takip etmez; konum yalnızca a&ccedil;ık&ccedil;a bir mesaja eklediğinizde paylaşılır.</li>
     <li><strong>Mikrofon</strong> (RECORD_AUDIO): yalnızca sesli mesaj kaydettiğiniz sırada. Kayıt, siz g&ouml;ndermedik&ccedil;e cihazınızda kalır.</li>
-    <li><strong>Fotoğraflar ve dosyalar</strong> (READ_MEDIA_IMAGES; eski Android s&uuml;r&uuml;mlerinde READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE): g&ouml;ndermek i&ccedil;in g&ouml;rsel veya dosya se&ccedil;ebilmeniz ve aldıklarınızı kaydedebilmeniz i&ccedil;in.</li>
+    <li><strong>Fotoğraflar ve dosyalar</strong> (depolama izinleri yalnızca eski Android s&uuml;r&uuml;mlerinde &mdash; yeni s&uuml;r&uuml;mlerde se&ccedil;im ve kaydetme i&ccedil;in hi&ccedil;biri gerekmez): g&ouml;ndermek i&ccedil;in g&ouml;rsel veya dosya se&ccedil;ebilmeniz ve aldıklarınızı kaydedebilmeniz i&ccedil;in.</li>
     <li><strong>Ağ</strong> (INTERNET, ACCESS_NETWORK_STATE): yalnızca yerel ağda doğrudan cihazdan cihaza soket a&ccedil;mak i&ccedil;in (Wi&#8209;Fi Direct); uygulama sunucu &ccedil;alıştırmaz ve i&ccedil;eriğinizi internet &uuml;zerinden iletmez.</li>
   </ul>
   <p>Uygulama kamera, kişiler, takvim veya telefon verisi kullanmaz.</p>

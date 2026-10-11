@@ -2082,24 +2082,25 @@ class ChatImagePreviewScreen extends StatelessWidget {
 
   Future<void> _saveToGallery(BuildContext context) async {
     final l10n = AppLocalizations.of(context)!;
-    // Request runtime permissions before saving. On Android 13+
-    // WRITE_EXTERNAL_STORAGE is ignored, so READ_MEDIA_IMAGES
-    // (Permission.photos) must be used instead of Permission.storage.
+    // Saving needs a runtime permission only on the LEGACY path (Android 9
+    // and below): Android 10+ saves through MediaStore and needs none.
+    // READ_MEDIA_IMAGES is deliberately never requested — it is restricted
+    // by Play's Photo and Video Permissions policy and unnecessary here.
     if (Platform.isAndroid) {
       final androidInfo = await DeviceInfoPlugin().androidInfo;
-      final status = androidInfo.version.sdkInt >= 33
-          ? await Permission.photos.request()
-          : await Permission.storage.request();
-      if (!status.isGranted) {
-        if (context.mounted) {
-          ConnectionNotice.show(
-            title: l10n.permissionTitle,
-            message: l10n.permissionRequiredMessage,
-            icon: Icons.lock_outline,
-            accent: Colors.amber,
-          );
+      if (androidInfo.version.sdkInt <= 28) {
+        final status = await Permission.storage.request();
+        if (!status.isGranted) {
+          if (context.mounted) {
+            ConnectionNotice.show(
+              title: l10n.permissionTitle,
+              message: l10n.permissionRequiredMessage,
+              icon: Icons.lock_outline,
+              accent: Colors.amber,
+            );
+          }
+          return;
         }
-        return;
       }
     } else if (Platform.isIOS) {
       var status = await Permission.photosAddOnly.request();
