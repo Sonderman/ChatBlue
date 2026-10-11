@@ -5,8 +5,12 @@ import 'package:chatblue/core/services/nearby_service.dart';
 import 'package:chatblue/l10n/app_localizations_en.dart';
 import 'package:chatblue/providers/app_providers.dart';
 import 'package:chatblue/providers/nearby_transport_providers.dart';
+import 'package:chatblue/providers/transport_providers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/fake_bt_service.dart';
+import 'support/fake_nearby_service.dart';
+import 'support/fake_wd_service.dart';
 
 /// Nearby transport notifier contract: service events drive UI state, our
 /// own dial never surfaces as an incoming request banner, preconditions gate
@@ -35,6 +39,16 @@ void main() {
           overrides: [
             nearbyTransportProvider.overrideWith(
               () => NearbyTransportNotifier(service: service),
+            ),
+            // Sibling transports exist so the cross-transport scan exclusion
+            // has something to read (idle fakes → the stop paths no-op);
+            // without them the exclusion would construct the REAL
+            // platform-channel-backed notifiers inside tests.
+            btTransportProvider.overrideWith(
+              () => BtTransportNotifier(service: FakeBtService()),
+            ),
+            wdTransportProvider.overrideWith(
+              () => WdTransportNotifier(service: FakeWdService()),
             ),
             appLocalizationsProvider.overrideWithValue(AppLocalizationsEn()),
           ],
@@ -543,122 +557,4 @@ void main() {
       expect(service.sendBytesCalls, hasLength(1));
     });
   });
-}
-
-class FakeNearbyService extends NearbyService {
-  bool playServices = true;
-  bool bluetoothEnabled = true;
-  bool canAdvertise = true;
-  bool locationPermission = true;
-  bool locationEnabled = true;
-  bool wifiEnabled = true;
-  bool enableBluetoothResult = true;
-
-  final List<String> startScanCalls = [];
-  final List<String> connectCalls = [];
-  final List<String> acceptCalls = [];
-  final List<String> rejectCalls = [];
-  final List<String> sendMessageCalls = [];
-  final List<Uint8List> sendBytesCalls = [];
-
-  @override
-  Future<void> initialize() async {}
-
-  @override
-  Future<NearbyStatus> getStatus() async => NearbyStatus(
-        playServices: playServices,
-        bluetoothEnabled: bluetoothEnabled,
-        canAdvertise: canAdvertise,
-        locationPermission: locationPermission,
-        locationEnabled: locationEnabled,
-        wifiEnabled: wifiEnabled,
-      );
-
-  @override
-  Future<String> getDeviceName() async => '';
-
-  int enableBluetoothCalls = 0;
-
-  @override
-  Future<bool> requestEnableBluetooth() async {
-    enableBluetoothCalls++;
-    return enableBluetoothResult;
-  }
-
-  int requestPermissionCalls = 0;
-
-  @override
-  Future<bool> requestNearbyPermissions() async {
-    requestPermissionCalls++;
-    return locationPermission;
-  }
-
-  int enableLocationCalls = 0;
-
-  @override
-  Future<bool> requestEnableLocation() async {
-    enableLocationCalls++;
-    return true;
-  }
-
-  int openAppSettingsCalls = 0;
-
-  @override
-  Future<bool> openAppSettings() async {
-    openAppSettingsCalls++;
-    return true;
-  }
-
-  @override
-  Future<void> startScan({required String name, required String uid}) async {
-    startScanCalls.add(uid);
-  }
-
-  int stopScanCalls = 0;
-
-  @override
-  Future<void> stopScan() async {
-    stopScanCalls++;
-  }
-
-  @override
-  Future<void> connect(String endpointId, {required String uid, required String name}) async {
-    connectCalls.add(endpointId);
-  }
-
-  @override
-  Future<void> accept(String endpointId) async {
-    acceptCalls.add(endpointId);
-  }
-
-  @override
-  Future<void> reject(String endpointId) async {
-    rejectCalls.add(endpointId);
-  }
-
-  int disconnectCalls = 0;
-
-  @override
-  Future<void> disconnect() async {
-    disconnectCalls++;
-  }
-
-  @override
-  Future<void> cancelConnect() async {}
-
-  @override
-  Future<bool> isConnected() async => false;
-
-  @override
-  Future<void> sendString(String text) async {
-    sendMessageCalls.add(text);
-  }
-
-  @override
-  Future<void> sendBytes(Uint8List bytes) async {
-    sendBytesCalls.add(bytes);
-  }
-
-  @override
-  Future<void> dispose() async {}
 }

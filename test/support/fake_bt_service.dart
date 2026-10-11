@@ -22,8 +22,14 @@ class FakeBtService extends BtClassicService {
     startScanCalls++;
   }
 
+  /// Number of [stopScan] calls — the cross-transport scan exclusion tests
+  /// assert that a scan start stops the OTHER transports' scan loops.
+  int stopScanCalls = 0;
+
   @override
-  Future<void> stopScan() async {}
+  Future<void> stopScan() async {
+    stopScanCalls++;
+  }
 
   @override
   Future<void> startServer(

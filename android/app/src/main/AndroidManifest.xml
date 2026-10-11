@@ -22,9 +22,9 @@
 <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" tools:replace="android:maxSdkVersion" />
 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
-<!-- Sideloading received APKs: without this the system installer silently
-     ignores our VIEW intent (Android 8+/MIUI). -->
-<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+<!-- No REQUEST_INSTALL_PACKAGES on purpose: Google Play restricts the
+     permission, so received APKs are saved into the Downloads folder and
+     the user installs them from the system file manager. -->
 <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

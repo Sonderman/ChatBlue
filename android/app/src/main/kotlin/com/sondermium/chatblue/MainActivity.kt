@@ -3,14 +3,18 @@ package com.sondermium.chatblue
 import android.Manifest
 import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.Intent
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -262,7 +266,8 @@ class MainActivity : FlutterActivity() {
     }
 
     /// Utility channel: open a received file via the system viewer
-    /// (FileProvider content uri + temporary read grant) and launch a maps
+    /// (FileProvider content uri + temporary read grant), save received
+    /// package archives into the public Downloads folder, and launch a maps
     /// app for coordinates (geo: intent with an https fallback).
     private fun setupUtilMethodChannelHandlers() {
         utilMethodChannel.setMethodCallHandler { call: MethodCall, result: MethodChannel.Result ->
@@ -279,6 +284,9 @@ class MainActivity : FlutterActivity() {
                         openMapIntent(lat, lng, result)
                     }
                 }
+                "saveApkToDownloads" -> {
+                    saveApkToDownloads(call.argument<String>("path"), result)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -287,11 +295,9 @@ class MainActivity : FlutterActivity() {
     /// Opens [path] with the system viewer. The file is copied into the
     /// cache first and served through the app's FileProvider (received files
     /// live under the app data dir, which an outgoing intent cannot hand out
-    /// directly). Returns "opened", "permission" or "failed": package
-    /// archives need the per-app install-unknown-apps grant first — until
-    /// it is given, OEM installers (MIUI/HyperOS) swallow the VIEW intent
-    /// silently, so the matching settings page opens instead and a notice
-    /// tells the user to tap again.
+    /// directly). Returns "opened" or "failed". Package archives do NOT go
+    /// through here — the Dart side routes them to saveApkToDownloads
+    /// (the app holds no install-packages permission; Play restricts it).
     private fun openFileWithViewer(path: String?, result: MethodChannel.Result) {
         if (path.isNullOrEmpty()) {
             result.success("failed")
@@ -304,19 +310,6 @@ class MainActivity : FlutterActivity() {
                 return
             }
             val mime = guessMimeFromName(source.name)
-            val isApk = mime == "application/vnd.android.package-archive"
-            if (isApk && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-                !packageManager.canRequestPackageInstalls()
-            ) {
-                startActivity(
-                    Intent(
-                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        Uri.parse("package:$packageName")
-                    )
-                )
-                result.success("permission")
-                return
-            }
             val shareDir = File(cacheDir, "open")
             if (!shareDir.exists()) shareDir.mkdirs()
             val shared = File(shareDir, source.name)
@@ -328,14 +321,86 @@ class MainActivity : FlutterActivity() {
                 setDataAndType(uri, resolved)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            // Package archives go straight to the installer — a chooser
-            // trampoline hides it on several OEM ROMs.
-            if (isApk) {
-                startActivity(intent)
-            } else {
-                startActivity(Intent.createChooser(intent, null))
-            }
+            startActivity(Intent.createChooser(intent, null))
             result.success("opened")
+        } catch (e: Exception) {
+            result.success("failed")
+        }
+    }
+
+    /// Saves a received package archive (APK) into the public Downloads
+    /// folder — Android 10+ through MediaStore (no permission required),
+    /// older releases via the legacy public dir (the Dart side requests the
+    /// storage grant and retries once when it gets "permission"). Returns
+    /// "saved", "permission" or "failed". The app deliberately does not
+    /// install packages itself: Google Play restricts the install-packages
+    /// permission, so the user installs from the system file manager.
+    private fun saveApkToDownloads(path: String?, result: MethodChannel.Result) {
+        if (path.isNullOrEmpty()) {
+            result.success("failed")
+            return
+        }
+        try {
+            val source = File(path)
+            if (!source.exists()) {
+                result.success("failed")
+                return
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, source.name)
+                    put(
+                        MediaStore.MediaColumns.MIME_TYPE,
+                        "application/vnd.android.package-archive"
+                    )
+                    put(
+                        MediaStore.MediaColumns.RELATIVE_PATH,
+                        Environment.DIRECTORY_DOWNLOADS
+                    )
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                val resolver = contentResolver
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                if (uri == null) {
+                    result.success("failed")
+                    return
+                }
+                try {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        source.inputStream().use { it.copyTo(out) }
+                    } ?: throw IllegalStateException("no output stream")
+                    values.clear()
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                } catch (e: Exception) {
+                    resolver.delete(uri, null, null)
+                    throw e
+                }
+                result.success("saved")
+            } else {
+                val dir =
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (!dir.exists()) dir.mkdirs()
+                var target = File(dir, source.name)
+                if (target.exists()) {
+                    target = File(
+                        dir,
+                        "${source.nameWithoutExtension}-${System.currentTimeMillis()}.${source.extension}"
+                    )
+                }
+                target.outputStream().use { out ->
+                    source.inputStream().use { it.copyTo(out) }
+                }
+                MediaScannerConnection.scanFile(
+                    this,
+                    arrayOf(target.absolutePath),
+                    arrayOf("application/vnd.android.package-archive"),
+                    null
+                )
+                result.success("saved")
+            }
+        } catch (e: SecurityException) {
+            result.success("permission")
         } catch (e: Exception) {
             result.success("failed")
         }

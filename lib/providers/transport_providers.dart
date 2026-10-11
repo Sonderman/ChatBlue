@@ -7,6 +7,10 @@ import 'package:chatblue/core/services/wd_service.dart';
 import 'package:chatblue/data/settings_repository.dart';
 import 'package:chatblue/l10n/app_localizations.dart';
 import 'package:chatblue/providers/app_providers.dart';
+// Mutual import with the Nearby notifier (which imports this file): the
+// cross-transport scan exclusion needs ALL three transport providers in
+// scope (Dart allows the cycle; provider finals are lazily initialized).
+import 'package:chatblue/providers/nearby_transport_providers.dart';
 import 'package:chatblue/screens/chat_ui/connection_notice.dart';
 import 'package:chatblue/screens/chat_ui/connection_request.dart';
 import 'package:chatblue/screens/b_chatscreen/b_chat_screen.dart';
@@ -472,12 +476,32 @@ class BtTransportNotifier extends Notifier<BtTransportState> {
   }
 
   Future<void> startScan() async {
+    await _stopOtherTransportScans();
     _clearScanTimers();
     state = state.copyWith(scanResults: const []);
     // The session deadline lives here, not in the service: every re-arm
     // would cancel a service-side auto-stop timer.
     _scanSessionTimer = Timer(_scanSessionDuration, stopScan);
     await _service.startScan();
+  }
+
+  /// Cross-transport scan exclusion: two radios scanning at once waste
+  /// battery and interfere with each other — starting a scan stops the
+  /// OTHER transports' discovery/scan sessions. Connections and server
+  /// (discoverable) modes are never touched, only the scan loops.
+  Future<void> _stopOtherTransportScans() async {
+    if (ref.read(wdTransportProvider).isScanning) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('BT scan: stopping the Wi‑Fi Direct discovery');
+      }
+      await ref.read(wdTransportProvider.notifier).stopDiscovery();
+    }
+    if (ref.read(nearbyTransportProvider).isScanning) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('BT scan: stopping the Nearby scan');
+      }
+      await ref.read(nearbyTransportProvider.notifier).stopScan();
+    }
   }
 
   Future<void> stopScan() async {
@@ -1086,6 +1110,7 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
     // it is off — block here and let the screen show the location panel.
     await refreshLocationState();
     if (!state.isLocationOn) return;
+    await _stopOtherTransportScans();
     state = state.copyWith(peers: const []);
     await _service.startDiscovery();
     state = state.copyWith(isScanning: true);
@@ -1094,6 +1119,24 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
   Future<void> stopDiscovery() async {
     await _service.stopDiscovery();
     state = state.copyWith(isScanning: false);
+  }
+
+  /// Cross-transport scan exclusion (same rule as the Bluetooth notifier):
+  /// a discovery start stops the other transports' scan loops; connections
+  /// and server modes stay untouched.
+  Future<void> _stopOtherTransportScans() async {
+    if (ref.read(btTransportProvider).isScanning) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('WFD discovery: stopping the Bluetooth scan');
+      }
+      await ref.read(btTransportProvider.notifier).stopScan();
+    }
+    if (ref.read(nearbyTransportProvider).isScanning) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('WFD discovery: stopping the Nearby scan');
+      }
+      await ref.read(nearbyTransportProvider.notifier).stopScan();
+    }
   }
 
   Future<void> _refreshWifiState() async {
@@ -1256,6 +1299,8 @@ class WdTransportNotifier extends Notifier<WdTransportState> {
 
     state = state.copyWith(peers: const []);
     _suppressScanErrors = true;
+    // A dial-driven discovery is still a scan: keep the one-radio rule.
+    await _stopOtherTransportScans();
     final flowStart = DateTime.now();
     DateTime? firstPeerAt;
     ({WdPeerInfo? match, List<WdPeerInfo> candidates}) settle() =>

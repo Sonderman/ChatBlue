@@ -7,11 +7,13 @@ import 'package:chatblue/data/db/app_database.dart';
 import 'package:chatblue/data/settings_repository.dart';
 import 'package:chatblue/l10n/app_localizations_en.dart';
 import 'package:chatblue/providers/app_providers.dart';
+import 'package:chatblue/providers/nearby_transport_providers.dart';
 import 'package:chatblue/providers/transport_providers.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'support/fake_bt_service.dart';
+import 'support/fake_nearby_service.dart';
 import 'support/fake_wd_service.dart';
 
 /// Transport notifier contract: service events drive UI state, the READY
@@ -39,6 +41,16 @@ void main() {
                 sessionScanWindow: sessionScanWindow,
                 sessionScanPoll: sessionScanPoll,
               ),
+            ),
+            // Sibling transports exist so the cross-transport scan exclusion
+            // has something to read (idle fakes → the stop paths no-op);
+            // without them the exclusion would construct the REAL
+            // platform-channel-backed notifiers inside tests.
+            wdTransportProvider.overrideWith(
+              () => WdTransportNotifier(service: FakeWdService()),
+            ),
+            nearbyTransportProvider.overrideWith(
+              () => NearbyTransportNotifier(service: FakeNearbyService()),
             ),
             appLocalizationsProvider.overrideWithValue(AppLocalizationsEn()),
           ],
@@ -515,6 +527,14 @@ void main() {
           btTransportProvider.overrideWith(
             () => BtTransportNotifier(service: service2),
           ),
+          // Siblings for the cross-transport scan exclusion (see the group's
+          // container note).
+          wdTransportProvider.overrideWith(
+            () => WdTransportNotifier(service: FakeWdService()),
+          ),
+          nearbyTransportProvider.overrideWith(
+            () => NearbyTransportNotifier(service: FakeNearbyService()),
+          ),
           appLocalizationsProvider.overrideWithValue(AppLocalizationsEn()),
         ],
       );
@@ -677,6 +697,14 @@ void main() {
           overrides: [
             wdTransportProvider.overrideWith(
               () => WdTransportNotifier(service: service),
+            ),
+            // Siblings for the cross-transport scan exclusion (see the
+            // Bluetooth group's container note).
+            btTransportProvider.overrideWith(
+              () => BtTransportNotifier(service: FakeBtService()),
+            ),
+            nearbyTransportProvider.overrideWith(
+              () => NearbyTransportNotifier(service: FakeNearbyService()),
             ),
             appLocalizationsProvider.overrideWithValue(AppLocalizationsEn()),
           ],

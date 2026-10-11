@@ -355,6 +355,7 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
       // The screen shows the "turn on Location" panel; never touch native.
       return;
     }
+    await _stopOtherTransportScans();
     final name = _ownDeviceName ??= await _resolveOwnDeviceName();
     final uid = _ownUid ??= await DeviceIdService.get();
     if (!ref.mounted) return;
@@ -365,6 +366,25 @@ class NearbyTransportNotifier extends Notifier<NearbyTransportState> {
   Future<void> stopScan() async {
     await _service.stopScan();
     state = state.copyWith(isScanning: false);
+  }
+
+  /// Cross-transport scan exclusion (same rule as the other notifiers):
+  /// starting a Nearby scan stops the other transports' scan loops.
+  /// Advertise is part of the same Nearby session, so it stops with the
+  /// scan; connections and server modes stay untouched.
+  Future<void> _stopOtherTransportScans() async {
+    if (ref.read(btTransportProvider).isScanning) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Nearby scan: stopping the Bluetooth scan');
+      }
+      await ref.read(btTransportProvider.notifier).stopScan();
+    }
+    if (ref.read(wdTransportProvider).isScanning) {
+      if (kDebugMode && showDebugLogs) {
+        debugPrint('Nearby scan: stopping the Wi‑Fi Direct discovery');
+      }
+      await ref.read(wdTransportProvider.notifier).stopDiscovery();
+    }
   }
 
   Future<bool> connectToDevice(NearbyPeerInfo peer) =>

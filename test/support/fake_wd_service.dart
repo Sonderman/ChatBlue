@@ -33,8 +33,14 @@ class FakeWdService extends WifiDirectService {
     startDiscoveryCalls++;
   }
 
+  /// Number of [stopDiscovery] calls — the cross-transport scan exclusion
+  /// tests assert that a scan start stops the OTHER transports' scan loops.
+  int stopDiscoveryCalls = 0;
+
   @override
-  Future<void> stopDiscovery() async {}
+  Future<void> stopDiscovery() async {
+    stopDiscoveryCalls++;
+  }
 
   @override
   Future<void> requestPeers() async {}

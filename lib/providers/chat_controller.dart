@@ -3150,13 +3150,16 @@ class ChatController extends Notifier<ChatState>
     );
   }
 
-  /// Opens a received file with the system viewer (util channel); shows a
-  /// notice when the file is missing or nothing can open it, and a
-  /// settings pointer when an APK still needs the install-unknown-apps
-  /// grant (the native side opens that settings page instead of the
-  /// installer, which would otherwise swallow the intent silently).
+  /// Opens a received file with the system viewer (util channel). Package
+  /// archives (APK) are NOT opened here — the app holds no install-packages
+  /// permission (Google Play restricts it), so they are saved into the
+  /// public Downloads folder and the notice points at the file manager.
   Future<void> openReceivedFile(String path) async {
     if (_closed) return;
+    if (path.toLowerCase().endsWith('.apk')) {
+      await _saveApkToDownloads(path);
+      return;
+    }
     var outcome = 'failed';
     try {
       outcome = await UtilPlatformChannel.openFile(path);
@@ -3165,11 +3168,40 @@ class ChatController extends Notifier<ChatState>
     }
     if (_closed || outcome == 'opened') return;
     final l10n = ref.read(appLocalizationsProvider);
-    if (outcome == 'permission') {
+    _showNotice(
+      l10n.fileOpenFailedTitle,
+      l10n.fileOpenFailed,
+      icon: Icons.error_outline,
+    );
+  }
+
+  /// Copies a received APK into the public Downloads folder so the user can
+  /// install it from the file manager (Android 10+ via MediaStore — no
+  /// permission needed; below 10 a storage grant is requested and the copy
+  /// retried once).
+  Future<void> _saveApkToDownloads(String path) async {
+    var outcome = 'failed';
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        outcome = await UtilPlatformChannel.saveApkToDownloads(path);
+      } catch (e) {
+        if (kDebugMode && showDebugLogs) {
+          debugPrint('saveApkToDownloads failed: $e');
+        }
+        outcome = 'failed';
+      }
+      if (outcome != 'permission' || _closed) break;
+      final status = await Permission.storage.request();
+      if (!status.isGranted) break;
+    }
+    if (_closed) return;
+    final l10n = ref.read(appLocalizationsProvider);
+    if (outcome == 'saved') {
       _showNotice(
-        l10n.installPermissionTitle,
-        l10n.installPermissionMessage,
-        icon: Icons.app_settings_alt_outlined,
+        l10n.apkSavedTitle,
+        l10n.apkSavedMessage,
+        icon: Icons.download_done_outlined,
+        accent: Colors.green,
       );
       return;
     }
