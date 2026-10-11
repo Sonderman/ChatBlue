@@ -110,7 +110,7 @@ For a deeper technical overview, see: `project_overview.md`.
 Contributions are welcome! Please open an issue to discuss significant changes before submitting a PR. Make sure to run formatting and address lints.
 
 ### License
-This project is available under the license found in `LICENSE`.
+ChatBlue is free software, licensed under the **GNU General Public License v3.0 or later** — see [`LICENSE`](LICENSE). Copyright (C) 2025-2026 Sonderman.
 
 ### Acknowledgements
 - Flutter team and ecosystem packages: Riverpod, drift, record, just_audio, file_picker, geolocator, image picker/compress, permission handler, etc.
